@@ -1,48 +1,34 @@
-import { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useMemo, useState } from 'react';
+import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 
 const Signup = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
+  const [department, setDepartment] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [success, setSuccess] = useState(false);
   const { signUp } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const invitedEmail = useMemo(() => searchParams.get('email')?.trim() || '', [searchParams]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setLoading(true);
-    const { error } = await signUp(email, password, displayName);
+    const { error } = await signUp(email, password, displayName, department);
     if (error) {
       setError(error.message);
       setLoading(false);
     } else {
-      setSuccess(true);
-      setLoading(false);
+      navigate('/');
     }
   };
 
-  if (success) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background px-4">
-        <div className="w-full max-w-sm text-center">
-          <div className="w-12 h-12 rounded-xl bg-complete mx-auto mb-4 flex items-center justify-center">
-            <span className="text-complete-foreground text-xl">✓</span>
-          </div>
-          <h1 className="text-2xl font-bold text-foreground">Check your email</h1>
-          <p className="text-sm text-muted-foreground mt-2">We've sent a confirmation link to <strong>{email}</strong></p>
-          <Link to="/login" className="inline-block mt-6 text-sm text-primary hover:underline">Back to login</Link>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background px-4">
+    <div className="flex min-h-full items-center justify-center overflow-y-auto bg-background px-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
           <div className="w-12 h-12 rounded-xl bg-primary mx-auto mb-4 flex items-center justify-center">
@@ -68,10 +54,21 @@ const Signup = () => {
             />
           </div>
           <div>
+            <label className="block text-sm font-medium text-foreground mb-1">Department</label>
+            <input
+              type="text"
+              value={department}
+              onChange={(e) => setDepartment(e.target.value)}
+              required
+              className="w-full px-3 py-2 text-sm border border-input rounded-lg bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              placeholder="Web Development / Google Ads"
+            />
+          </div>
+          <div>
             <label className="block text-sm font-medium text-foreground mb-1">Email</label>
             <input
               type="email"
-              value={email}
+              value={email || invitedEmail}
               onChange={(e) => setEmail(e.target.value)}
               required
               className="w-full px-3 py-2 text-sm border border-input rounded-lg bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"

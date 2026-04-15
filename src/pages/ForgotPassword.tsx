@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { supabase } from '@/integrations/supabase/client';
+import { api } from '@/lib/api';
 
 const ForgotPassword = () => {
   const [email, setEmail] = useState('');
@@ -12,23 +12,21 @@ const ForgotPassword = () => {
     e.preventDefault();
     setLoading(true);
     setError('');
-    const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${window.location.origin}/reset-password`,
-    });
-    if (error) {
-      setError(error.message);
-    } else {
+    try {
+      await api.auth.forgotPassword(email);
       setSent(true);
+    } catch (requestError) {
+      setError((requestError as Error).message);
     }
     setLoading(false);
   };
 
   if (sent) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background px-4">
+      <div className="flex min-h-full items-center justify-center overflow-y-auto bg-background px-4">
         <div className="w-full max-w-sm text-center">
-          <h1 className="text-2xl font-bold text-foreground">Check your email</h1>
-          <p className="text-sm text-muted-foreground mt-2">Password reset link sent to <strong>{email}</strong></p>
+          <h1 className="text-2xl font-bold text-foreground">Reset flow disabled</h1>
+          <p className="text-sm text-muted-foreground mt-2">For now, password reset requires login from app settings. Request noted for backend mail support.</p>
           <Link to="/login" className="inline-block mt-6 text-sm text-primary hover:underline">Back to login</Link>
         </div>
       </div>
@@ -36,7 +34,7 @@ const ForgotPassword = () => {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background px-4">
+    <div className="flex min-h-full items-center justify-center overflow-y-auto bg-background px-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
           <h1 className="text-2xl font-bold text-foreground">Forgot password?</h1>

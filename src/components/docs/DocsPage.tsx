@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { formatDistanceToNow, parseISO } from 'date-fns';
-import { BookOpen, Download, FileText, Lightbulb, PlusCircle, ShieldCheck } from 'lucide-react';
+import { BookOpen, Download, FileText, Lightbulb, PlusCircle, ShieldCheck, Trash2 } from 'lucide-react';
 import type { WorkspaceDoc } from '@/types';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
@@ -17,14 +17,16 @@ interface DocsPageProps {
     fileType?: string;
     fileDataUrl?: string;
   }) => Promise<void>;
+  onDeleteDoc?: (docId: string) => Promise<void>;
 }
 
-export function DocsPage({ workspaceName, docs, loading, canUpload, onUpload }: DocsPageProps) {
+export function DocsPage({ workspaceName, docs, loading, canUpload, onUpload, onDeleteDoc }: DocsPageProps) {
   const [title, setTitle] = useState('');
   const [category, setCategory] = useState<'sop' | 'policy' | 'guideline' | 'other'>('sop');
   const [notes, setNotes] = useState('');
   const [selectedFile, setSelectedFile] = useState<{ name: string; type: string; dataUrl: string } | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
 
   const groupedCount = useMemo(() => {
     return docs.reduce(
@@ -211,6 +213,26 @@ export function DocsPage({ workspaceName, docs, loading, canUpload, onUpload }: 
                           <Download className="h-3.5 w-3.5" />
                           {doc.file_name || 'Download'}
                         </a>
+                      )}
+                      {canUpload && onDeleteDoc && (
+                        <button
+                          type="button"
+                          disabled={deletingDocId === doc.id}
+                          onClick={async () => {
+                            const ok = window.confirm(`Delete "${doc.title}"?`);
+                            if (!ok) return;
+                            setDeletingDocId(doc.id);
+                            try {
+                              await onDeleteDoc(doc.id);
+                            } finally {
+                              setDeletingDocId(null);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 rounded-md border border-destructive/40 px-2 py-1 text-[11px] text-destructive hover:bg-destructive/10 disabled:opacity-60"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          {deletingDocId === doc.id ? 'Deleting...' : 'Delete'}
+                        </button>
                       )}
                     </div>
                   </li>

@@ -131,6 +131,19 @@ const Index = () => {
     });
   }, [workspaces, spaces, lists, rolesByWorkspaceId, user?.department]);
 
+  const addTaskDepartmentOptions = useMemo(() => {
+    if (!activeWorkspaceId) return [] as Array<{ id: string; name: string }>;
+    const section = workspaceSections.find((s) => s.id === activeWorkspaceId);
+    const master = section?.spaces.find((s) => s.isMasterFolder);
+    if (!master?.children) return [] as Array<{ id: string; name: string }>;
+    return master.children
+      .map((child) => ({
+        id: child.lists[0]?.id ?? '',
+        name: child.name,
+      }))
+      .filter((x) => Boolean(x.id));
+  }, [activeWorkspaceId, workspaceSections]);
+
   const exportWorkspaceEntity = useMemo(
     () => workspaces.find((w) => w.id === exportReportWorkspaceId) ?? null,
     [workspaces, exportReportWorkspaceId]
@@ -552,6 +565,7 @@ const Index = () => {
   };
 
   const createTask = async (payload: {
+    listId?: string;
     status: string;
     title: string;
     priority: 'urgent' | 'high' | 'normal' | 'low';
@@ -561,13 +575,14 @@ const Index = () => {
     endDate?: string;
     description?: string;
   }) => {
-    if (!user || !activeList) return;
+    const targetListId = payload.listId || activeList;
+    if (!user || !targetListId) return;
     if (!canCreateTasks) {
       window.alert('Guest role task create nahi kar sakta.');
       return;
     }
     const { task: data } = await api.app.createTask({
-      listId: activeList,
+      listId: targetListId,
       title: payload.title,
       status: payload.status,
       priority: payload.priority,
@@ -596,7 +611,7 @@ const Index = () => {
     ]);
     toast.success(`Task "${data.title}" created.`);
 
-    hydrateTasks(activeList).catch((refreshError) => console.error('Task refresh failed after create', refreshError));
+    hydrateTasks(targetListId).catch((refreshError) => console.error('Task refresh failed after create', refreshError));
   };
 
   const moveTask = async (taskId: string, nextStatus: string) => {
@@ -842,6 +857,12 @@ const Index = () => {
                 await fetchWorkspaceDocs(activeWorkspaceId);
                 toast.success('Document uploaded successfully.');
               }}
+              onDeleteDoc={async (docId) => {
+                if (!activeWorkspaceId) throw new Error('No active workspace selected');
+                await api.app.deleteWorkspaceDoc(activeWorkspaceId, docId);
+                await fetchWorkspaceDocs(activeWorkspaceId);
+                toast.success('Document deleted successfully.');
+              }}
             />
           ) : pageView === 'timesheets' ? (
             <TimesheetsPage tasks={tasks} />
@@ -851,6 +872,7 @@ const Index = () => {
               spaceName={activeSpace?.name ?? 'No Space'}
               listName={activeListEntity?.name ?? 'Select List'}
               listTabs={activeSpaceLists.map((list) => ({ id: list.id, name: list.name }))}
+              addTaskListOptions={addTaskDepartmentOptions}
               activeListId={activeList}
               onSelectList={handleSelectList}
               tasks={tasks}

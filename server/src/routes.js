@@ -551,6 +551,18 @@ export function buildRoutes() {
     });
   });
 
+  router.delete('/workspaces/:workspaceId/docs/:docId', requireAuth, async (req, res) => {
+    const { workspaceId, docId } = req.params;
+    const role = await getRole(workspaceId, req.session.userId);
+    if (!canManageWorkspace(role)) return res.status(403).json({ message: 'Only admin can delete docs' });
+
+    const doc = await WorkspaceDoc.findOne({ _id: docId, workspaceId }).lean();
+    if (!doc) return res.status(404).json({ message: 'Document not found' });
+
+    await WorkspaceDoc.deleteOne({ _id: docId, workspaceId });
+    res.json({ ok: true });
+  });
+
   router.post('/auth/forgot-password', (_req, res) => {
     res.json({ ok: true, message: 'Password reset email flow disabled in local migration.' });
   });

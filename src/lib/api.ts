@@ -129,5 +129,7 @@ export const api = {
         notes?: string;
       }
     ) => request(`/workspaces/${workspaceId}/docs`, { method: 'POST', body: JSON.stringify(payload) }),
+    deleteWorkspaceDoc: (workspaceId: string, docId: string) =>
+      request(`/workspaces/${workspaceId}/docs/${docId}`, { method: 'DELETE' }),
   },
 };

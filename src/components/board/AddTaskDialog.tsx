@@ -27,9 +27,14 @@ interface AddTaskDialogProps {
   status: string;
   /** When set, status dropdown uses these (e.g. list columns including custom). */
   statusOptions?: { value: string; label: string }[];
+  /** Optional list selector shown at top-left (Landing Pages). */
+  listOptions?: { id: string; name: string }[];
+  activeListId?: string | null;
+  onSelectList?: (listId: string) => void;
   onClose: () => void;
   memberOptions: { id: string; label: string }[];
   onCreate: (payload: {
+    listId?: string;
     status: string;
     title: string;
     priority: TaskPriority;
@@ -46,6 +51,9 @@ interface AddTaskDialogProps {
 export function AddTaskDialog({
   status,
   statusOptions,
+  listOptions = [],
+  activeListId = null,
+  onSelectList,
   onClose,
   onCreate,
   memberOptions,
@@ -55,6 +63,14 @@ export function AddTaskDialog({
   const [description, setDescription] = useState('');
   const [taskStatus, setTaskStatus] = useState<string>(status);
   const [priority, setPriority] = useState<TaskPriority>('normal');
+  const [selectedListId, setSelectedListId] = useState<string>(activeListId ?? listOptions[0]?.id ?? '');
+  const [docTitle, setDocTitle] = useState('');
+  const [docBody, setDocBody] = useState('');
+  const [reminderTitle, setReminderTitle] = useState('');
+  const [reminderBody, setReminderBody] = useState('');
+  const [whiteboardTitle, setWhiteboardTitle] = useState('');
+  const [dashboardTitle, setDashboardTitle] = useState('');
+  const [isPrivateAsset, setIsPrivateAsset] = useState(false);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [assigneeIds, setAssigneeIds] = useState<string[]>([]);
@@ -78,6 +94,10 @@ export function AddTaskDialog({
   useEffect(() => {
     setTaskStatus(status);
   }, [status]);
+
+  useEffect(() => {
+    if (activeListId) setSelectedListId(activeListId);
+  }, [activeListId]);
 
   const statusSelectOptions = useMemo(() => {
     if (statusOptions && statusOptions.length > 0) return statusOptions;
@@ -105,6 +125,7 @@ export function AddTaskDialog({
   const submitTask = () => {
     if (!title.trim()) return;
     onCreate({
+      listId: selectedListId || undefined,
       status: taskStatus,
       title: title.trim(),
       priority,
@@ -113,6 +134,30 @@ export function AddTaskDialog({
       startDate: startDate || undefined,
       endDate: endDate || undefined,
       description: description.trim() || undefined,
+    });
+  };
+
+  const submitFromNonTaskTab = () => {
+    if (activeTab === 'Task') return;
+    const payloadByTab: Record<'Doc' | 'Reminder' | 'Whiteboard' | 'Dashboard', { title: string; description?: string }> = {
+      Doc: { title: docTitle.trim(), description: docBody.trim() || undefined },
+      Reminder: { title: reminderTitle.trim(), description: reminderBody.trim() || undefined },
+      Whiteboard: { title: whiteboardTitle.trim() },
+      Dashboard: { title: dashboardTitle.trim() },
+    };
+    const selected = payloadByTab[activeTab as 'Doc' | 'Reminder' | 'Whiteboard' | 'Dashboard'];
+    if (!selected.title) return;
+    onCreate({
+      listId: selectedListId || undefined,
+      status: taskStatus,
+      title: `[${activeTab}] ${selected.title}`,
+      description:
+        `${selected.description ? `${selected.description}\n\n` : ''}Asset type: ${activeTab}${isPrivateAsset ? ' (Private)' : ''}`,
+      priority,
+      assigneeIds,
+      notifyOnlyUserIds: notifyOnlyUserIds.length > 0 ? notifyOnlyUserIds : undefined,
+      startDate: startDate || undefined,
+      endDate: endDate || undefined,
     });
   };
 
@@ -278,12 +323,38 @@ export function AddTaskDialog({
               <div className="flex items-center gap-2 mb-6">
                 <div className="flex items-center gap-1.5 px-2 py-1 bg-white border border-gray-200 rounded text-[12px] text-gray-600">
                   <ListTree size={14} className="text-purple-500" />
-                  <span>Landing Pages</span>
+                  <select
+                    value={selectedListId}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setSelectedListId(next);
+                      onSelectList?.(next);
+                    }}
+                    className="bg-transparent outline-none"
+                  >
+                    {(listOptions.length > 0 ? listOptions : [{ id: '', name: 'Department' }]).map((opt) => (
+                      <option key={opt.id || 'default'} value={opt.id}>
+                        {opt.name}
+                      </option>
+                    ))}
+                  </select>
                   <ChevronDown size={14} className="text-gray-400" />
                 </div>
                 <div className="flex items-center gap-1.5 px-2 py-1 bg-white border border-gray-200 rounded text-[12px] text-gray-600">
                   <div className="w-2.5 h-2.5 rounded-full border-2 border-gray-400" />
-                  <span>Task</span>
+                  <select
+                    value={activeTab}
+                    onChange={(e) =>
+                      setActiveTab(e.target.value as 'Task' | 'Doc' | 'Reminder' | 'Whiteboard' | 'Dashboard')
+                    }
+                    className="bg-transparent outline-none"
+                  >
+                    <option value="Task">Task</option>
+                    <option value="Doc">Doc</option>
+                    <option value="Reminder">Reminder</option>
+                    <option value="Whiteboard">Whiteboard</option>
+                    <option value="Dashboard">Dashboard</option>
+                  </select>
                   <ChevronDown size={14} className="text-gray-400" />
                 </div>
               </div>
@@ -495,16 +566,139 @@ export function AddTaskDialog({
             </div>
           </>
         ) : (
-          <div className="p-6 min-h-[260px] flex flex-col justify-between">
-            <div className="text-sm text-gray-500">
-              {activeTab === 'Doc' && 'Create Doc'}
-              {activeTab === 'Reminder' && 'Create Reminder'}
-              {activeTab === 'Whiteboard' && 'Create Whiteboard'}
-              {activeTab === 'Dashboard' && 'Create Dashboard'}
+          <div className="flex min-h-[420px] flex-col">
+            <div className="flex-1 p-6">
+              {(activeTab === 'Doc' || activeTab === 'Whiteboard' || activeTab === 'Dashboard') && (
+                <div className="mb-4 inline-flex items-center gap-1.5 rounded border border-gray-200 bg-white px-2 py-1 text-[12px] text-gray-600">
+                  <ListTree size={14} className="text-gray-500" />
+                  <span>
+                    {activeTab === 'Doc'
+                      ? 'Add to location'
+                      : activeTab === 'Whiteboard'
+                        ? 'My Whiteboards'
+                        : 'My Dashboards'}
+                  </span>
+                  <ChevronDown size={14} className="text-gray-400" />
+                </div>
+              )}
+
+              {activeTab === 'Doc' && (
+                <div className="space-y-4">
+                  <input
+                    type="text"
+                    value={docTitle}
+                    onChange={(e) => setDocTitle(e.target.value)}
+                    placeholder="Name this Doc..."
+                    className="w-full text-3xl font-semibold text-gray-700 outline-none placeholder:text-gray-400"
+                  />
+                  <input
+                    type="text"
+                    value={docBody}
+                    onChange={(e) => setDocBody(e.target.value)}
+                    placeholder="Start writing"
+                    className="w-full text-lg text-gray-600 outline-none placeholder:text-gray-400"
+                  />
+                  <button type="button" className="text-[14px] text-gray-500 hover:text-gray-700">
+                    Write with AI
+                  </button>
+                  <div className="pt-2">
+                    <p className="mb-2 text-[14px] text-gray-500">Add new</p>
+                    <div className="space-y-2 text-[15px] text-gray-600">
+                      <div className="flex items-center gap-2"><LayoutGrid size={15} /> Table</div>
+                      <div className="flex items-center gap-2"><ListTree size={15} /> Column</div>
+                      <div className="flex items-center gap-2"><ListTree size={15} /> ClickUp List</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === 'Reminder' && (
+                <div className="space-y-5">
+                  <input
+                    type="text"
+                    value={reminderTitle}
+                    onChange={(e) => setReminderTitle(e.target.value)}
+                    placeholder="Reminder name or type '/' for commands"
+                    className="w-full text-3xl font-semibold text-gray-700 outline-none placeholder:text-gray-400"
+                  />
+                  <input
+                    type="text"
+                    value={reminderBody}
+                    onChange={(e) => setReminderBody(e.target.value)}
+                    placeholder="Add description"
+                    className="w-full text-lg text-gray-600 outline-none placeholder:text-gray-400"
+                  />
+                  <div className="flex items-center gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setEndDate(new Date().toISOString().slice(0, 10))}
+                      className="rounded border border-gray-200 px-2.5 py-1.5 text-[12px] text-gray-700 hover:bg-gray-50"
+                    >
+                      Today
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAssigneeIds(memberOptions[0]?.id ? [memberOptions[0].id] : [])}
+                      className="rounded border border-gray-200 px-2.5 py-1.5 text-[12px] text-gray-700 hover:bg-gray-50"
+                    >
+                      For me
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNotifyOnlyUserIds(memberOptions[0]?.id ? [memberOptions[0].id] : [])}
+                      className="rounded border border-gray-200 px-2.5 py-1.5 text-[12px] text-gray-700 hover:bg-gray-50"
+                    >
+                      Notify me
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === 'Whiteboard' && (
+                <div className="space-y-4">
+                  <input
+                    type="text"
+                    value={whiteboardTitle}
+                    onChange={(e) => setWhiteboardTitle(e.target.value)}
+                    placeholder="Name this Whiteboard..."
+                    className="w-full text-3xl font-semibold text-gray-700 outline-none placeholder:text-gray-400"
+                  />
+                </div>
+              )}
+
+              {activeTab === 'Dashboard' && (
+                <div className="space-y-4">
+                  <input
+                    type="text"
+                    value={dashboardTitle}
+                    onChange={(e) => setDashboardTitle(e.target.value)}
+                    placeholder="Name this Dashboard..."
+                    className="w-full text-3xl font-semibold text-gray-700 outline-none placeholder:text-gray-400"
+                  />
+                </div>
+              )}
             </div>
-            <button className="self-end h-8 px-4 bg-purple-600 text-white rounded text-xs font-semibold">
-              Create {activeTab}
-            </button>
+
+            <div className="flex items-center justify-between border-t border-gray-100 bg-gray-50/30 px-6 py-4 rounded-b-xl">
+              <label className="inline-flex items-center gap-2 text-[13px] text-gray-600">
+                <input
+                  type="checkbox"
+                  checked={isPrivateAsset}
+                  onChange={(e) => setIsPrivateAsset(e.target.checked)}
+                />
+                Private
+              </label>
+              <div className="flex items-center gap-4">
+                {activeTab === 'Reminder' && <Paperclip size={16} className="text-gray-400" />}
+                <button
+                  type="button"
+                  onClick={submitFromNonTaskTab}
+                  className="rounded bg-[#7C4DFF] px-5 py-2 text-[14px] font-bold text-white hover:bg-[#6b3deb]"
+                >
+                  Create {activeTab}
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </div>

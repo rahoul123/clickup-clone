@@ -71,11 +71,13 @@ interface KanbanBoardProps {
   spaceName: string;
   listName?: string;
   listTabs: { id: string; name: string }[];
+  addTaskListOptions?: { id: string; name: string }[];
   activeListId: string | null;
   onSelectList: (listId: string) => void;
   tasks: Task[];
   memberOptions: { id: string; label: string }[];
   onCreateTask: (payload: {
+    listId?: string;
     status: string;
     title: string;
     priority: TaskPriority;
@@ -133,6 +135,7 @@ export function KanbanBoard({
   spaceName,
   listName = 'Select list',
   listTabs,
+  addTaskListOptions = [],
   activeListId,
   onSelectList,
   tasks,
@@ -253,6 +256,7 @@ export function KanbanBoard({
   );
 
   const handleCreateTask = (payload: {
+    listId?: string;
     status: string;
     title: string;
     priority: TaskPriority;
@@ -613,6 +617,9 @@ export function KanbanBoard({
         <AddTaskDialog
           status={addTaskStatus}
           statusOptions={statusOptions}
+          listOptions={addTaskListOptions.length > 0 ? addTaskListOptions : listTabs}
+          activeListId={activeListId}
+          onSelectList={onSelectList}
           onClose={() => setAddTaskStatus(null)}
           onCreate={handleCreateTask}
           memberOptions={memberOptions}

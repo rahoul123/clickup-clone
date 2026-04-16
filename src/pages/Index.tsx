@@ -134,8 +134,8 @@ const Index = () => {
   const addTaskDepartmentOptions = useMemo(() => {
     if (!activeWorkspaceId) return [] as Array<{ id: string; name: string }>;
     const section = workspaceSections.find((s) => s.id === activeWorkspaceId);
-    const master = section?.spaces.find((s) => s.isMasterFolder);
-    if (!master?.children) return [] as Array<{ id: string; name: string }>;
+    const master = section?.spaces.find((s) => 'isMasterFolder' in s && s.isMasterFolder);
+    if (!master || !('children' in master) || !master.children) return [] as Array<{ id: string; name: string }>;
     return master.children
       .map((child) => ({
         id: child.lists[0]?.id ?? '',

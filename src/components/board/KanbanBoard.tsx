@@ -10,12 +10,13 @@ import {
   MessageSquare,
   ChevronDown,
   ChevronUp,
+  ChevronsRight,
 } from 'lucide-react';
 import type { Task, TaskStatus, TaskPriority } from '@/types';
 import { BoardColumn } from './BoardColumn';
 import { AddTaskDialog } from './AddTaskDialog';
 import { InlineTaskComposer } from './InlineTaskComposer';
-import { DEFAULT_KANBAN_COLUMN_ORDER, STATUS_CONFIG, PRIORITY_CONFIG } from '@/types';
+import { DEFAULT_KANBAN_COLUMN_ORDER, STATUS_CONFIG, PRIORITY_CONFIG, isBuiltinTaskStatus } from '@/types';
 import { TaskDetailDialog } from './TaskDetailDialog';
 import { api } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -29,25 +30,40 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
-function resolveColumnOrder(order: TaskStatus[] | null | undefined): TaskStatus[] {
-  if (!order || order.length !== DEFAULT_KANBAN_COLUMN_ORDER.length) {
-    return [...DEFAULT_KANBAN_COLUMN_ORDER];
+function resolveColumnOrder(
+  order: string[] | null | undefined,
+  customColumns: Array<{ id: string }>
+): string[] {
+  const customIds = customColumns.map((c) => c.id);
+  const defaultOrd = [...DEFAULT_KANBAN_COLUMN_ORDER, ...customIds];
+  if (!order || order.length < 1) {
+    return defaultOrd;
   }
   const set = new Set(order);
-  if (set.size !== DEFAULT_KANBAN_COLUMN_ORDER.length) return [...DEFAULT_KANBAN_COLUMN_ORDER];
-  for (const s of DEFAULT_KANBAN_COLUMN_ORDER) {
-    if (!set.has(s)) return [...DEFAULT_KANBAN_COLUMN_ORDER];
+  if (set.size !== order.length) return defaultOrd;
+  const allowed = new Set([...DEFAULT_KANBAN_COLUMN_ORDER, ...customIds]);
+  for (const id of customIds) {
+    if (!set.has(id)) return defaultOrd;
+  }
+  for (const k of order) {
+    if (!allowed.has(k)) {
+      return defaultOrd;
+    }
   }
   return [...order];
 }
 
 function columnLabelForStatus(
-  status: TaskStatus,
-  labels: Partial<Record<TaskStatus, string>> | undefined
+  columnKey: string,
+  labels: Partial<Record<string, string>> | undefined,
+  customColumns: Array<{ id: string; label: string }>
 ): string {
-  const custom = labels?.[status]?.trim();
-  if (custom) return custom.toUpperCase();
-  return STATUS_CONFIG[status].label;
+  const override = labels?.[columnKey]?.trim();
+  if (override) return override.toUpperCase();
+  if (isBuiltinTaskStatus(columnKey)) return STATUS_CONFIG[columnKey].label;
+  const found = customColumns.find((c) => c.id === columnKey);
+  if (found) return found.label.toUpperCase();
+  return columnKey.toUpperCase();
 }
 
 interface KanbanBoardProps {
@@ -60,7 +76,7 @@ interface KanbanBoardProps {
   tasks: Task[];
   memberOptions: { id: string; label: string }[];
   onCreateTask: (payload: {
-    status: TaskStatus;
+    status: string;
     title: string;
     priority: TaskPriority;
     assigneeIds: string[];
@@ -69,13 +85,13 @@ interface KanbanBoardProps {
     endDate?: string;
     description?: string;
   }) => Promise<void> | void;
-  onMoveTask: (taskId: string, status: TaskStatus) => Promise<void> | void;
+  onMoveTask: (taskId: string, status: string) => Promise<void> | void;
   onUpdateTask: (
     taskId: string,
     payload: {
       title?: string;
       description?: string;
-      status?: TaskStatus;
+      status?: string;
       priority?: TaskPriority;
       assigneeIds?: string[];
       startDate?: string;
@@ -87,14 +103,30 @@ interface KanbanBoardProps {
   /** When set from Home inbox, open the task detail once tasks include this id */
   taskToOpenId?: string | null;
   onConsumedTaskOpen?: () => void;
-  kanbanColumnOrder?: TaskStatus[] | null;
-  kanbanColumnLabels?: Partial<Record<TaskStatus, string>>;
+  kanbanColumnOrder?: string[] | null;
+  kanbanColumnLabels?: Partial<Record<string, string>>;
+  kanbanCustomColumns?: Array<{ id: string; label: string; color?: string }>;
   canManageKanban?: boolean;
   onUpdateKanban?: (payload: {
-    kanbanColumnOrder?: TaskStatus[];
-    kanbanColumnLabels?: Partial<Record<TaskStatus, string>>;
+    kanbanColumnOrder?: string[];
+    kanbanColumnLabels?: Partial<Record<string, string>>;
+    addKanbanColumn?: { label: string; color?: string };
+    updateKanbanCustomColumn?: { id: string; label: string; color?: string };
+    deleteKanbanCustomColumn?: { id: string };
+    deleteKanbanColumn?: { id: string };
   }) => Promise<void> | void;
 }
+
+const CUSTOM_COLUMN_COLOR_OPTIONS = [
+  '#A855F7',
+  '#3B82F6',
+  '#10B981',
+  '#F59E0B',
+  '#EF4444',
+  '#14B8A6',
+  '#6366F1',
+  '#EC4899',
+];
 
 export function KanbanBoard({
   workspaceName,
@@ -114,14 +146,15 @@ export function KanbanBoard({
   onConsumedTaskOpen,
   kanbanColumnOrder = null,
   kanbanColumnLabels: kanbanLabelsProp,
+  kanbanCustomColumns = [],
   canManageKanban = false,
   onUpdateKanban,
 }: KanbanBoardProps) {
   const { user } = useAuth();
   const [activeView, setActiveView] = useState<'board' | 'list' | 'discussion'>('board');
-  const [addTaskStatus, setAddTaskStatus] = useState<TaskStatus | null>(null);
+  const [addTaskStatus, setAddTaskStatus] = useState<string | null>(null);
   /** Column “+ Add Task” — quick inline composer (2nd screenshot style) */
-  const [inlineComposeStatus, setInlineComposeStatus] = useState<TaskStatus | null>(null);
+  const [inlineComposeStatus, setInlineComposeStatus] = useState<string | null>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const homeOpenRef = useRef<string | null>(null);
   const [taskComments, setTaskComments] = useState<
@@ -137,13 +170,39 @@ export function KanbanBoard({
     }>
   >([]);
   const [loadingComments, setLoadingComments] = useState(false);
-  const [renameStatus, setRenameStatus] = useState<TaskStatus | null>(null);
+  const [renameStatus, setRenameStatus] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState('');
   const [reorderOpen, setReorderOpen] = useState(false);
-  const [draftColumnOrder, setDraftColumnOrder] = useState<TaskStatus[]>([...DEFAULT_KANBAN_COLUMN_ORDER]);
+  const [draftColumnOrder, setDraftColumnOrder] = useState<string[]>([...DEFAULT_KANBAN_COLUMN_ORDER]);
+  const [addColumnOpen, setAddColumnOpen] = useState(false);
+  const [newColumnName, setNewColumnName] = useState('');
+  const [newColumnColor, setNewColumnColor] = useState<string>('#A855F7');
+  const [collapsedColumnKeys, setCollapsedColumnKeys] = useState<string[]>([]);
 
-  const columnOrder = useMemo(() => resolveColumnOrder(kanbanColumnOrder), [kanbanColumnOrder]);
+  const columnOrder = useMemo(
+    () => resolveColumnOrder(kanbanColumnOrder, kanbanCustomColumns),
+    [kanbanColumnOrder, kanbanCustomColumns]
+  );
   const kanbanColumnLabels = kanbanLabelsProp ?? {};
+
+  const statusOptions = useMemo(
+    () =>
+      columnOrder.map((key) => ({
+        value: key,
+        label: columnLabelForStatus(key, kanbanColumnLabels, kanbanCustomColumns),
+      })),
+    [columnOrder, kanbanColumnLabels, kanbanCustomColumns]
+  );
+
+  useEffect(() => {
+    setCollapsedColumnKeys((prev) => prev.filter((k) => columnOrder.includes(k)));
+  }, [columnOrder]);
+
+  const toggleColumnCollapsed = (columnKey: string) => {
+    setCollapsedColumnKeys((prev) =>
+      prev.includes(columnKey) ? prev.filter((k) => k !== columnKey) : [...prev, columnKey]
+    );
+  };
 
   useEffect(() => {
     if (reorderOpen) setDraftColumnOrder([...columnOrder]);
@@ -156,19 +215,19 @@ export function KanbanBoard({
   }, [tasks, selectedTask]);
 
   /** Header “+ Task” & list view — full modal with bell / voucher */
-  const openFullAddTaskModal = (status: TaskStatus = 'todo') => {
+  const openFullAddTaskModal = (status: string = 'todo') => {
     setAddTaskStatus(status);
     setInlineComposeStatus(null);
   };
 
   /** Board column + / Add Task — inline composer only */
-  const openColumnInlineComposer = (status: TaskStatus) => {
+  const openColumnInlineComposer = (status: string) => {
     setInlineComposeStatus((prev) => (prev === status ? null : status));
     setAddTaskStatus(null);
   };
 
   const handleInlineCreate = (
-    status: TaskStatus,
+    status: string,
     payload: {
       title: string;
       priority: TaskPriority;
@@ -194,7 +253,7 @@ export function KanbanBoard({
   );
 
   const handleCreateTask = (payload: {
-    status: TaskStatus;
+    status: string;
     title: string;
     priority: TaskPriority;
     assigneeIds: string[];
@@ -268,17 +327,45 @@ export function KanbanBoard({
     }
   };
 
-  const tasksByStatus = DEFAULT_KANBAN_COLUMN_ORDER.reduce(
-    (acc, status) => {
-      acc[status] = tasks.filter((t) => t.status === status);
-      return acc;
-    },
-    {} as Record<TaskStatus, Task[]>
-  );
+  const tasksByStatus = useMemo(() => {
+    const acc: Record<string, Task[]> = {};
+    for (const t of tasks) {
+      const k = t.status;
+      if (!acc[k]) acc[k] = [];
+      acc[k].push(t);
+    }
+    return acc;
+  }, [tasks]);
 
-  const openRenameForStatus = (status: TaskStatus) => {
-    setRenameInput(columnLabelForStatus(status, kanbanColumnLabels));
-    setRenameStatus(status);
+  const openRenameForStatus = (columnKey: string) => {
+    setRenameInput(columnLabelForStatus(columnKey, kanbanColumnLabels, kanbanCustomColumns));
+    setRenameStatus(columnKey);
+  };
+
+  const saveNewColumn = async () => {
+    const label = newColumnName.trim();
+    if (!label || !onUpdateKanban) return;
+    await onUpdateKanban({ addKanbanColumn: { label, color: newColumnColor } });
+    setNewColumnName('');
+    setNewColumnColor('#A855F7');
+    setAddColumnOpen(false);
+  };
+
+  const deleteColumn = async (columnKey: string) => {
+    if (!onUpdateKanban) return;
+    const label = columnLabelForStatus(columnKey, kanbanColumnLabels, kanbanCustomColumns);
+    const fallback = columnOrder.find((k) => k !== columnKey);
+    if (!fallback) return;
+    const ok = window.confirm(
+      `Delete "${label}" group? Tasks will move to ${columnLabelForStatus(
+        fallback,
+        kanbanColumnLabels,
+        kanbanCustomColumns
+      )}.`
+    );
+    if (!ok) return;
+    await onUpdateKanban({ deleteKanbanColumn: { id: columnKey } });
+    setCollapsedColumnKeys((prev) => prev.filter((k) => k !== columnKey));
   };
 
   const saveRename = async () => {
@@ -396,49 +483,97 @@ export function KanbanBoard({
       {activeView === 'board' && (
         <div className="min-h-0 flex-1 overflow-auto p-6">
           <div className="flex min-h-0 min-w-max items-start gap-4">
-            {columnOrder.map((status) => (
-              <BoardColumn
-                key={status}
-                status={status}
-                columnTitle={columnLabelForStatus(status, kanbanColumnLabels)}
-                tasks={tasksByStatus[status]}
-                onAddTask={openColumnInlineComposer}
-                onTaskClick={openTaskDetails}
-                onDropTask={onMoveTask}
-                onDeleteTask={handleDeleteTask}
-                assigneeNameById={assigneeNameById}
-                canCreateTask={canCreateTask}
-                canManageKanban={canManageKanban}
-                onRenameColumn={() => openRenameForStatus(status)}
-                onReorderColumns={() => setReorderOpen(true)}
-                inlineComposer={
-                  inlineComposeStatus === status ? (
-                    <InlineTaskComposer
-                      memberOptions={memberOptions}
-                      onSave={(payload) => handleInlineCreate(status, payload)}
-                      onCancel={() => setInlineComposeStatus(null)}
-                    />
-                  ) : null
-                }
-              />
+            {columnOrder.map((columnKey) => (
+              collapsedColumnKeys.includes(columnKey) ? (
+                <button
+                  key={columnKey}
+                  type="button"
+                  onClick={() => toggleColumnCollapsed(columnKey)}
+                  className="flex min-h-[220px] w-[52px] shrink-0 flex-col items-center justify-between rounded-xl border border-border bg-muted/40 px-1 py-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  aria-label={`Expand ${columnLabelForStatus(columnKey, kanbanColumnLabels, kanbanCustomColumns)}`}
+                >
+                  <ChevronsRight className="h-4 w-4" />
+                  <span
+                    className="h-2.5 w-2.5 rounded-full"
+                    style={{ backgroundColor: kanbanCustomColumns.find((c) => c.id === columnKey)?.color || '#A855F7' }}
+                  />
+                  <span className="writing-mode-vertical rotate-180 text-[11px] font-semibold tracking-wide [writing-mode:vertical-rl]">
+                    {columnLabelForStatus(columnKey, kanbanColumnLabels, kanbanCustomColumns)}
+                  </span>
+                  <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px]">
+                    {(tasksByStatus[columnKey] ?? []).length}
+                  </span>
+                </button>
+              ) : (
+                <BoardColumn
+                  key={columnKey}
+                  columnKey={columnKey}
+                  columnTitle={columnLabelForStatus(columnKey, kanbanColumnLabels, kanbanCustomColumns)}
+                  accentColor={kanbanCustomColumns.find((c) => c.id === columnKey)?.color}
+                  tasks={tasksByStatus[columnKey] ?? []}
+                  onAddTask={openColumnInlineComposer}
+                  onTaskClick={openTaskDetails}
+                  onDropTask={onMoveTask}
+                  onDeleteTask={handleDeleteTask}
+                  assigneeNameById={assigneeNameById}
+                  canCreateTask={canCreateTask}
+                  canManageKanban={canManageKanban}
+                  onRenameColumn={() => openRenameForStatus(columnKey)}
+                  onReorderColumns={() => setReorderOpen(true)}
+                  canDeleteColumn={canManageKanban}
+                  onDeleteColumn={() => void deleteColumn(columnKey)}
+                  isCollapsed={false}
+                  onToggleCollapse={() => toggleColumnCollapsed(columnKey)}
+                  inlineComposer={
+                    inlineComposeStatus === columnKey ? (
+                      <InlineTaskComposer
+                        memberOptions={memberOptions}
+                        onSave={(payload) => handleInlineCreate(columnKey, payload)}
+                        onCancel={() => setInlineComposeStatus(null)}
+                      />
+                    ) : null
+                  }
+                />
+              )
             ))}
+            {canManageKanban && (
+              <button
+                type="button"
+                onClick={() => setAddColumnOpen(true)}
+                className="flex h-[52px] w-[140px] shrink-0 items-center justify-center gap-2 self-start rounded-lg border border-dashed border-border bg-background px-3 text-sm font-medium text-muted-foreground shadow-sm transition-colors hover:border-primary/40 hover:bg-muted/40 hover:text-foreground"
+              >
+                <Plus className="h-4 w-4 shrink-0" />
+                Add group
+              </button>
+            )}
           </div>
         </div>
       )}
 
       {activeView === 'list' && (
         <div className="flex-1 overflow-y-auto p-6">
-          {columnOrder.map((status) => (
-            <div key={status} className="mb-6 border border-border rounded-lg">
+          {columnOrder.map((columnKey) => (
+            <div key={columnKey} className="mb-6 border border-border rounded-lg">
               <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-muted/30">
                 <div className="flex items-center gap-2">
-                  <span className={`w-2.5 h-2.5 rounded-full ${STATUS_CONFIG[status].bgClass}`} />
-                  <span className="text-xs font-semibold uppercase">{columnLabelForStatus(status, kanbanColumnLabels)}</span>
-                  <span className="text-xs text-muted-foreground">{tasksByStatus[status].length}</span>
+                  <span
+                    className={`w-2.5 h-2.5 rounded-full ${
+                      isBuiltinTaskStatus(columnKey) ? STATUS_CONFIG[columnKey].bgClass : ''
+                    }`}
+                    style={
+                      isBuiltinTaskStatus(columnKey)
+                        ? undefined
+                        : { backgroundColor: kanbanCustomColumns.find((c) => c.id === columnKey)?.color || '#A855F7' }
+                    }
+                  />
+                  <span className="text-xs font-semibold uppercase">
+                    {columnLabelForStatus(columnKey, kanbanColumnLabels, kanbanCustomColumns)}
+                  </span>
+                  <span className="text-xs text-muted-foreground">{(tasksByStatus[columnKey] ?? []).length}</span>
                 </div>
                 <button
                   type="button"
-                  onClick={() => openFullAddTaskModal(status)}
+                  onClick={() => openFullAddTaskModal(columnKey)}
                   disabled={!canCreateTask}
                   className="text-xs px-2 py-1 rounded-md border border-border hover:bg-secondary disabled:opacity-50 disabled:cursor-not-allowed"
                 >
@@ -452,7 +587,7 @@ export function KanbanBoard({
                 <span>Due Date</span>
                 <span>Priority</span>
               </div>
-              {tasksByStatus[status].map((task) => (
+              {(tasksByStatus[columnKey] ?? []).map((task) => (
                 <div key={task.id} className="grid grid-cols-[2fr_1fr_1fr_1fr] gap-2 px-3 py-2 text-sm border-b border-border/60 last:border-b-0">
                   <span>{task.title}</span>
                   <span className="text-muted-foreground">{task.assignee_ids[0] ? assigneeNameById[task.assignee_ids[0]] : '-'}</span>
@@ -477,6 +612,7 @@ export function KanbanBoard({
       {addTaskStatus && (
         <AddTaskDialog
           status={addTaskStatus}
+          statusOptions={statusOptions}
           onClose={() => setAddTaskStatus(null)}
           onCreate={handleCreateTask}
           memberOptions={memberOptions}
@@ -490,6 +626,7 @@ export function KanbanBoard({
           comments={taskComments}
           loadingComments={loadingComments}
           onSendComment={sendTaskComment}
+          statusOptions={statusOptions}
           onUpdateTask={async (payload) => {
             const updated = await onUpdateTask(selectedTask.id, payload);
             if (updated) setSelectedTask(updated);
@@ -537,7 +674,7 @@ export function KanbanBoard({
                 className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm"
               >
                 <span className="min-w-0 truncate font-medium">
-                  {columnLabelForStatus(status, kanbanColumnLabels)}
+                  {columnLabelForStatus(status, kanbanColumnLabels, kanbanCustomColumns)}
                 </span>
                 <div className="flex shrink-0 gap-1">
                   <Button
@@ -572,6 +709,50 @@ export function KanbanBoard({
             </Button>
             <Button type="button" onClick={() => void saveColumnReorder()}>
               Save order
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={addColumnOpen} onOpenChange={setAddColumnOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add group</DialogTitle>
+            <p className="text-sm text-muted-foreground">
+              Only Admin, Manager, or Team Lead can add columns.
+            </p>
+          </DialogHeader>
+          <Input
+            value={newColumnName}
+            onChange={(e) => setNewColumnName(e.target.value)}
+            placeholder="Column name"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void saveNewColumn();
+            }}
+          />
+          <div className="space-y-2">
+            <p className="text-xs font-medium text-muted-foreground">Choose color</p>
+            <div className="flex flex-wrap gap-2">
+              {CUSTOM_COLUMN_COLOR_OPTIONS.map((color) => (
+                <button
+                  key={color}
+                  type="button"
+                  aria-label={`Choose ${color}`}
+                  onClick={() => setNewColumnColor(color)}
+                  className={`h-7 w-7 rounded-full border-2 transition ${
+                    newColumnColor === color ? 'border-foreground scale-110' : 'border-border'
+                  }`}
+                  style={{ backgroundColor: color }}
+                />
+              ))}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setAddColumnOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="button" onClick={() => void saveNewColumn()} disabled={!newColumnName.trim()}>
+              Add group
             </Button>
           </DialogFooter>
         </DialogContent>

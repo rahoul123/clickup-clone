@@ -82,10 +82,12 @@ export interface List {
   name: string;
   created_by?: string;
   created_at: string;
-  /** Admin: custom column order on the board (permutation of TaskStatus). */
-  kanban_column_order?: TaskStatus[] | null;
-  /** Admin: optional display labels per status (merged with defaults). */
-  kanban_column_labels?: Partial<Record<TaskStatus, string>>;
+  /** Admin / TL / Manager: column order (built-in statuses + custom_* ids). */
+  kanban_column_order?: string[] | null;
+  /** Optional display label overrides per column key. */
+  kanban_column_labels?: Partial<Record<string, string>>;
+  /** Extra columns created for this list (task status = id). */
+  kanban_custom_columns?: Array<{ id: string; label: string; color?: string }>;
 }
 
 /** Default Kanban column order when a list has no saved order. */
@@ -102,7 +104,8 @@ export interface Task {
   list_id: string;
   title: string;
   description?: string;
-  status: TaskStatus;
+  /** Built-in workflow status or a list-specific `custom_*` column id. */
+  status: TaskStatus | string;
   priority: TaskPriority;
   assignee_ids: string[];
   start_date?: string;
@@ -276,6 +279,16 @@ export const KANBAN_COLUMN_THEME: Record<TaskStatus, KanbanColumnTheme> = {
     dragOver: 'ring-2 ring-emerald-400/55 ring-offset-2 ring-offset-emerald-50/80',
   },
 };
+
+export function isBuiltinTaskStatus(s: string): s is TaskStatus {
+  return (Object.keys(STATUS_CONFIG) as TaskStatus[]).includes(s as TaskStatus);
+}
+
+/** Theming for a column key: built-in uses its palette; custom columns reuse the revision theme. */
+export function getKanbanColumnThemeForKey(columnKey: string): KanbanColumnTheme {
+  if (isBuiltinTaskStatus(columnKey)) return KANBAN_COLUMN_THEME[columnKey];
+  return KANBAN_COLUMN_THEME.revision;
+}
 
 export const PRIORITY_CONFIG: Record<TaskPriority, { label: string; colorClass: string; icon: string }> = {
   urgent: { label: 'Urgent', colorClass: 'text-urgent', icon: '🔴' },

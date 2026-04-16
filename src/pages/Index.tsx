@@ -22,6 +22,7 @@ import type {
   Workspace,
   WorkspaceDoc,
 } from '@/types';
+import { isBuiltinTaskStatus } from '@/types';
 import { filterSpacesForExport } from '@/lib/departmentAccess';
 import { api } from '@/lib/api';
 import { toast } from '@/components/ui/sonner';
@@ -66,8 +67,20 @@ const Index = () => {
     ? rolesByWorkspaceId[activeWorkspaceId] ?? 'employee'
     : 'employee';
 
+  const normalizeDept = (val?: string | null) => String(val || '').toLowerCase().replace(/\s+/g, '').trim();
+
   const workspaceSections = useMemo(() => {
+    const myDept = normalizeDept(user?.department);
+    const isMyDepartmentSpace = (space: Space) => {
+      if (!myDept) return true;
+      const depNorm = normalizeDept(space.department);
+      if (depNorm) return depNorm === myDept;
+      const nameNorm = normalizeDept(space.name);
+      return Boolean(nameNorm && (nameNorm.includes(myDept) || myDept.includes(nameNorm)));
+    };
     return workspaces.map((ws) => {
+      const wsRole = rolesByWorkspaceId[ws.id] ?? 'employee';
+      const canSeeAllDeptLists = wsRole === 'admin';
       const wsSpaces = spaces.filter((s) => s.workspace_id === ws.id);
       const master = wsSpaces.find((s) => s.is_master_team_space);
       if (master) {
@@ -87,7 +100,19 @@ const Index = () => {
                 id: space.id,
                 name: space.name,
                 color: space.color,
-                lists: lists.filter((l) => l.space_id === space.id).map((l) => ({ id: l.id, name: l.name })),
+                noExpand:
+                  !canSeeAllDeptLists &&
+                  Boolean(myDept) &&
+                  !isMyDepartmentSpace(space),
+                lists:
+                  !canSeeAllDeptLists &&
+                  Boolean(myDept) &&
+                  !isMyDepartmentSpace(space)
+                    ? lists
+                        .filter((l) => l.space_id === space.id)
+                        .slice(0, 1)
+                        .map((l) => ({ id: l.id, name: l.name }))
+                    : lists.filter((l) => l.space_id === space.id).map((l) => ({ id: l.id, name: l.name })),
               })),
             },
           ],
@@ -104,7 +129,7 @@ const Index = () => {
         })),
       };
     });
-  }, [workspaces, spaces, lists]);
+  }, [workspaces, spaces, lists, rolesByWorkspaceId, user?.department]);
 
   const exportWorkspaceEntity = useMemo(
     () => workspaces.find((w) => w.id === exportReportWorkspaceId) ?? null,
@@ -167,11 +192,19 @@ const Index = () => {
   const canDeleteSpaces = activeRole === 'admin' || activeRole === 'manager';
   const canCreateTasks = activeRole !== 'guest';
   const userDisplayLabel = user?.displayName?.trim() || user?.email || 'User';
-  const formatStatusLabel = (status: TaskStatus) =>
-    status
-      .split('_')
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-      .join(' ');
+  const formatStatusLabel = (status: string) => {
+    if (isBuiltinTaskStatus(status)) {
+      return status
+        .split('_')
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ');
+    }
+    const custom = activeListEntity?.kanban_custom_columns?.find((c) => c.id === status);
+    if (custom) return custom.label;
+    const override = activeListEntity?.kanban_column_labels?.[status];
+    if (override) return override;
+    return status.replace(/^custom_/, '').slice(0, 12) || status;
+  };
 
   const hydrateTasks = async (listId: string) => {
     const result = await api.app.listTasks(listId);
@@ -519,7 +552,7 @@ const Index = () => {
   };
 
   const createTask = async (payload: {
-    status: TaskStatus;
+    status: string;
     title: string;
     priority: 'urgent' | 'high' | 'normal' | 'low';
     assigneeIds: string[];
@@ -566,7 +599,7 @@ const Index = () => {
     hydrateTasks(activeList).catch((refreshError) => console.error('Task refresh failed after create', refreshError));
   };
 
-  const moveTask = async (taskId: string, nextStatus: TaskStatus) => {
+  const moveTask = async (taskId: string, nextStatus: string) => {
     if (!canCreateTasks) {
       window.alert('Aapke role me drag-drop permission nahi hai.');
       return;
@@ -591,7 +624,7 @@ const Index = () => {
     payload: {
       title?: string;
       description?: string;
-      status?: TaskStatus;
+      status?: string;
       priority?: 'urgent' | 'high' | 'normal' | 'low';
       assigneeIds?: string[];
       startDate?: string;
@@ -631,14 +664,22 @@ const Index = () => {
 
   const patchListKanban = useCallback(
     async (payload: {
-      kanbanColumnOrder?: TaskStatus[];
-      kanbanColumnLabels?: Partial<Record<TaskStatus, string>>;
+      kanbanColumnOrder?: string[];
+      kanbanColumnLabels?: Partial<Record<string, string>>;
+      addKanbanColumn?: { label: string; color?: string };
+      updateKanbanCustomColumn?: { id: string; label: string; color?: string };
+      deleteKanbanCustomColumn?: { id: string };
+      deleteKanbanColumn?: { id: string };
     }) => {
       if (!activeList) return;
       try {
         const { list } = await api.app.updateListKanban(activeList, {
           kanbanColumnOrder: payload.kanbanColumnOrder,
           kanbanColumnLabels: payload.kanbanColumnLabels as Record<string, string> | undefined,
+          addKanbanColumn: payload.addKanbanColumn,
+          updateKanbanCustomColumn: payload.updateKanbanCustomColumn,
+          deleteKanbanCustomColumn: payload.deleteKanbanCustomColumn,
+          deleteKanbanColumn: payload.deleteKanbanColumn,
         });
         setLists((prev) =>
           prev.map((l) =>
@@ -647,6 +688,7 @@ const Index = () => {
                   ...l,
                   kanban_column_order: list.kanban_column_order ?? null,
                   kanban_column_labels: (list.kanban_column_labels ?? {}) as List['kanban_column_labels'],
+                  kanban_custom_columns: (list as List).kanban_custom_columns ?? [],
                 }
               : l
           )
@@ -830,7 +872,8 @@ const Index = () => {
               onConsumedTaskOpen={() => setTaskToOpenId(null)}
               kanbanColumnOrder={activeListEntity?.kanban_column_order}
               kanbanColumnLabels={activeListEntity?.kanban_column_labels}
-              canManageKanban={canManageWorkspace}
+              kanbanCustomColumns={activeListEntity?.kanban_custom_columns ?? []}
+              canManageKanban={canManageStructure}
               onUpdateKanban={patchListKanban}
             />
           )}

@@ -89,6 +89,17 @@ const listSchema = new Schema(
     kanbanColumnOrder: { type: [String], default: undefined },
     /** Custom header labels per status key (admin). */
     kanbanColumnLabels: { type: Schema.Types.Mixed, default: undefined },
+    /** Extra Kanban columns (id + label); task status matches id. */
+    kanbanCustomColumns: {
+      type: [
+        {
+          id: { type: String, required: true },
+          label: { type: String, required: true },
+          color: { type: String, default: '#A855F7' },
+        },
+      ],
+      default: undefined,
+    },
   },
   { timestamps: true }
 );
@@ -99,7 +110,7 @@ const taskSchema = new Schema(
     listId: { type: String, required: true, index: true },
     title: { type: String, required: true },
     description: { type: String, default: null },
-    status: { type: String, enum: ['todo', 'in_progress', 'hold', 'revision', 'complete'], default: 'todo' },
+    status: { type: String, default: 'todo' },
     priority: { type: String, enum: ['urgent', 'high', 'normal', 'low'], default: 'normal' },
     startDate: { type: Date, default: null },
     dueDate: { type: Date, default: null },

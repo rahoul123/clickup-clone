@@ -8,10 +8,14 @@ import {
   CheckCircle2,
   Pencil,
   ListOrdered,
+  Layers,
+  ChevronsLeft,
+  ChevronsRight,
+  Trash2,
 } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
 import type { Task, TaskStatus } from '@/types';
-import { KANBAN_COLUMN_THEME } from '@/types';
+import { getKanbanColumnThemeForKey, isBuiltinTaskStatus } from '@/types';
 import { TaskCard } from './TaskCard';
 import { cn } from '@/lib/utils';
 import {
@@ -23,6 +27,15 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 
+function hexToRgba(hex: string, alpha: number): string {
+  const h = hex.replace('#', '');
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return `rgba(168, 85, 247, ${alpha})`;
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 const HEADER_ICONS: Record<TaskStatus, typeof Circle> = {
   todo: Circle,
   in_progress: Target,
@@ -32,13 +45,15 @@ const HEADER_ICONS: Record<TaskStatus, typeof Circle> = {
 };
 
 interface BoardColumnProps {
-  status: TaskStatus;
+  /** Built-in status key or `custom_*` id. */
+  columnKey: string;
   /** Display title (custom label or default). */
   columnTitle: string;
+  accentColor?: string;
   tasks: Task[];
-  onAddTask: (status: TaskStatus) => void;
+  onAddTask: (columnKey: string) => void;
   onTaskClick: (task: Task) => void;
-  onDropTask: (taskId: string, nextStatus: TaskStatus) => void;
+  onDropTask: (taskId: string, nextStatus: string) => void;
   onDeleteTask: (taskId: string) => void;
   assigneeNameById?: Record<string, string>;
   canCreateTask?: boolean;
@@ -46,13 +61,18 @@ interface BoardColumnProps {
   canManageKanban?: boolean;
   onRenameColumn?: () => void;
   onReorderColumns?: () => void;
+  canDeleteColumn?: boolean;
+  onDeleteColumn?: () => void;
+  isCollapsed?: boolean;
+  onToggleCollapse?: () => void;
   /** Inline quick composer (column “Add Task”) — full modal is separate */
   inlineComposer?: ReactNode;
 }
 
 export function BoardColumn({
-  status,
+  columnKey,
   columnTitle,
+  accentColor,
   tasks,
   onAddTask,
   onTaskClick,
@@ -63,11 +83,17 @@ export function BoardColumn({
   canManageKanban = false,
   onRenameColumn,
   onReorderColumns,
+  canDeleteColumn = false,
+  onDeleteColumn,
+  isCollapsed = false,
+  onToggleCollapse,
   inlineComposer,
 }: BoardColumnProps) {
-  const theme = KANBAN_COLUMN_THEME[status];
-  const HeaderIcon = HEADER_ICONS[status];
+  const theme = getKanbanColumnThemeForKey(columnKey);
+  const HeaderIcon = isBuiltinTaskStatus(columnKey) ? HEADER_ICONS[columnKey] : Layers;
   const [isOver, setIsOver] = useState(false);
+  const isCustom = !isBuiltinTaskStatus(columnKey);
+  const customColor = accentColor || '#A855F7';
 
   return (
     <div
@@ -77,6 +103,14 @@ export function BoardColumn({
         theme.surfaceBorder,
         isOver && theme.dragOver
       )}
+      style={
+        isCustom
+          ? {
+              background: `linear-gradient(to bottom, ${hexToRgba(customColor, 0.12)}, ${hexToRgba(customColor, 0.06)})`,
+              borderColor: hexToRgba(customColor, 0.35),
+            }
+          : undefined
+      }
       onDragOver={(e) => {
         e.preventDefault();
         if (!isOver) setIsOver(true);
@@ -86,7 +120,7 @@ export function BoardColumn({
         setIsOver(false);
         const taskId = e.dataTransfer.getData('text/task-id');
         if (!taskId) return;
-        onDropTask(taskId, status);
+        onDropTask(taskId, columnKey);
       }}
     >
       {/* Colorful pill header */}
@@ -96,6 +130,15 @@ export function BoardColumn({
             'inline-flex min-w-0 flex-1 items-center gap-2 rounded-full px-2.5 py-1.5',
             theme.headerPill
           )}
+          style={
+            isCustom
+              ? {
+                  backgroundColor: customColor,
+                  color: '#FFFFFF',
+                  boxShadow: `0 10px 20px ${hexToRgba(customColor, 0.28)}`,
+                }
+              : undefined
+          }
         >
           <span
             className={cn(
@@ -103,16 +146,22 @@ export function BoardColumn({
               theme.iconCircle
             )}
           >
-            <HeaderIcon className={cn('h-4 w-4', theme.iconClass)} strokeWidth={2.2} />
+            <HeaderIcon
+              className={cn('h-4 w-4', isCustom ? 'text-white' : theme.iconClass)}
+              strokeWidth={2.2}
+            />
           </span>
-          <span className={cn('truncate text-[11px] font-bold uppercase tracking-wide', theme.titleClass)}>
+          <span className={cn('truncate text-[11px] font-bold uppercase tracking-wide', isCustom ? 'text-white' : theme.titleClass)}>
             {columnTitle}
           </span>
+          {accentColor ? (
+            <span
+              className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-white/70"
+              style={{ backgroundColor: accentColor }}
+            />
+          ) : null}
           <span
-            className={cn(
-              'ml-auto min-w-[1.35rem] rounded-full px-1.5 py-0.5 text-center text-[11px] font-bold tabular-nums',
-              theme.countClass
-            )}
+            className={cn('ml-auto min-w-[1.35rem] rounded-full px-1.5 py-0.5 text-center text-[11px] font-bold tabular-nums', isCustom ? 'bg-white/25 text-white' : theme.countClass)}
           >
             {tasks.length}
           </span>
@@ -121,7 +170,10 @@ export function BoardColumn({
           <DropdownMenuTrigger asChild>
             <button
               type="button"
-              className={cn(theme.metaBtn, 'shrink-0 p-1.5 transition-colors')}
+              className={cn(
+                theme.metaBtn,
+                'shrink-0 rounded-md bg-white/80 p-1.5 text-foreground shadow-sm transition-colors hover:bg-white hover:text-foreground'
+              )}
               aria-label="Group options"
             >
               <MoreHorizontal className="h-4 w-4" />
@@ -138,13 +190,40 @@ export function BoardColumn({
               <ListOrdered className="mr-2 h-4 w-4" />
               Edit column order
             </DropdownMenuItem>
+            {canDeleteColumn ? (
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                onSelect={() => onDeleteColumn?.()}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete group
+              </DropdownMenuItem>
+            ) : null}
+            <DropdownMenuItem onSelect={() => onToggleCollapse?.()}>
+              {isCollapsed ? <ChevronsRight className="mr-2 h-4 w-4" /> : <ChevronsLeft className="mr-2 h-4 w-4" />}
+              {isCollapsed ? 'Expand group' : 'Collapse group'}
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
         <button
           type="button"
+          className={cn(
+            theme.metaBtn,
+            'shrink-0 rounded-md bg-white/80 p-1.5 text-foreground shadow-sm transition-colors hover:bg-white hover:text-foreground'
+          )}
+          aria-label={isCollapsed ? 'Expand group' : 'Collapse group'}
+          onClick={() => onToggleCollapse?.()}
+        >
+          {isCollapsed ? <ChevronsRight className="h-4 w-4" /> : <ChevronsLeft className="h-4 w-4" />}
+        </button>
+        <button
+          type="button"
           data-add-task-column
-          className={cn(theme.metaBtn, 'shrink-0 p-1.5 transition-colors disabled:opacity-40')}
-          onClick={() => onAddTask(status)}
+          className={cn(
+            theme.metaBtn,
+            'shrink-0 rounded-md bg-white/80 p-1.5 text-foreground shadow-sm transition-colors hover:bg-white hover:text-foreground disabled:opacity-40'
+          )}
+          onClick={() => onAddTask(columnKey)}
           disabled={!canCreateTask}
           aria-label="Add task"
         >
@@ -170,12 +249,21 @@ export function BoardColumn({
         <button
           type="button"
           data-add-task-column
-          onClick={() => onAddTask(status)}
+          onClick={() => onAddTask(columnKey)}
           disabled={!canCreateTask}
           className={cn(
             'flex shrink-0 items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-50',
             theme.addTask
           )}
+          style={
+            isCustom
+              ? {
+                  color: customColor,
+                  border: `1px solid ${hexToRgba(customColor, 0.35)}`,
+                  backgroundColor: '#FFFFFF',
+                }
+              : undefined
+          }
         >
           <Plus className="h-4 w-4 shrink-0" />
           Add Task

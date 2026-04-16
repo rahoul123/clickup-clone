@@ -7,7 +7,7 @@ import {
   Smile, AtSign, Video, Mic, Image as ImageIcon, Send, BrainCircuit, Check, Search,
   Copy, Lock, Globe, Upload, FileText, Download, Play, Save
 } from 'lucide-react';
-import type { Task, TaskPriority, TaskStatus, CommentAttachment } from '@/types';
+import type { Task, TaskPriority, CommentAttachment } from '@/types';
 
 interface TaskCommentView {
   id: string;
@@ -28,16 +28,26 @@ interface TaskDetailDialogProps {
   loadingComments: boolean;
   onClose: () => void;
   onSendComment: (content: string, attachments?: CommentAttachment[]) => Promise<void>;
+  /** When set, status dropdown matches board columns (including custom). */
+  statusOptions?: { value: string; label: string }[];
   onUpdateTask: (payload: {
     title?: string;
     description?: string;
-    status?: TaskStatus;
+    status?: string;
     priority?: TaskPriority;
     assigneeIds?: string[];
     startDate?: string;
     endDate?: string;
   }) => Promise<void>;
 }
+
+const DEFAULT_STATUS_OPTIONS: { value: string; label: string }[] = [
+  { value: 'todo', label: '📋 TO DO' },
+  { value: 'in_progress', label: '⏳ IN PROGRESS' },
+  { value: 'hold', label: '⏸️ HOLD' },
+  { value: 'revision', label: '🔄 REVISION' },
+  { value: 'complete', label: '✅ COMPLETE' },
+];
 
 export function TaskDetailDialog({
   task,
@@ -46,6 +56,7 @@ export function TaskDetailDialog({
   loadingComments,
   onClose,
   onSendComment,
+  statusOptions,
   onUpdateTask,
 }: TaskDetailDialogProps) {
   const [activeTab, setActiveTab] = useState<'task' | 'doc' | 'reminder' | 'whiteboard' | 'dashboard'>('task');
@@ -54,7 +65,7 @@ export function TaskDetailDialog({
   const [saving, setSaving] = useState(false);
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState(task.description || '');
-  const [status, setStatus] = useState<TaskStatus>(task.status);
+  const [status, setStatus] = useState<string>(task.status);
   const [priority, setPriority] = useState<TaskPriority>(task.priority);
   const [startDate, setStartDate] = useState(task.start_date ? task.start_date.slice(0, 10) : '');
   const [endDate, setEndDate] = useState(task.due_date ? task.due_date.slice(0, 10) : '');
@@ -73,6 +84,14 @@ export function TaskDetailDialog({
     if (!q) return memberOptions;
     return memberOptions.filter((m) => m.label.toLowerCase().includes(q));
   }, [assigneeSearch, memberOptions]);
+
+  const statusSelectOptions = useMemo(() => {
+    const base = statusOptions && statusOptions.length > 0 ? [...statusOptions] : [...DEFAULT_STATUS_OPTIONS];
+    if (!base.some((o) => o.value === task.status)) {
+      base.push({ value: task.status, label: task.status });
+    }
+    return base;
+  }, [statusOptions, task.status]);
 
   const saveDebounceRef = useRef<number | null>(null);
   const skipAutoSaveRef = useRef(false);
@@ -340,14 +359,14 @@ export function TaskDetailDialog({
                 <PropertyItem icon={<span className="w-3 h-3 bg-gradient-to-br from-green-400 to-green-600 rounded-full inline-block" />} label="Status">
                   <select
                     value={status}
-                    onChange={(e) => setStatus(e.target.value as TaskStatus)}
+                    onChange={(e) => setStatus(e.target.value)}
                     className="w-full h-8 px-2 py-1 text-xs font-semibold rounded-lg border border-gray-200 bg-white hover:border-purple-300 focus:border-purple-400 focus:ring-1 focus:ring-purple-100 transition-all"
                   >
-                    <option value="todo">📋 TO DO</option>
-                    <option value="in_progress">⏳ IN PROGRESS</option>
-                    <option value="hold">⏸️ HOLD</option>
-                    <option value="revision">🔄 REVISION</option>
-                    <option value="complete">✅ COMPLETE</option>
+                    {statusSelectOptions.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
                   </select>
                 </PropertyItem>
 

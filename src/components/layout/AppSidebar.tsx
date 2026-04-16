@@ -30,6 +30,10 @@ interface SidebarItem {
   name: string;
   icon?: React.ReactNode;
   children?: SidebarItem[];
+  /** If provided, clicking this space opens board using this list id. */
+  openListId?: string;
+  /** Render as space that should not expand children in sidebar. */
+  noExpand?: boolean;
   type: 'space' | 'list' | 'nav';
   color?: string;
   /** Master "Team Space" folder — + creates a department space, not a list */
@@ -63,6 +67,7 @@ interface AppSidebarProps {
         id: string;
         name: string;
         color?: string;
+        noExpand?: boolean;
         lists: Array<{ id: string; name: string }>;
       }>;
     }>;
@@ -140,7 +145,7 @@ export function AppSidebar({
 
   const renderItem = (item: SidebarItem, depth = 0) => {
     const isExpanded = expandedItems.has(item.id);
-    const hasChildren = item.children && item.children.length > 0;
+    const hasChildren = !item.noExpand && item.children && item.children.length > 0;
     const isActive = item.id === activeList;
 
     return (
@@ -151,6 +156,10 @@ export function AppSidebar({
             if (item.type === 'list') {
               onNavigate?.('board');
               onSelectList(item.id);
+            }
+            if (item.type === 'space' && item.openListId) {
+              onNavigate?.('board');
+              onSelectList(item.openListId);
             }
           }}
           className={cn(
@@ -402,6 +411,8 @@ export function AppSidebar({
                     id: child.id,
                     name: child.name,
                     color: child.color,
+                    openListId: child.lists[0]?.id,
+                    noExpand: child.noExpand,
                     type: 'space' as const,
                     children: child.lists.map((list) => ({
                       id: list.id,

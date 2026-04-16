@@ -59,6 +59,10 @@ export const api = {
       payload: {
         kanbanColumnOrder?: string[];
         kanbanColumnLabels?: Record<string, string>;
+        addKanbanColumn?: { label: string; color?: string };
+        updateKanbanCustomColumn?: { id: string; label: string; color?: string };
+        deleteKanbanCustomColumn?: { id: string };
+        deleteKanbanColumn?: { id: string };
       }
     ) => request(`/lists/${listId}`, { method: 'PATCH', body: JSON.stringify(payload) }),
     inviteMember: (

@@ -24,11 +24,13 @@ import type { TaskStatus, TaskPriority } from '@/types';
 import { STATUS_CONFIG, PRIORITY_CONFIG } from '@/types';
 
 interface AddTaskDialogProps {
-  status: TaskStatus;
+  status: string;
+  /** When set, status dropdown uses these (e.g. list columns including custom). */
+  statusOptions?: { value: string; label: string }[];
   onClose: () => void;
   memberOptions: { id: string; label: string }[];
   onCreate: (payload: {
-    status: TaskStatus;
+    status: string;
     title: string;
     priority: TaskPriority;
     /** Task assignees (board / assignee field). */
@@ -41,11 +43,17 @@ interface AddTaskDialogProps {
   }) => void;
 }
 
-export function AddTaskDialog({ status, onClose, onCreate, memberOptions }: AddTaskDialogProps) {
+export function AddTaskDialog({
+  status,
+  statusOptions,
+  onClose,
+  onCreate,
+  memberOptions,
+}: AddTaskDialogProps) {
   const [activeTab, setActiveTab] = useState<'Task' | 'Doc' | 'Reminder' | 'Whiteboard' | 'Dashboard'>('Task');
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [taskStatus, setTaskStatus] = useState<TaskStatus>(status);
+  const [taskStatus, setTaskStatus] = useState<string>(status);
   const [priority, setPriority] = useState<TaskPriority>('normal');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -66,6 +74,18 @@ export function AddTaskDialog({ status, onClose, onCreate, memberOptions }: AddT
   }, [assigneeSearch, memberOptions]);
 
   const visibleMembers = filteredMembers.length > 0 ? filteredMembers : memberOptions;
+
+  useEffect(() => {
+    setTaskStatus(status);
+  }, [status]);
+
+  const statusSelectOptions = useMemo(() => {
+    if (statusOptions && statusOptions.length > 0) return statusOptions;
+    return (Object.keys(STATUS_CONFIG) as TaskStatus[]).map((s) => ({
+      value: s,
+      label: STATUS_CONFIG[s].label.toUpperCase(),
+    }));
+  }, [statusOptions]);
 
   useEffect(() => {
     if (!notifyDropdownOpen && !bellMemberDropdownOpen) return;
@@ -294,12 +314,12 @@ export function AddTaskDialog({ status, onClose, onCreate, memberOptions }: AddT
               <div className="flex items-center gap-2 relative">
                 <select
                   value={taskStatus}
-                  onChange={(e) => setTaskStatus(e.target.value as TaskStatus)}
+                  onChange={(e) => setTaskStatus(e.target.value)}
                   className="px-2.5 py-1.5 border border-gray-200 rounded text-[11px] font-bold text-gray-600 hover:bg-gray-50"
                 >
-                  {(Object.keys(STATUS_CONFIG) as TaskStatus[]).map((s) => (
-                    <option key={s} value={s}>
-                      {STATUS_CONFIG[s].label.toUpperCase()}
+                  {statusSelectOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
                     </option>
                   ))}
                 </select>

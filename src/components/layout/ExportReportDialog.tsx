@@ -29,7 +29,7 @@ import {
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { cn } from '@/lib/utils';
 import type { Task, TaskStatus } from '@/types';
-import { STATUS_CONFIG } from '@/types';
+import { STATUS_CONFIG, isBuiltinTaskStatus } from '@/types';
 
 export type ExportReportOptions = {
   scope: 'all' | 'space';
@@ -195,7 +195,9 @@ export function ExportReportDialog({
         for (const [sid, tasks] of bySpace) {
           const name = spaceNameById[sid] ?? sid;
           const counts = Object.fromEntries(statuses.map((s) => [s, 0])) as Record<TaskStatus, number>;
-          for (const t of tasks) counts[t.status] += 1;
+          for (const t of tasks) {
+            if (isBuiltinTaskStatus(t.status)) counts[t.status] += 1;
+          }
           rows.push([
             name,
             String(tasks.length),
@@ -224,7 +226,11 @@ export function ExportReportDialog({
           const sid = listMeta?.space_id ?? '';
           rows.push([
             task.title,
-            STATUS_CONFIG[task.status].label,
+            isBuiltinTaskStatus(task.status)
+              ? STATUS_CONFIG[task.status].label
+              : listMeta?.kanban_custom_columns?.find((c) => c.id === task.status)?.label ??
+                listMeta?.kanban_column_labels?.[task.status] ??
+                task.status,
             task.priority,
             spaceNameById[sid] ?? '',
             listMeta ? listNameById[listMeta.id] ?? listMeta.name : task.list_id,

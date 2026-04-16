@@ -23,6 +23,7 @@ import {
   canDeleteList,
   canDeleteSpace,
   canInviteMembers,
+  canManageStructure,
   canManageWorkspace,
   canUpdateTask,
   canViewWorkspaceByDepartment,
@@ -41,15 +42,46 @@ function normalizeDepartment(input) {
 }
 
 const TASK_STATUSES = ['todo', 'in_progress', 'hold', 'revision', 'complete'];
+const DEFAULT_CUSTOM_COLUMN_COLOR = '#A855F7';
 
-function normalizeKanbanColumnOrder(order) {
-  if (!Array.isArray(order) || order.length !== TASK_STATUSES.length) return null;
-  const set = new Set(order);
-  if (set.size !== TASK_STATUSES.length) return null;
-  for (const s of TASK_STATUSES) {
-    if (!set.has(s)) return null;
+function normalizeHexColor(input) {
+  const raw = String(input || '').trim();
+  if (/^#([0-9a-fA-F]{6})$/.test(raw)) return raw.toUpperCase();
+  return DEFAULT_CUSTOM_COLUMN_COLOR;
+}
+
+function normalizeKanbanColumnOrder(order, list) {
+  const customCols = Array.isArray(list.kanbanCustomColumns) ? list.kanbanCustomColumns : [];
+  const customIds = customCols.map((c) => c.id).filter(Boolean);
+  const allowed = new Set([...TASK_STATUSES, ...customIds]);
+  const defaultOrder = [...TASK_STATUSES, ...customIds];
+
+  if (!order || !Array.isArray(order)) return defaultOrder;
+  if (order.length < 1) return null;
+
+  const seen = new Set();
+  for (const k of order) {
+    if (!allowed.has(k)) return null;
+    if (seen.has(k)) return null;
+    seen.add(k);
+  }
+
+  // Custom columns must stay visible unless explicitly deleted.
+  for (const id of customIds) {
+    if (!seen.has(id)) return null;
   }
   return order;
+}
+
+function resolveKanbanOrder(list) {
+  const normalized = normalizeKanbanColumnOrder(list.kanbanColumnOrder, list);
+  return normalized || [...TASK_STATUSES, ...(list.kanbanCustomColumns || []).map((c) => c.id)];
+}
+
+function isValidTaskStatusForList(list, status) {
+  if (!status || typeof status !== 'string') return false;
+  if (TASK_STATUSES.includes(status)) return true;
+  return (list.kanbanCustomColumns || []).some((c) => c.id === status);
 }
 
 function serializeList(l) {
@@ -57,6 +89,13 @@ function serializeList(l) {
   const plainLabels =
     labelsRaw && typeof labelsRaw === 'object' && !Array.isArray(labelsRaw) ? { ...labelsRaw } : {};
   const createdAt = l.createdAt instanceof Date ? l.createdAt : new Date(l.createdAt);
+  const customCols = Array.isArray(l.kanbanCustomColumns) ? l.kanbanCustomColumns : [];
+  const kanban_custom_columns = customCols.map((c) => ({
+    id: c.id,
+    label: c.label,
+    color: normalizeHexColor(c.color),
+  }));
+  const orderResolved = resolveKanbanOrder(l);
   return {
     id: l._id,
     folder_id: l.folderId ?? null,
@@ -64,11 +103,9 @@ function serializeList(l) {
     name: l.name,
     created_by: l.createdBy,
     created_at: createdAt.toISOString(),
-    kanban_column_order:
-      Array.isArray(l.kanbanColumnOrder) && l.kanbanColumnOrder.length === TASK_STATUSES.length
-        ? [...l.kanbanColumnOrder]
-        : null,
+    kanban_column_order: orderResolved,
     kanban_column_labels: plainLabels,
+    kanban_custom_columns,
   };
 }
 
@@ -143,20 +180,34 @@ async function ensureDefaultDepartmentUnderMaster(workspace, master, userId) {
   });
 }
 
-function canAccessSpaceByDepartment({ role, userDepartment, workspaceDepartment, spaceDepartment, spaceName }) {
+function canAccessSpaceByDepartment({
+  role,
+  userDepartment,
+  workspaceDepartment,
+  spaceDepartment,
+  isDepartmentMain = false,
+}) {
   if (role === 'admin') return true;
   const userNorm = normalizeDepartment(userDepartment);
   if (!userNorm) return false;
+
+  // Main department folders are visible to all workspace members.
+  if (isDepartmentMain) return true;
 
   const explicitSpaceNorm = normalizeDepartment(spaceDepartment);
   if (explicitSpaceNorm) return explicitSpaceNorm === userNorm;
 
   const workspaceNorm = normalizeDepartment(workspaceDepartment);
-  if (workspaceNorm && workspaceNorm !== userNorm) return false;
+  if (workspaceNorm) return workspaceNorm === userNorm;
 
-  const spaceNameNorm = normalizeDepartment(spaceName);
-  if (!spaceNameNorm) return false;
-  return spaceNameNorm.includes(userNorm) || userNorm.includes(spaceNameNorm);
+  // If department cannot be inferred, keep private by default.
+  return false;
+}
+
+async function isDepartmentMainSpace(space) {
+  if (!space || space.isMasterTeamSpace || !space.parentSpaceId) return false;
+  const parent = await Space.findById(space.parentSpaceId).lean();
+  return Boolean(parent?.isMasterTeamSpace);
 }
 
 async function applyPendingInvitesForUser(user) {
@@ -284,8 +335,9 @@ async function loadAggregatedNavigation(userId) {
     const roleForWs = (await getRole(workspace._id, userId)) ?? 'employee';
     await ensureMasterTeamSpace(workspace._id, userId);
     let spaceRows = await Space.find({ workspaceId: workspace._id }).sort({ createdAt: 1 }).lean();
+    const masterSpace = spaceRows.find((s) => s.isMasterTeamSpace);
     if (workspace._id === activeWorkspace._id) {
-      const master = spaceRows.find((s) => s.isMasterTeamSpace);
+      const master = masterSpace;
       if (master) {
         await ensureDefaultDepartmentUnderMaster(workspace, master, userId);
         spaceRows = await Space.find({ workspaceId: workspace._id }).sort({ createdAt: 1 }).lean();
@@ -301,6 +353,7 @@ async function loadAggregatedNavigation(userId) {
           workspaceDepartment: workspace.department,
           spaceDepartment: space.department,
           spaceName: space.name,
+          isDepartmentMain: Boolean(masterSpace && space.parentSpaceId === masterSpace._id),
         })
     );
     if (!visibleSpaceRows.length) continue;
@@ -815,6 +868,7 @@ export function buildRoutes() {
     if (!role) return res.status(403).json({ message: 'No permission' });
     const currentUser = await User.findById(req.session.userId).lean();
     const workspace = await Workspace.findById(space.workspaceId).lean();
+    const isDepartmentMain = await isDepartmentMainSpace(space);
     if (!canViewWorkspaceByDepartment(currentUser?.department ?? null, workspace?.department ?? null, role)) {
       return res.status(403).json({ message: 'Department access blocked' });
     }
@@ -825,6 +879,7 @@ export function buildRoutes() {
         workspaceDepartment: workspace?.department ?? null,
         spaceDepartment: space.department,
         spaceName: space.name,
+        isDepartmentMain,
       })
     ) {
       return res.status(403).json({ message: 'Space department access blocked' });
@@ -894,27 +949,131 @@ export function buildRoutes() {
 
   router.patch('/lists/:listId', requireAuth, async (req, res) => {
     const { listId } = req.params;
-    const { kanbanColumnOrder, kanbanColumnLabels } = req.body ?? {};
+    const { kanbanColumnOrder, kanbanColumnLabels, addKanbanColumn, updateKanbanCustomColumn, deleteKanbanCustomColumn, deleteKanbanColumn } = req.body ?? {};
     const list = await List.findById(listId);
     if (!list) return res.status(404).json({ message: 'List not found' });
     const space = await Space.findById(list.spaceId).lean();
     if (!space) return res.status(404).json({ message: 'Space not found' });
 
     const role = await getRole(space.workspaceId, req.session.userId);
-    if (role !== 'admin') {
-      return res.status(403).json({ message: 'Only admin can rename columns or change column order.' });
+    if (!canManageStructure(role)) {
+      return res.status(403).json({ message: 'Only admin, manager, or team lead can change board columns.' });
     }
 
-    if (kanbanColumnOrder === undefined && kanbanColumnLabels === undefined) {
+    const hasWork =
+      kanbanColumnOrder !== undefined ||
+      kanbanColumnLabels !== undefined ||
+      addKanbanColumn !== undefined ||
+      updateKanbanCustomColumn !== undefined ||
+      deleteKanbanCustomColumn !== undefined ||
+      deleteKanbanColumn !== undefined;
+    if (!hasWork) {
       return res.status(400).json({ message: 'Nothing to update' });
     }
 
     const $set = {};
+
+    if (addKanbanColumn !== undefined) {
+      const label = String(addKanbanColumn.label ?? '')
+        .trim()
+        .slice(0, 80);
+      if (!label) return res.status(400).json({ message: 'Column label required' });
+      const color = normalizeHexColor(addKanbanColumn.color);
+      const newId = `custom_${randomUUID().replace(/-/g, '')}`;
+      const prevCustom = list.kanbanCustomColumns || [];
+      const orderBase = resolveKanbanOrder({ ...list.toObject(), kanbanCustomColumns: prevCustom });
+      $set.kanbanCustomColumns = [...prevCustom, { id: newId, label, color }];
+      $set.kanbanColumnOrder = [...orderBase, newId];
+    }
+
+    if (updateKanbanCustomColumn !== undefined) {
+      const colId = String(updateKanbanCustomColumn.id ?? '').trim();
+      const label = String(updateKanbanCustomColumn.label ?? '')
+        .trim()
+        .slice(0, 80);
+      if (!colId || !label) return res.status(400).json({ message: 'Invalid column' });
+      const color =
+        updateKanbanCustomColumn.color === undefined
+          ? null
+          : normalizeHexColor(updateKanbanCustomColumn.color);
+      const cols = (addKanbanColumn !== undefined ? $set.kanbanCustomColumns : list.kanbanCustomColumns) || [];
+      const idx = cols.findIndex((c) => c.id === colId);
+      if (idx === -1) return res.status(400).json({ message: 'Unknown column' });
+      const next = [...cols];
+      next[idx] = {
+        ...next[idx],
+        label,
+        ...(color ? { color } : {}),
+      };
+      $set.kanbanCustomColumns = next;
+    }
+
+    if (deleteKanbanCustomColumn !== undefined) {
+      const colId = String(deleteKanbanCustomColumn.id ?? '').trim();
+      if (!colId) return res.status(400).json({ message: 'Invalid column' });
+      const cols = ($set.kanbanCustomColumns || list.kanbanCustomColumns) || [];
+      const exists = cols.some((c) => c.id === colId);
+      if (!exists) return res.status(400).json({ message: 'Unknown column' });
+      $set.kanbanCustomColumns = cols.filter((c) => c.id !== colId);
+
+      const orderSource = resolveKanbanOrder({
+        ...list.toObject(),
+        kanbanCustomColumns: $set.kanbanCustomColumns,
+      });
+      const orderBase = orderSource.filter((k) => k !== colId);
+      $set.kanbanColumnOrder = normalizeKanbanColumnOrder(orderBase, {
+        ...list.toObject(),
+        kanbanCustomColumns: $set.kanbanCustomColumns,
+      });
+
+      const nextLabels =
+        list.kanbanColumnLabels && typeof list.kanbanColumnLabels === 'object'
+          ? { ...list.kanbanColumnLabels }
+          : {};
+      delete nextLabels[colId];
+      $set.kanbanColumnLabels = nextLabels;
+
+      // Keep tasks safe: move deleted-column tasks back to TO DO.
+      await Task.updateMany({ listId: listId, status: colId }, { $set: { status: 'todo' } });
+    }
+
+    if (deleteKanbanColumn !== undefined) {
+      const colId = String(deleteKanbanColumn.id ?? '').trim();
+      if (!colId) return res.status(400).json({ message: 'Invalid column' });
+      const currentOrder = resolveKanbanOrder({
+        ...list.toObject(),
+        ...$set,
+      });
+      if (!currentOrder.includes(colId)) return res.status(400).json({ message: 'Unknown column' });
+      if (currentOrder.length <= 1) return res.status(400).json({ message: 'At least one column is required' });
+
+      const nextOrder = currentOrder.filter((k) => k !== colId);
+      const fallbackStatus = nextOrder[0];
+      $set.kanbanColumnOrder = nextOrder;
+
+      if (!TASK_STATUSES.includes(colId)) {
+        const cols = ($set.kanbanCustomColumns || list.kanbanCustomColumns) || [];
+        $set.kanbanCustomColumns = cols.filter((c) => c.id !== colId);
+      }
+
+      const labelsCurrent =
+        $set.kanbanColumnLabels ||
+        (list.kanbanColumnLabels && typeof list.kanbanColumnLabels === 'object'
+          ? { ...list.kanbanColumnLabels }
+          : {});
+      delete labelsCurrent[colId];
+      $set.kanbanColumnLabels = labelsCurrent;
+
+      await Task.updateMany({ listId: listId, status: colId }, { $set: { status: fallbackStatus } });
+    }
+
     if (kanbanColumnOrder !== undefined) {
-      const normalized = normalizeKanbanColumnOrder(kanbanColumnOrder);
+      const merged = { ...list.toObject(), ...$set };
+      const normalized = normalizeKanbanColumnOrder(kanbanColumnOrder, merged);
       if (!normalized) return res.status(400).json({ message: 'Invalid column order' });
       $set.kanbanColumnOrder = normalized;
     }
+
     if (kanbanColumnLabels !== undefined) {
       if (kanbanColumnLabels !== null && typeof kanbanColumnLabels !== 'object') {
         return res.status(400).json({ message: 'Invalid column labels' });
@@ -924,13 +1083,19 @@ export function buildRoutes() {
           ? { ...list.kanbanColumnLabels }
           : {};
       const incoming = kanbanColumnLabels || {};
-      for (const k of TASK_STATUSES) {
+      const customIds = (($set.kanbanCustomColumns || list.kanbanCustomColumns) || []).map((c) => c.id);
+      const labelKeys = [...TASK_STATUSES, ...customIds];
+      for (const k of labelKeys) {
         if (incoming[k] === undefined) continue;
         const s = String(incoming[k] ?? '').trim().slice(0, 80);
         if (s) prev[k] = s;
         else delete prev[k];
       }
       $set.kanbanColumnLabels = prev;
+    }
+
+    if (Object.keys($set).length === 0) {
+      return res.status(400).json({ message: 'Nothing to update' });
     }
 
     await List.updateOne({ _id: listId }, { $set });
@@ -1110,6 +1275,7 @@ export function buildRoutes() {
     const space = await Space.findById(list.spaceId).lean();
     const workspace = await Workspace.findById(space.workspaceId).lean();
     const currentUser = await User.findById(req.session.userId).lean();
+    const isDepartmentMain = await isDepartmentMainSpace(space);
     const role = await getRole(space.workspaceId, req.session.userId);
     if (!canCreateTasks(role)) return res.status(403).json({ message: 'No permission' });
     if (
@@ -1119,17 +1285,21 @@ export function buildRoutes() {
         workspaceDepartment: workspace?.department ?? null,
         spaceDepartment: space.department,
         spaceName: space.name,
+        isDepartmentMain,
       })
     ) {
       return res.status(403).json({ message: 'Space department access blocked' });
     }
+
+    let st = typeof status === 'string' ? status : 'todo';
+    if (!isValidTaskStatusForList(list, st)) st = 'todo';
 
     const task = await Task.create({
       _id: randomUUID(),
       listId,
       title,
       description: typeof description === 'string' ? description : undefined,
-      status,
+      status: st,
       priority,
       startDate: startDate ? new Date(startDate) : null,
       dueDate: endDate ? new Date(endDate) : null,
@@ -1202,6 +1372,7 @@ export function buildRoutes() {
     const space = await Space.findById(list.spaceId).lean();
     const workspace = await Workspace.findById(space.workspaceId).lean();
     const currentUser = await User.findById(req.session.userId).lean();
+    const isDepartmentMain = await isDepartmentMainSpace(space);
     const role = await getRole(space.workspaceId, req.session.userId);
     if (!canUpdateTask(role)) return res.status(403).json({ message: 'No permission' });
     if (
@@ -1211,9 +1382,13 @@ export function buildRoutes() {
         workspaceDepartment: workspace?.department ?? null,
         spaceDepartment: space.department,
         spaceName: space.name,
+        isDepartmentMain,
       })
     ) {
       return res.status(403).json({ message: 'Space department access blocked' });
+    }
+    if (!isValidTaskStatusForList(list, status)) {
+      return res.status(400).json({ message: 'Invalid status for this list' });
     }
     // Employees can shuffle task status inside their own team space.
 
@@ -1241,6 +1416,7 @@ export function buildRoutes() {
     if (!space) return res.status(404).json({ message: 'Space not found' });
     const workspace = await Workspace.findById(space.workspaceId).lean();
     const currentUser = await User.findById(req.session.userId).lean();
+    const isDepartmentMain = await isDepartmentMainSpace(space);
 
     const role = await getRole(space.workspaceId, req.session.userId);
     if (!canUpdateTask(role)) return res.status(403).json({ message: 'No permission' });
@@ -1251,6 +1427,7 @@ export function buildRoutes() {
         workspaceDepartment: workspace?.department ?? null,
         spaceDepartment: space.department,
         spaceName: space.name,
+        isDepartmentMain,
       })
     ) {
       return res.status(403).json({ message: 'Space department access blocked' });
@@ -1264,7 +1441,12 @@ export function buildRoutes() {
     const updates = {};
     if (typeof title === 'string') updates.title = title.trim() || task.title;
     if (typeof description === 'string') updates.description = description;
-    if (typeof status === 'string') updates.status = status;
+    if (typeof status === 'string') {
+      if (!isValidTaskStatusForList(list, status)) {
+        return res.status(400).json({ message: 'Invalid status for this list' });
+      }
+      updates.status = status;
+    }
     if (typeof priority === 'string') updates.priority = priority;
     if (typeof startDate !== 'undefined') updates.startDate = startDate ? new Date(startDate) : null;
     if (typeof endDate !== 'undefined') updates.dueDate = endDate ? new Date(endDate) : null;
@@ -1311,6 +1493,7 @@ export function buildRoutes() {
     if (!space) return res.status(404).json({ message: 'Space not found' });
     const workspace = await Workspace.findById(space.workspaceId).lean();
     const currentUser = await User.findById(req.session.userId).lean();
+    const isDepartmentMain = await isDepartmentMainSpace(space);
 
     const role = await getRole(space.workspaceId, req.session.userId);
     if (!canUpdateTask(role)) return res.status(403).json({ message: 'No permission' });
@@ -1321,6 +1504,7 @@ export function buildRoutes() {
         workspaceDepartment: workspace?.department ?? null,
         spaceDepartment: space.department,
         spaceName: space.name,
+        isDepartmentMain,
       })
     ) {
       return res.status(403).json({ message: 'Space department access blocked' });
@@ -1350,6 +1534,7 @@ export function buildRoutes() {
     if (!space) return res.status(404).json({ message: 'Space not found' });
     const workspace = await Workspace.findById(space.workspaceId).lean();
     const currentUser = await User.findById(req.session.userId).lean();
+    const isDepartmentMain = await isDepartmentMainSpace(space);
 
     const role = await getRole(space.workspaceId, req.session.userId);
     if (!role) return res.status(403).json({ message: 'No permission' });
@@ -1363,6 +1548,7 @@ export function buildRoutes() {
         workspaceDepartment: workspace?.department ?? null,
         spaceDepartment: space.department,
         spaceName: space.name,
+        isDepartmentMain,
       })
     ) {
       return res.status(403).json({ message: 'Space department access blocked' });

@@ -82,6 +82,8 @@ export interface List {
   name: string;
   created_by?: string;
   created_at: string;
+  /** True for the cross-team shared list under a department-main space. */
+  is_shared_main_list?: boolean;
   /** Admin / TL / Manager: column order (built-in statuses + custom_* ids). */
   kanban_column_order?: string[] | null;
   /** Optional display label overrides per column key. */

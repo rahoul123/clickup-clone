@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
+import { useEffect } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
+import { api } from '@/lib/api';
 
 const Signup = () => {
   const [email, setEmail] = useState('');
@@ -8,11 +10,26 @@ const Signup = () => {
   const [displayName, setDisplayName] = useState('');
   const [department, setDepartment] = useState('');
   const [error, setError] = useState('');
+  const [departments, setDepartments] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const { signUp } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const invitedEmail = useMemo(() => searchParams.get('email')?.trim() || '', [searchParams]);
+
+  useEffect(() => {
+    api.public
+      .departments()
+      .then((result) => {
+        const options = Array.isArray(result?.departments) ? result.departments : [];
+        setDepartments(options);
+        if (!department && options.length) setDepartment(options[0]);
+      })
+      .catch(() => {
+        setDepartments([]);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -55,14 +72,19 @@ const Signup = () => {
           </div>
           <div>
             <label className="block text-sm font-medium text-foreground mb-1">Department</label>
-            <input
-              type="text"
+            <select
               value={department}
               onChange={(e) => setDepartment(e.target.value)}
               required
               className="w-full px-3 py-2 text-sm border border-input rounded-lg bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-              placeholder="Web Development / Google Ads"
-            />
+            >
+              {!departments.length && <option value="">No department available</option>}
+              {departments.map((dep) => (
+                <option key={dep} value={dep}>
+                  {dep}
+                </option>
+              ))}
+            </select>
           </div>
           <div>
             <label className="block text-sm font-medium text-foreground mb-1">Email</label>

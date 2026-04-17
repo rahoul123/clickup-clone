@@ -31,21 +31,23 @@ export function toSafeUser(user) {
 }
 
 export async function registerUser({ email, password, displayName }) {
-  const existing = await User.findOne({ email: email.toLowerCase() });
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const existing = await User.findOne({ email: normalizedEmail });
   if (existing) throw new Error('Email already in use');
 
   const passwordHash = await bcrypt.hash(password, 10);
   const user = await User.create({
     _id: randomUUID(),
-    email: email.toLowerCase(),
-    displayName: displayName?.trim() || email.split('@')[0],
+    email: normalizedEmail,
+    displayName: displayName?.trim() || normalizedEmail.split('@')[0],
     passwordHash,
   });
   return user;
 }
 
 export async function loginUser({ email, password }) {
-  const user = await User.findOne({ email: email.toLowerCase() });
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const user = await User.findOne({ email: normalizedEmail });
   if (!user) throw new Error('Invalid email or password');
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) throw new Error('Invalid email or password');

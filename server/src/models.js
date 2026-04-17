@@ -85,6 +85,12 @@ const listSchema = new Schema(
     folderId: { type: String, default: null },
     name: { type: String, required: true },
     createdBy: { type: String, required: true },
+    /**
+     * Cross-team delegation list directly under a department-main space.
+     * Visible to every workspace member so they can assign tasks to that dept
+     * without exposing the dept's private sub-folder lists.
+     */
+    isSharedMainList: { type: Boolean, default: false },
     /** Permutation of task status keys — board column order (admin). */
     kanbanColumnOrder: { type: [String], default: undefined },
     /** Custom header labels per status key (admin). */

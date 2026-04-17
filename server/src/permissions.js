@@ -22,12 +22,12 @@ export function canManageWorkspace(role) {
 
 export function canInviteMembers(role) {
   const resolved = normalizeRole(role);
-  return resolved === 'admin' || resolved === 'manager' || resolved === 'team_lead';
+  return resolved === 'admin';
 }
 
 export function canManageStructure(role) {
   const resolved = normalizeRole(role);
-  return resolved === 'admin' || resolved === 'manager' || resolved === 'team_lead';
+  return resolved === 'admin';
 }
 
 export function canCreateSpace(role) {
@@ -42,7 +42,7 @@ export function canCreateList(role) {
 
 export function canDeleteSpace(role) {
   const resolved = normalizeRole(role);
-  return resolved === 'admin' || resolved === 'manager';
+  return resolved === 'admin';
 }
 
 export function canDeleteList(role) {
@@ -62,7 +62,20 @@ export function canUpdateTask(role) {
 
 export function canViewWorkspaceByDepartment(userDepartment, workspaceDepartment, role) {
   const resolved = normalizeRole(role);
+  if (!resolved || resolved === 'guest') return false;
   if (!workspaceDepartment) return true;
   if (resolved === 'admin') return true;
-  return userDepartment === workspaceDepartment;
+  const userNorm = String(userDepartment || '')
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .trim();
+  const workspaceNorm = String(workspaceDepartment || '')
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .trim();
+  // Team is now organized by department spaces inside a workspace.
+  // Workspace-level blocking can hide the whole app for TL/Manager;
+  // actual department isolation is enforced at space-level.
+  if (userNorm === workspaceNorm) return true;
+  return resolved === 'manager' || resolved === 'team_lead' || resolved === 'employee';
 }

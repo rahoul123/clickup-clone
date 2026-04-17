@@ -67,20 +67,20 @@ const Index = () => {
     ? rolesByWorkspaceId[activeWorkspaceId] ?? 'employee'
     : 'employee';
 
-  const normalizeDept = (val?: string | null) => String(val || '').toLowerCase().replace(/\s+/g, '').trim();
-
   const workspaceSections = useMemo(() => {
+    const normalizeDept = (val?: string | null) =>
+      String(val || '').toLowerCase().replace(/\s+/g, '').trim();
     const myDept = normalizeDept(user?.department);
     const isMyDepartmentSpace = (space: Space) => {
       if (!myDept) return true;
       const depNorm = normalizeDept(space.department);
-      if (depNorm) return depNorm === myDept;
+      if (depNorm) return depNorm === myDept || depNorm.includes(myDept) || myDept.includes(depNorm);
       const nameNorm = normalizeDept(space.name);
-      return Boolean(nameNorm && (nameNorm.includes(myDept) || myDept.includes(nameNorm)));
+      return Boolean(nameNorm && (nameNorm === myDept || nameNorm.includes(myDept) || myDept.includes(nameNorm)));
     };
     return workspaces.map((ws) => {
       const wsRole = rolesByWorkspaceId[ws.id] ?? 'employee';
-      const canSeeAllDeptLists = wsRole === 'admin';
+      const isAdmin = wsRole === 'admin';
       const wsSpaces = spaces.filter((s) => s.workspace_id === ws.id);
       const master = wsSpaces.find((s) => s.is_master_team_space);
       if (master) {
@@ -100,19 +100,8 @@ const Index = () => {
                 id: space.id,
                 name: space.name,
                 color: space.color,
-                noExpand:
-                  !canSeeAllDeptLists &&
-                  Boolean(myDept) &&
-                  !isMyDepartmentSpace(space),
-                lists:
-                  !canSeeAllDeptLists &&
-                  Boolean(myDept) &&
-                  !isMyDepartmentSpace(space)
-                    ? lists
-                        .filter((l) => l.space_id === space.id)
-                        .slice(0, 1)
-                        .map((l) => ({ id: l.id, name: l.name }))
-                    : lists.filter((l) => l.space_id === space.id).map((l) => ({ id: l.id, name: l.name })),
+                noExpand: !isAdmin && Boolean(myDept) && !isMyDepartmentSpace(space),
+                lists: lists.filter((l) => l.space_id === space.id).map((l) => ({ id: l.id, name: l.name })),
               })),
             },
           ],
@@ -199,10 +188,14 @@ const Index = () => {
   }, []);
 
   const canManageWorkspace = activeRole === 'admin';
-  const canInviteMembers = activeRole === 'admin' || activeRole === 'manager' || activeRole === 'team_lead';
+  const canInviteMembers = activeRole === 'admin';
   const canCreateSpaces = activeRole === 'admin';
-  const canManageStructure = activeRole === 'admin' || activeRole === 'manager' || activeRole === 'team_lead';
-  const canDeleteSpaces = activeRole === 'admin' || activeRole === 'manager';
+  /** Kanban column (group) add/edit/rename/delete — admin only. */
+  const canManageStructure = activeRole === 'admin';
+  /** Folder/list create & delete — admin / manager / team lead. */
+  const canManageLists =
+    activeRole === 'admin' || activeRole === 'manager' || activeRole === 'team_lead';
+  const canDeleteSpaces = activeRole === 'admin';
   const canCreateTasks = activeRole !== 'guest';
   const userDisplayLabel = user?.displayName?.trim() || user?.email || 'User';
   const formatStatusLabel = (status: string) => {
@@ -482,7 +475,7 @@ const Index = () => {
 
   const createList = async (spaceId: string, name: string) => {
     if (!user) return;
-    if (!canManageStructure) {
+    if (!canManageLists) {
       window.alert('Aapke role me list create karne ki permission nahi hai.');
       return;
     }
@@ -517,7 +510,7 @@ const Index = () => {
   };
 
   const deleteList = async (listId: string, listName: string) => {
-    if (!canManageStructure) {
+    if (!canManageLists) {
       window.alert('Aapke role me list delete karne ki permission nahi hai.');
       return;
     }
@@ -544,7 +537,7 @@ const Index = () => {
   ) => {
     if (!activeWorkspaceId) return;
     if (!canInviteMembers) {
-      window.alert('Sirf admin/team lead/manager invite kar sakte hain.');
+      window.alert('Sirf admin invite kar sakta hai.');
       return;
     }
     const result = await api.app.inviteMember(activeWorkspaceId, email, role, department);
@@ -728,6 +721,7 @@ const Index = () => {
         onSelectList={handleSelectList}
         workspaceName={activeWorkspace?.name ?? 'Team Workspace'}
         workspaceSections={workspaceSections}
+        activeWorkspaceId={activeWorkspaceId}
         activeNav={
           pageView === 'home'
             ? 'home'
@@ -760,6 +754,7 @@ const Index = () => {
         canInviteMembers={canInviteMembers}
         canCreateSpaces={canCreateSpaces}
         canManageStructure={canManageStructure}
+        canManageLists={canManageLists}
         canDeleteSpaces={canDeleteSpaces}
         notificationCount={notificationUnreadCount}
         onLogout={() =>

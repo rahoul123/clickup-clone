@@ -41,6 +41,20 @@ function normalizeDepartment(input) {
     .trim();
 }
 
+function isSameDepartment(a, b) {
+  const left = normalizeDepartment(a);
+  const right = normalizeDepartment(b);
+  if (!left || !right) return false;
+  return left === right;
+}
+
+function isDepartmentMatch(userDepartment, targetDepartment) {
+  const userNorm = normalizeDepartment(userDepartment);
+  const targetNorm = normalizeDepartment(targetDepartment);
+  if (!userNorm || !targetNorm) return false;
+  return userNorm === targetNorm || userNorm.includes(targetNorm) || targetNorm.includes(userNorm);
+}
+
 const TASK_STATUSES = ['todo', 'in_progress', 'hold', 'revision', 'complete'];
 const DEFAULT_CUSTOM_COLUMN_COLOR = '#A855F7';
 
@@ -103,6 +117,7 @@ function serializeList(l) {
     name: l.name,
     created_by: l.createdBy,
     created_at: createdAt.toISOString(),
+    is_shared_main_list: Boolean(l.isSharedMainList),
     kanban_column_order: orderResolved,
     kanban_column_labels: plainLabels,
     kanban_custom_columns,
@@ -185,23 +200,89 @@ function canAccessSpaceByDepartment({
   userDepartment,
   workspaceDepartment,
   spaceDepartment,
+  spaceName,
   isDepartmentMain = false,
 }) {
   if (role === 'admin') return true;
+
   const userNorm = normalizeDepartment(userDepartment);
   if (!userNorm) return false;
 
-  // Main department folders are visible to all workspace members.
-  if (isDepartmentMain) return true;
+  if (isDepartmentMain) {
+    const mainSpaceDept = normalizeDepartment(spaceDepartment);
+    if (mainSpaceDept) return isDepartmentMatch(userNorm, mainSpaceDept);
+    const mainSpaceName = normalizeDepartment(spaceName);
+    if (mainSpaceName) return mainSpaceName === userNorm || mainSpaceName.includes(userNorm) || userNorm.includes(mainSpaceName);
+  }
 
   const explicitSpaceNorm = normalizeDepartment(spaceDepartment);
-  if (explicitSpaceNorm) return explicitSpaceNorm === userNorm;
+  if (explicitSpaceNorm) return isDepartmentMatch(userNorm, explicitSpaceNorm);
 
   const workspaceNorm = normalizeDepartment(workspaceDepartment);
-  if (workspaceNorm) return workspaceNorm === userNorm;
+  if (workspaceNorm) return isDepartmentMatch(userNorm, workspaceNorm);
 
-  // If department cannot be inferred, keep private by default.
   return false;
+}
+
+/** Ensure each department-main space has a single shared cross-team list. */
+async function ensureSharedMainList(space, userId) {
+  const existing = await List.findOne({ spaceId: space._id, isSharedMainList: true }).lean();
+  if (existing) return existing;
+  const list = await List.create({
+    _id: randomUUID(),
+    spaceId: space._id,
+    name: 'Shared Tasks',
+    isSharedMainList: true,
+    createdBy: userId,
+  });
+  return list.toObject ? list.toObject() : list;
+}
+
+async function findTeamLeadForDepartment(workspaceId, department, excludeUserId = null) {
+  const departmentNorm = normalizeDepartment(department);
+  if (!departmentNorm) return null;
+
+  const teamLeadRows = await UserRole.find({ workspaceId, role: 'team_lead' }).lean();
+  if (!teamLeadRows.length) return null;
+
+  const userIds = teamLeadRows.map((row) => row.userId);
+  const users = await User.find({ _id: { $in: userIds } }).lean();
+  const userById = Object.fromEntries(users.map((u) => [u._id, u]));
+
+  for (const row of teamLeadRows) {
+    if (excludeUserId && row.userId === excludeUserId) continue;
+    const candidate = userById[row.userId];
+    if (!candidate) continue;
+    if (normalizeDepartment(candidate.department) === departmentNorm) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+/**
+ * Check if a user can read/write tasks in a given list. Shared cross-team
+ * lists (`list.isSharedMainList`) are accessible to any workspace member,
+ * otherwise fall back to strict department-scoped space access.
+ */
+function canAccessListForTasks({
+  list,
+  role,
+  userDepartment,
+  workspaceDepartment,
+  spaceDepartment,
+  spaceName,
+  isDepartmentMain,
+}) {
+  if (list?.isSharedMainList) return true;
+  return canAccessSpaceByDepartment({
+    role,
+    userDepartment,
+    workspaceDepartment,
+    spaceDepartment,
+    spaceName,
+    isDepartmentMain,
+  });
 }
 
 async function isDepartmentMainSpace(space) {
@@ -344,21 +425,62 @@ async function loadAggregatedNavigation(userId) {
       }
     }
 
+    const isDepartmentMainFor = (space) =>
+      Boolean(masterSpace && space.parentSpaceId === masterSpace._id);
+    const hasFullSpaceAccess = (space) =>
+      space.isMasterTeamSpace ||
+      canAccessSpaceByDepartment({
+        role: roleForWs,
+        userDepartment: currentUser?.department ?? null,
+        workspaceDepartment: workspace.department,
+        spaceDepartment: space.department,
+        spaceName: space.name,
+        isDepartmentMain: isDepartmentMainFor(space),
+      });
+    // Sidebar visibility: master + all department-main folders + own-dept sub-spaces.
     const visibleSpaceRows = spaceRows.filter(
-      (space) =>
-        space.isMasterTeamSpace ||
-        canAccessSpaceByDepartment({
-          role: roleForWs,
-          userDepartment: currentUser?.department ?? null,
-          workspaceDepartment: workspace.department,
-          spaceDepartment: space.department,
-          spaceName: space.name,
-          isDepartmentMain: Boolean(masterSpace && space.parentSpaceId === masterSpace._id),
-        })
+      (space) => space.isMasterTeamSpace || isDepartmentMainFor(space) || hasFullSpaceAccess(space)
     );
     if (!visibleSpaceRows.length) continue;
 
-    let listRows = await List.find({ spaceId: { $in: visibleSpaceRows.map((s) => s._id) } }).sort({ createdAt: 1 }).lean();
+    const ownAccessSpaces = visibleSpaceRows.filter((s) => hasFullSpaceAccess(s));
+    const ownAccessSpaceIds = new Set(ownAccessSpaces.map((s) => s._id));
+    const crossDeptMainSpaces = visibleSpaceRows.filter(
+      (s) => isDepartmentMainFor(s) && !ownAccessSpaceIds.has(s._id)
+    );
+
+    // Ensure every cross-dept main space has exactly one shared list so
+    // the clicker always has a board to land on.
+    for (const space of crossDeptMainSpaces) {
+      await ensureSharedMainList(space, userId);
+    }
+
+    let ownLists = await List.find({ spaceId: { $in: [...ownAccessSpaceIds] } }).sort({ createdAt: 1 }).lean();
+    const crossLists = crossDeptMainSpaces.length
+      ? await List.find({
+          spaceId: { $in: crossDeptMainSpaces.map((s) => s._id) },
+          isSharedMainList: true,
+        }).sort({ createdAt: 1 }).lean()
+      : [];
+
+    // Auto-create a default list if user's own department has no lists at all.
+    if (!ownLists.length && ownAccessSpaces.length) {
+      const preferred =
+        ownAccessSpaces.find((s) => !s.isMasterTeamSpace && isDepartmentMainFor(s)) ||
+        ownAccessSpaces.find((s) => !s.isMasterTeamSpace) ||
+        ownAccessSpaces[0];
+      if (preferred) {
+        const defaultList = await List.create({
+          _id: randomUUID(),
+          spaceId: preferred._id,
+          name: 'Main Tasks',
+          createdBy: userId,
+        });
+        ownLists = [defaultList.toObject ? defaultList.toObject() : defaultList];
+      }
+    }
+
+    const listRows = [...ownLists, ...crossLists];
 
     aggregatedSpaces.push(...visibleSpaceRows);
     aggregatedLists.push(...listRows);
@@ -377,7 +499,7 @@ async function loadAggregatedNavigation(userId) {
     }
   }
 
-  if (!aggregatedSpaces.length || !aggregatedLists.length) {
+  if (!aggregatedSpaces.length) {
     return { error: { status: 403, message: 'No team space access for your department.' } };
   }
 
@@ -387,7 +509,7 @@ async function loadAggregatedNavigation(userId) {
       return sp && sp.workspaceId === activeWorkspace._id;
     })
     .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-  const activeListId = listsInActiveWs[0]?._id ?? aggregatedLists[0]._id;
+  const activeListId = listsInActiveWs[0]?._id ?? aggregatedLists[0]?._id ?? null;
 
   return {
     currentUser,
@@ -423,16 +545,37 @@ export function buildRoutes() {
 
   router.get('/health', (_req, res) => res.json({ ok: true }));
 
+  router.get('/public/departments', async (_req, res) => {
+    const [spaces, workspaces] = await Promise.all([
+      Space.find({ isMasterTeamSpace: { $ne: true } }).lean(),
+      Workspace.find({}).lean(),
+    ]);
+    const names = new Set();
+    for (const space of spaces) {
+      const fromDepartment = String(space.department || '').trim();
+      const fromName = String(space.name || '').trim();
+      if (fromDepartment) names.add(fromDepartment);
+      if (fromName && fromName.toLowerCase() !== 'general') names.add(fromName);
+    }
+    for (const workspace of workspaces) {
+      const wsDepartment = String(workspace.department || '').trim();
+      if (wsDepartment) names.add(wsDepartment);
+    }
+    const departments = [...names].sort((a, b) => a.localeCompare(b));
+    res.json({ departments });
+  });
+
   router.post('/auth/signup', async (req, res) => {
     try {
       const { email, password, displayName, department } = req.body ?? {};
       if (!email || !password) return res.status(400).json({ message: 'Email and password required' });
-      const user = await registerUser({ email, password, displayName });
+      let user = await registerUser({ email, password, displayName });
       if (department?.trim()) {
         await User.updateOne({ _id: user._id }, { $set: { department: department.trim() } });
         user.department = department.trim();
       }
       await applyPendingInvitesForUser(user);
+      user = await User.findById(user._id).lean();
       req.session.userId = user._id;
       res.json({ user: toSafeUser(user) });
     } catch (error) {
@@ -443,7 +586,9 @@ export function buildRoutes() {
   router.post('/auth/login', async (req, res) => {
     try {
       const { email, password } = req.body ?? {};
-      const user = await loginUser({ email, password });
+      let user = await loginUser({ email, password });
+      await applyPendingInvitesForUser(user);
+      user = await User.findById(user._id).lean();
       req.session.userId = user._id;
       res.json({ user: toSafeUser(user) });
     } catch (error) {
@@ -601,16 +746,31 @@ export function buildRoutes() {
       if (role === 'admin') return true;
       const memberRole = roleByUserId[u._id] ?? 'employee';
       if (role === 'manager') return memberRole === 'manager' || memberRole === 'team_lead' || memberRole === 'employee';
-      if (role === 'team_lead') return memberRole === 'team_lead' || memberRole === 'employee';
+      if (role === 'team_lead') {
+        if (!isSameDepartment(u.department, req.currentUser?.department)) return u._id === userId;
+        return memberRole === 'team_lead' || memberRole === 'employee';
+      }
       return u._id === userId || memberRole === 'employee';
     });
+    const displayNameCount = visibleUsers.reduce((acc, u) => {
+      const key = String(u.displayName || '').trim().toLowerCase();
+      if (!key) return acc;
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+    const formatMemberLabel = (u) => {
+      const baseLabel = u.displayName || u.email || 'Unknown user';
+      const nameKey = String(u.displayName || '').trim().toLowerCase();
+      if (!nameKey || (displayNameCount[nameKey] || 0) < 2) return baseLabel;
+      return `${baseLabel} (${u.email})`;
+    };
     const memberOptions = visibleUsers.map((u) => ({
       id: u._id,
-      label: u.displayName || u.email || 'Unknown user',
+      label: formatMemberLabel(u),
     }));
     const teamMembers = visibleUsers.map((u) => ({
       id: u._id,
-      label: u.displayName || u.email || 'Unknown user',
+      label: formatMemberLabel(u),
       role: roleByUserId[u._id] ?? 'employee',
     }));
 
@@ -885,7 +1045,8 @@ export function buildRoutes() {
       return res.status(403).json({ message: 'Department access blocked' });
     }
     if (
-      !canAccessSpaceByDepartment({
+      !canAccessListForTasks({
+        list,
         role,
         userDepartment: currentUser?.department ?? null,
         workspaceDepartment: workspace?.department ?? null,
@@ -953,6 +1114,26 @@ export function buildRoutes() {
     if (!space) return res.status(404).json({ message: 'Space not found' });
     const role = await getRole(space.workspaceId, req.session.userId);
     if (!canCreateList(role)) return res.status(403).json({ message: 'Only admin/manager/team lead can create folders/lists' });
+
+    // Non-admins can only create lists inside their OWN department's spaces.
+    if (role !== 'admin') {
+      const currentUser = await User.findById(req.session.userId).lean();
+      const workspace = await Workspace.findById(space.workspaceId).lean();
+      const userNorm = normalizeDepartment(currentUser?.department ?? null);
+      const spaceNorm = normalizeDepartment(space.department);
+      const nameNorm = normalizeDepartment(space.name);
+      const workspaceNorm = normalizeDepartment(workspace?.department ?? null);
+      const matchesOwnDept = Boolean(
+        userNorm &&
+          ((spaceNorm && isDepartmentMatch(userNorm, spaceNorm)) ||
+            (!spaceNorm && nameNorm && (nameNorm.includes(userNorm) || userNorm.includes(nameNorm))) ||
+            (!spaceNorm && !nameNorm && workspaceNorm && isDepartmentMatch(userNorm, workspaceNorm)))
+      );
+      if (!matchesOwnDept) {
+        return res.status(403).json({ message: 'You can only create lists inside your own department.' });
+      }
+    }
+
     const list = await List.create({ _id: randomUUID(), spaceId, name, createdBy: req.session.userId });
     res.json({
       list: serializeList(list.toObject()),
@@ -1157,6 +1338,30 @@ export function buildRoutes() {
     const role = await getRole(space.workspaceId, req.session.userId);
     if (!canDeleteList(role)) return res.status(403).json({ message: 'Only admin/manager/team lead can delete lists' });
 
+    // Shared cross-team list is admin-only infrastructure.
+    if (list.isSharedMainList && role !== 'admin') {
+      return res.status(403).json({ message: 'Only admin can delete the shared cross-team list.' });
+    }
+
+    // Non-admins can only delete lists inside their OWN department.
+    if (role !== 'admin') {
+      const currentUser = await User.findById(req.session.userId).lean();
+      const workspace = await Workspace.findById(space.workspaceId).lean();
+      const userNorm = normalizeDepartment(currentUser?.department ?? null);
+      const spaceNorm = normalizeDepartment(space.department);
+      const nameNorm = normalizeDepartment(space.name);
+      const workspaceNorm = normalizeDepartment(workspace?.department ?? null);
+      const matchesOwnDept = Boolean(
+        userNorm &&
+          ((spaceNorm && isDepartmentMatch(userNorm, spaceNorm)) ||
+            (!spaceNorm && nameNorm && (nameNorm.includes(userNorm) || userNorm.includes(nameNorm))) ||
+            (!spaceNorm && !nameNorm && workspaceNorm && isDepartmentMatch(userNorm, workspaceNorm)))
+      );
+      if (!matchesOwnDept) {
+        return res.status(403).json({ message: 'You can only delete lists inside your own department.' });
+      }
+    }
+
     const tasks = await Task.find({ listId }).lean();
     const taskIds = tasks.map((t) => t._id);
     if (taskIds.length) {
@@ -1179,11 +1384,19 @@ export function buildRoutes() {
     const normalizedEmail = String(email || '').toLowerCase().trim();
     if (!normalizedEmail) return res.status(400).json({ message: 'Valid email required' });
     const currentRole = await getRole(workspaceId, req.session.userId);
-    if (!canInviteMembers(currentRole)) return res.status(403).json({ message: 'No permission' });
+    if (!canInviteMembers(currentRole)) return res.status(403).json({ message: 'Only admin can invite members' });
     const user = await User.findOne({ email: normalizedEmail });
     const workspace = await Workspace.findById(workspaceId).lean();
     if (!workspace) return res.status(404).json({ message: 'Workspace not found' });
     const inviteDepartment = String(department || '').trim() || workspace.department;
+    if (targetRole === 'team_lead') {
+      const existingTeamLead = await findTeamLeadForDepartment(workspaceId, inviteDepartment, user?._id ?? null);
+      if (existingTeamLead) {
+        return res.status(409).json({
+          message: `Department already has a team lead (${existingTeamLead.displayName || existingTeamLead.email}).`,
+        });
+      }
+    }
 
     if (!user) {
       await WorkspaceInvite.updateOne(
@@ -1269,6 +1482,19 @@ export function buildRoutes() {
     const memberExists = await WorkspaceMember.findOne({ workspaceId, userId: memberId }).lean();
     if (!memberExists) return res.status(404).json({ message: 'Member not found in workspace' });
 
+    if (nextRole === 'team_lead') {
+      const targetUser = await User.findById(memberId).lean();
+      if (!targetUser?.department) {
+        return res.status(400).json({ message: 'Team lead must have a department assigned.' });
+      }
+      const existingTeamLead = await findTeamLeadForDepartment(workspaceId, targetUser.department, memberId);
+      if (existingTeamLead) {
+        return res.status(409).json({
+          message: `Department already has a team lead (${existingTeamLead.displayName || existingTeamLead.email}).`,
+        });
+      }
+    }
+
     await UserRole.updateOne({ workspaceId, userId: memberId }, { $set: { role: nextRole } }, { upsert: true });
     res.json({ ok: true });
   });
@@ -1291,7 +1517,8 @@ export function buildRoutes() {
     const role = await getRole(space.workspaceId, req.session.userId);
     if (!canCreateTasks(role)) return res.status(403).json({ message: 'No permission' });
     if (
-      !canAccessSpaceByDepartment({
+      !canAccessListForTasks({
+        list,
         role,
         userDepartment: currentUser?.department ?? null,
         workspaceDepartment: workspace?.department ?? null,
@@ -1388,7 +1615,8 @@ export function buildRoutes() {
     const role = await getRole(space.workspaceId, req.session.userId);
     if (!canUpdateTask(role)) return res.status(403).json({ message: 'No permission' });
     if (
-      !canAccessSpaceByDepartment({
+      !canAccessListForTasks({
+        list,
         role,
         userDepartment: currentUser?.department ?? null,
         workspaceDepartment: workspace?.department ?? null,
@@ -1433,7 +1661,8 @@ export function buildRoutes() {
     const role = await getRole(space.workspaceId, req.session.userId);
     if (!canUpdateTask(role)) return res.status(403).json({ message: 'No permission' });
     if (
-      !canAccessSpaceByDepartment({
+      !canAccessListForTasks({
+        list,
         role,
         userDepartment: currentUser?.department ?? null,
         workspaceDepartment: workspace?.department ?? null,
@@ -1510,7 +1739,8 @@ export function buildRoutes() {
     const role = await getRole(space.workspaceId, req.session.userId);
     if (!canUpdateTask(role)) return res.status(403).json({ message: 'No permission' });
     if (
-      !canAccessSpaceByDepartment({
+      !canAccessListForTasks({
+        list,
         role,
         userDepartment: currentUser?.department ?? null,
         workspaceDepartment: workspace?.department ?? null,
@@ -1554,7 +1784,8 @@ export function buildRoutes() {
       return res.status(403).json({ message: 'Department access blocked' });
     }
     if (
-      !canAccessSpaceByDepartment({
+      !canAccessListForTasks({
+        list,
         role,
         userDepartment: currentUser?.department ?? null,
         workspaceDepartment: workspace?.department ?? null,

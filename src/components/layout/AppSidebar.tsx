@@ -29,6 +29,7 @@ interface SidebarItem {
   id: string;
   name: string;
   icon?: React.ReactNode;
+  workspaceId?: string;
   children?: SidebarItem[];
   /** If provided, clicking this space opens board using this list id. */
   openListId?: string;
@@ -72,6 +73,7 @@ interface AppSidebarProps {
       }>;
     }>;
   }>;
+  activeWorkspaceId?: string | null;
   activeNav?: 'home' | 'board' | 'dashboard' | 'notifications' | 'team-members' | 'docs' | 'timesheets';
   onNavigate?: (view: 'home' | 'board' | 'dashboard' | 'notifications' | 'team-members' | 'docs' | 'timesheets') => void;
   onCreateWorkspace: (name: string) => Promise<void> | void;
@@ -83,7 +85,10 @@ interface AppSidebarProps {
   canManageWorkspace: boolean;
   canInviteMembers: boolean;
   canCreateSpaces: boolean;
+  /** Admin-only: kanban columns / board structure controls. */
   canManageStructure: boolean;
+  /** Admin / Manager / Team Lead: create & delete lists (folders) in sidebar. */
+  canManageLists: boolean;
   canDeleteSpaces: boolean;
   notificationCount?: number;
   onLogout: () => Promise<void> | void;
@@ -98,6 +103,7 @@ export function AppSidebar({
   onSelectList,
   workspaceName,
   workspaceSections,
+  activeWorkspaceId = null,
   activeNav = 'board',
   onNavigate,
   onCreateWorkspace,
@@ -110,6 +116,7 @@ export function AppSidebar({
   canInviteMembers,
   canCreateSpaces,
   canManageStructure,
+  canManageLists,
   canDeleteSpaces,
   notificationCount = 0,
   onLogout,
@@ -129,6 +136,12 @@ export function AppSidebar({
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<'employee' | 'team_lead' | 'manager' | 'admin'>('employee');
   const [inviteDepartment, setInviteDepartment] = useState('');
+  const activeWorkspaceSection = workspaceSections.find((s) => s.id === activeWorkspaceId) ?? workspaceSections[0];
+  const inviteDepartmentOptions = (activeWorkspaceSection?.spaces || [])
+    .flatMap((space) => (space.isMasterFolder ? space.children ?? [] : []))
+    .map((child) => child.name.trim())
+    .filter(Boolean)
+    .filter((name, idx, arr) => arr.findIndex((x) => x.toLowerCase() === name.toLowerCase()) === idx);
 
   useEffect(() => {
     setExpandedItems(new Set(workspaceSections.flatMap((s) => s.spaces.map((sp) => sp.id))));
@@ -194,6 +207,29 @@ export function AppSidebar({
 
           {item.type === 'space' && item.isMasterFolder && (
             <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={(e) => e.stopPropagation()}
+                    className="rounded-md p-1 text-sidebar-muted transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                    aria-label="Team space options"
+                  >
+                    <MoreHorizontal className="h-3.5 w-3.5" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48">
+                  <DropdownMenuItem
+                    disabled={!item.workspaceId || !canExportReport?.(item.workspaceId)}
+                    onSelect={() => {
+                      if (!item.workspaceId || !canExportReport?.(item.workspaceId)) return;
+                      onExportReport?.(item.workspaceId);
+                    }}
+                  >
+                    Export report
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <button
                 type="button"
                 disabled={!canCreateSpaces}
@@ -210,18 +246,19 @@ export function AppSidebar({
               </button>
             </div>
           )}
-          {item.type === 'space' && !item.isMasterFolder && (
+          {item.type === 'space' && !item.isMasterFolder && !item.noExpand && (
             <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
               <button
                 type="button"
-                disabled={!canManageStructure}
+                disabled={!canManageLists}
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (!canManageStructure) return;
+                  if (!canManageLists) return;
                   const listName = window.prompt('List name');
                   if (listName?.trim()) onCreateList(item.id, listName.trim());
                 }}
                 className="text-sidebar-muted hover:text-sidebar-foreground disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Add list"
               >
                 <Plus className="w-3.5 h-3.5" />
               </button>
@@ -243,10 +280,10 @@ export function AppSidebar({
           {item.type === 'list' && (
             <button
               type="button"
-              disabled={!canManageStructure}
+              disabled={!canManageLists}
               onClick={(e) => {
                 e.stopPropagation();
-                if (!canManageStructure) return;
+                if (!canManageLists) return;
                 onDeleteList(item.id, item.name);
               }}
               className="text-sidebar-muted opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-30"
@@ -298,7 +335,7 @@ export function AppSidebar({
               if (!canInviteMembers) return;
               setInviteEmail('');
               setInviteRole('employee');
-              setInviteDepartment('');
+              setInviteDepartment(inviteDepartmentOptions[0] ?? '');
               setShowInviteModal(true);
             }}
             className="flex flex-1 items-center justify-center gap-1 rounded-md border border-sidebar-border bg-sidebar-accent/40 px-2 py-1 text-[11px] text-sidebar-foreground transition-colors hover:bg-sidebar-accent disabled:cursor-not-allowed disabled:opacity-50"
@@ -349,61 +386,12 @@ export function AppSidebar({
       <div className="relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 py-2 pr-2 [scrollbar-gutter:stable] [scrollbar-width:thin] [scrollbar-color:hsl(var(--sidebar-border))_transparent] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-sidebar-border/70 hover:[&::-webkit-scrollbar-thumb]:bg-sidebar-border">
         {workspaceSections.map((section) => (
           <div key={section.id} className="mb-3 rounded-lg border border-sidebar-border/60 bg-sidebar-accent/20 py-1.5">
-            <div className="mb-1.5 flex items-center justify-between gap-1 px-2">
-              <div className="flex min-w-0 flex-1 items-center gap-2">
-                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-violet-600 text-[11px] font-bold text-white shadow-sm">
-                  T
-                </div>
-                <div className="min-w-0">
-                  <p className="truncate text-[13px] font-semibold text-sidebar-foreground">Team Space</p>
-                  <p className="truncate text-[10px] text-sidebar-muted" title={section.name}>
-                    {section.name}
-                  </p>
-                </div>
-              </div>
-              <div className="flex shrink-0 items-center gap-0.5">
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      type="button"
-                      className="rounded-md p-1 text-sidebar-muted transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
-                      aria-label="Team space options"
-                    >
-                      <MoreHorizontal className="h-4 w-4" />
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-48">
-                    <DropdownMenuItem
-                      disabled={!canExportReport?.(section.id)}
-                      onSelect={() => {
-                        if (!canExportReport?.(section.id)) return;
-                        onExportReport?.(section.id);
-                      }}
-                    >
-                      Export report
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-                <button
-                  type="button"
-                  disabled={!canCreateSpaces}
-                  onClick={() => {
-                    if (!canCreateSpaces) return;
-                    const spaceName = window.prompt('Department / team space name');
-                    if (spaceName?.trim()) onCreateSpace(spaceName.trim());
-                  }}
-                  className="rounded-md p-1 text-sidebar-muted transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                  aria-label="Add department space"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
             {section.spaces.map((space) => {
               if (space.isMasterFolder) {
                 return renderItem({
                   id: space.id,
                   name: space.name,
+                  workspaceId: section.id,
                   color: space.color,
                   type: 'space',
                   isMasterFolder: true,
@@ -471,12 +459,18 @@ export function AppSidebar({
             </div>
             <div>
               <label className="text-xs text-muted-foreground">Department</label>
-              <input
+              <select
                 value={inviteDepartment}
                 onChange={(e) => setInviteDepartment(e.target.value)}
-                placeholder="Web Development"
                 className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
-              />
+              >
+                {!inviteDepartmentOptions.length && <option value="">No department found</option>}
+                {inviteDepartmentOptions.map((dep) => (
+                  <option key={dep} value={dep}>
+                    {dep}
+                  </option>
+                ))}
+              </select>
             </div>
             <div>
               <label className="text-xs text-muted-foreground">Role</label>

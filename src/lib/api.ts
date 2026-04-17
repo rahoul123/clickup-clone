@@ -28,6 +28,9 @@ async function request(path: string, options: RequestInit = {}) {
 }
 
 export const api = {
+  public: {
+    departments: () => request('/public/departments'),
+  },
   auth: {
     me: () => request('/auth/me'),
     signup: (payload: { email: string; password: string; displayName: string; department?: string }) =>

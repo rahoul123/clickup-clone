@@ -546,22 +546,30 @@ export function buildRoutes() {
   router.get('/health', (_req, res) => res.json({ ok: true }));
 
   router.get('/public/departments', async (_req, res) => {
-    const [spaces, workspaces] = await Promise.all([
-      Space.find({ isMasterTeamSpace: { $ne: true } }).lean(),
-      Workspace.find({}).lean(),
-    ]);
-    const names = new Set();
-    for (const space of spaces) {
-      const fromDepartment = String(space.department || '').trim();
-      const fromName = String(space.name || '').trim();
-      if (fromDepartment) names.add(fromDepartment);
-      if (fromName && fromName.toLowerCase() !== 'general') names.add(fromName);
+    // Source of truth: department-main folders that appear under a master
+    // team space in the sidebar. Use each folder's display name (deduped
+    // case-insensitively, preferring the first casing seen) so users see
+    // exactly the same list that admins set up.
+    const masters = await Space.find({ isMasterTeamSpace: true }).lean();
+    const masterIds = masters.map((m) => m._id);
+    const deptSpaces = masterIds.length
+      ? await Space.find({
+          parentSpaceId: { $in: masterIds },
+          isMasterTeamSpace: { $ne: true },
+        })
+          .sort({ createdAt: 1 })
+          .lean()
+      : [];
+
+    const seen = new Map();
+    for (const space of deptSpaces) {
+      const label = String(space.name || space.department || '').trim();
+      if (!label) continue;
+      if (label.toLowerCase() === 'general') continue;
+      const key = label.toLowerCase().replace(/\s+/g, '');
+      if (!seen.has(key)) seen.set(key, label);
     }
-    for (const workspace of workspaces) {
-      const wsDepartment = String(workspace.department || '').trim();
-      if (wsDepartment) names.add(wsDepartment);
-    }
-    const departments = [...names].sort((a, b) => a.localeCompare(b));
+    const departments = [...seen.values()].sort((a, b) => a.localeCompare(b));
     res.json({ departments });
   });
 

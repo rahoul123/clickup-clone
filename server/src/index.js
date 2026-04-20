@@ -4,6 +4,7 @@ import cors from 'cors';
 import session from 'express-session';
 import { connectMongo } from './db.js';
 import { buildRoutes } from './routes.js';
+import { startReminderScheduler } from './reminderScheduler.js';
 
 dotenv.config({ path: '../.env' });
 dotenv.config();
@@ -56,6 +57,7 @@ connectMongo()
     app.listen(PORT, () => {
       console.log(`API listening on http://localhost:${PORT}`);
     });
+    startReminderScheduler();
   })
   .catch((error) => {
     console.error('Failed to start server', error);

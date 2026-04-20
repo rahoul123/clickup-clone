@@ -16,7 +16,7 @@ export interface Notification {
   id: string;
   taskId?: string | null;
   workspaceId: string;
-  type: 'task_created' | 'task_status_changed';
+  type: 'task_created' | 'task_status_changed' | 'reminder_pre_day' | 'reminder_due';
   message: string;
   read: boolean;
   createdAt: string;
@@ -101,6 +101,14 @@ export const DEFAULT_KANBAN_COLUMN_ORDER: TaskStatus[] = [
   'complete',
 ];
 
+export interface ChecklistItem {
+  id: string;
+  text: string;
+  done: boolean;
+  /** Optional per-item assignees — rendered as avatar chips next to the item. */
+  assignee_ids?: string[];
+}
+
 export interface Task {
   id: string;
   list_id: string;
@@ -115,7 +123,40 @@ export interface Task {
   created_by: string;
   created_at: string;
   updated_at: string;
+  /** Null for top-level tasks; otherwise the parent task id this task belongs to. */
+  parent_task_id?: string | null;
+  /** Inline checklist items attached to this task. */
+  checklist?: ChecklistItem[];
+  /** Other task ids explicitly linked from this task. */
+  related_task_ids?: string[];
+  /**
+   * Task-level access controls (managed from the Share dialog). The server still enforces
+   * workspace RBAC; these let the UI reason about "who has what on this task".
+   */
+  default_permission?: TaskPermission;
+  collaborators?: TaskCollaborator[];
+  is_private?: boolean;
 }
+
+/** Per-task access levels exposed in the Share dialog. */
+export type TaskPermission = 'full_edit' | 'edit' | 'comment' | 'view';
+
+export interface TaskCollaborator {
+  user_id: string;
+  role: TaskPermission;
+  added_at?: string;
+}
+
+export const TASK_PERMISSION_OPTIONS: Array<{
+  value: TaskPermission;
+  label: string;
+  description: string;
+}> = [
+  { value: 'full_edit', label: 'Full edit', description: 'Can edit and delete.' },
+  { value: 'edit', label: 'Edit', description: "Can't create subtasks and delete." },
+  { value: 'comment', label: 'Comment', description: 'Assignees can reassign and edit status.' },
+  { value: 'view', label: 'View only', description: "Can't comment or edit." },
+];
 
 /** Task row on Home inbox (all accessible team spaces). */
 export interface HomeTask extends Task {
@@ -183,6 +224,12 @@ export interface CommentAttachment {
   dataUrl: string;
 }
 
+export interface CommentReaction {
+  emoji: string;
+  user_id: string;
+  user_name?: string;
+}
+
 export interface TaskComment {
   id: string;
   task_id: string;
@@ -190,6 +237,10 @@ export interface TaskComment {
   content: string;
   attachments?: CommentAttachment[];
   created_at: string;
+  /** When set, this comment is a threaded reply to the referenced comment. */
+  parent_comment_id?: string | null;
+  /** Emoji reactions (one entry per (emoji, user) pair). */
+  reactions?: CommentReaction[];
 }
 
 export const STATUS_CONFIG: Record<TaskStatus, { label: string; colorClass: string; bgClass: string }> = {

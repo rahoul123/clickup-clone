@@ -5,6 +5,7 @@ import { sendInviteEmail, sendTaskAssignedEmail, sendTaskCompletedEmail } from '
 import {
   List,
   Notification,
+  Reminder,
   Space,
   SpaceDiscussionMessage,
   Task,
@@ -317,6 +318,83 @@ async function applyPendingInvitesForUser(user) {
   }
 }
 
+/**
+ * Shared mapper so task objects returned from list + detail + create + update endpoints
+ * look identical to the client.
+ */
+function taskToDTO(task, assigneeIds) {
+  return {
+    id: task._id,
+    list_id: task.listId,
+    title: task.title,
+    description: task.description ?? undefined,
+    status: task.status,
+    priority: task.priority,
+    start_date: task.startDate ? task.startDate.toISOString() : undefined,
+    due_date: task.dueDate ? task.dueDate.toISOString() : undefined,
+    assignee_ids: assigneeIds,
+    created_by: task.createdBy,
+    created_at: task.createdAt.toISOString(),
+    updated_at: task.updatedAt.toISOString(),
+    parent_task_id: task.parentTaskId ?? null,
+    checklist: Array.isArray(task.checklist)
+      ? task.checklist.map((item) => ({
+          id: item.id,
+          text: item.text,
+          done: Boolean(item.done),
+          assignee_ids: Array.isArray(item.assigneeIds) ? item.assigneeIds : [],
+        }))
+      : [],
+    related_task_ids: Array.isArray(task.relatedTaskIds) ? task.relatedTaskIds : [],
+    default_permission: task.defaultPermission ?? 'full_edit',
+    collaborators: Array.isArray(task.collaborators)
+      ? task.collaborators.map((c) => ({
+          user_id: c.userId,
+          role: c.role ?? 'full_edit',
+          added_at:
+            c.addedAt instanceof Date
+              ? c.addedAt.toISOString()
+              : c.addedAt
+                ? new Date(c.addedAt).toISOString()
+                : undefined,
+        }))
+      : [],
+    is_private: Boolean(task.isPrivate),
+  };
+}
+
+/**
+ * Turn a TaskComment document into the DTO the client expects.
+ * `userMap` is an id->displayName map so we can resolve author/reactor/reader names.
+ */
+function serializeComment(comment, userMap = {}) {
+  const createdAt = comment.createdAt instanceof Date
+    ? comment.createdAt
+    : new Date(comment.createdAt);
+  return {
+    id: comment._id,
+    task_id: comment.taskId,
+    user_id: comment.userId,
+    content: comment.content,
+    attachments: comment.attachments || [],
+    created_at: createdAt.toISOString(),
+    author_name: userMap[comment.userId] ?? 'Unknown user',
+    parent_comment_id: comment.parentCommentId ?? null,
+    reactions: (comment.reactions || []).map((r) => ({
+      emoji: r.emoji,
+      user_id: r.userId,
+      user_name: userMap[r.userId] ?? 'Unknown user',
+    })),
+    read_by: (comment.readBy || [])
+      .filter((r) => r.userId !== comment.userId)
+      .map((r) => ({
+        user_id: r.userId,
+        read_at: r.readAt ? new Date(r.readAt).toISOString() : undefined,
+        name: userMap[r.userId] ?? 'Unknown user',
+      })),
+  };
+}
+
 async function hydrateTasks(listId) {
   const [tasks, assignees] = await Promise.all([
     Task.find({ listId }).sort({ createdAt: -1 }).lean(),
@@ -327,20 +405,7 @@ async function hydrateTasks(listId) {
     acc[row.taskId].push(row.userId);
     return acc;
   }, {});
-  return tasks.map((t) => ({
-    id: t._id,
-    list_id: t.listId,
-    title: t.title,
-    description: t.description ?? undefined,
-    status: t.status,
-    priority: t.priority,
-    start_date: t.startDate ? t.startDate.toISOString() : undefined,
-    due_date: t.dueDate ? t.dueDate.toISOString() : undefined,
-    assignee_ids: byTask[t._id] ?? [],
-    created_by: t.createdBy,
-    created_at: t.createdAt.toISOString(),
-    updated_at: t.updatedAt.toISOString(),
-  }));
+  return tasks.map((t) => taskToDTO(t, byTask[t._id] ?? []));
 }
 
 /** Tasks across many lists; assignees loaded only for returned tasks (efficient). */
@@ -354,20 +419,7 @@ async function hydrateTasksForListIds(listIds) {
     acc[row.taskId].push(row.userId);
     return acc;
   }, {});
-  return tasks.map((t) => ({
-    id: t._id,
-    list_id: t.listId,
-    title: t.title,
-    description: t.description ?? undefined,
-    status: t.status,
-    priority: t.priority,
-    start_date: t.startDate ? t.startDate.toISOString() : undefined,
-    due_date: t.dueDate ? t.dueDate.toISOString() : undefined,
-    assignee_ids: byTask[t._id] ?? [],
-    created_by: t.createdBy,
-    created_at: t.createdAt.toISOString(),
-    updated_at: t.updatedAt.toISOString(),
-  }));
+  return tasks.map((t) => taskToDTO(t, byTask[t._id] ?? []));
 }
 
 /**
@@ -1063,6 +1115,55 @@ export function buildRoutes() {
     });
   });
 
+  /**
+   * Lightweight task title search scoped to a workspace — powers the "Relate items" picker.
+   * Returns the first matches across all lists/spaces the caller has role-based access to.
+   */
+  router.get('/workspaces/:workspaceId/tasks-search', requireAuth, async (req, res) => {
+    const { workspaceId } = req.params;
+    const q = String(req.query.q || '').trim();
+    const excludeId = String(req.query.exclude || '').trim();
+    if (!q) return res.json({ tasks: [] });
+
+    const role = await getRole(workspaceId, req.session.userId);
+    if (!role) return res.status(403).json({ message: 'No permission' });
+
+    const spaces = await Space.find({ workspaceId }, { _id: 1, name: 1 }).lean();
+    const spaceIds = spaces.map((s) => s._id);
+    if (spaceIds.length === 0) return res.json({ tasks: [] });
+
+    const lists = await List.find({ spaceId: { $in: spaceIds } }, { _id: 1, name: 1, spaceId: 1 }).lean();
+    const listIds = lists.map((l) => l._id);
+    const listMap = new Map(lists.map((l) => [l._id, l]));
+    const spaceMap = new Map(spaces.map((s) => [s._id, s]));
+
+    // Escape user input for regex, then do a case-insensitive contains search.
+    const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const tasks = await Task.find({
+      listId: { $in: listIds },
+      _id: { $ne: excludeId || undefined },
+      title: { $regex: escaped, $options: 'i' },
+    })
+      .sort({ updatedAt: -1 })
+      .limit(20)
+      .lean();
+
+    res.json({
+      tasks: tasks.map((t) => {
+        const list = listMap.get(t.listId);
+        const space = list ? spaceMap.get(list.spaceId) : null;
+        return {
+          id: t._id,
+          title: t.title,
+          status: t.status,
+          list_id: t.listId,
+          list_name: list?.name ?? null,
+          space_name: space?.name ?? null,
+        };
+      }),
+    });
+  });
+
   router.get('/lists/:listId/tasks', requireAuth, async (req, res) => {
     const list = await List.findById(req.params.listId).lean();
     if (!list) return res.status(404).json({ message: 'List not found' });
@@ -1532,7 +1633,7 @@ export function buildRoutes() {
   });
 
   router.post('/tasks', requireAuth, async (req, res) => {
-    const { listId, title, status, priority, startDate, endDate, description } = req.body ?? {};
+    const { listId, title, status, priority, startDate, endDate, description, parentTaskId } = req.body ?? {};
     /** Assignees (task owners). Legacy: `notifyUserIds` used to mean the same. */
     let assigneeIds = Array.isArray(req.body.assigneeIds) ? req.body.assigneeIds : [];
     if (assigneeIds.length === 0 && Array.isArray(req.body.notifyUserIds)) {
@@ -1565,6 +1666,15 @@ export function buildRoutes() {
     let st = typeof status === 'string' ? status : 'todo';
     if (!isValidTaskStatusForList(list, st)) st = 'todo';
 
+    // Validate the parent reference: must be an existing task in the same list.
+    let safeParentId = null;
+    if (typeof parentTaskId === 'string' && parentTaskId.trim()) {
+      const parent = await Task.findById(parentTaskId.trim()).lean();
+      if (parent && parent.listId === listId) {
+        safeParentId = parent._id;
+      }
+    }
+
     const task = await Task.create({
       _id: randomUUID(),
       listId,
@@ -1575,6 +1685,7 @@ export function buildRoutes() {
       startDate: startDate ? new Date(startDate) : null,
       dueDate: endDate ? new Date(endDate) : null,
       createdBy: req.session.userId,
+      parentTaskId: safeParentId,
     });
 
     const workspaceMembers = await WorkspaceMember.find({ workspaceId: space.workspaceId }).lean();
@@ -1643,22 +1754,7 @@ export function buildRoutes() {
       });
     }
 
-    res.json({
-      task: {
-        id: task._id,
-        list_id: task.listId,
-        title: task.title,
-        description: task.description ?? undefined,
-        status: task.status,
-        priority: task.priority,
-        start_date: task.startDate ? task.startDate.toISOString() : undefined,
-        due_date: task.dueDate ? task.dueDate.toISOString() : undefined,
-        assignee_ids: assignedUserIds,
-        created_by: task.createdBy,
-        created_at: task.createdAt.toISOString(),
-        updated_at: task.updatedAt.toISOString(),
-      },
-    });
+    res.json({ task: taskToDTO(task.toObject(), assignedUserIds) });
   });
 
   router.patch('/tasks/:taskId/status', requireAuth, async (req, res) => {
@@ -1737,7 +1833,20 @@ export function buildRoutes() {
 
   router.patch('/tasks/:taskId', requireAuth, async (req, res) => {
     const { taskId } = req.params;
-    const { title, description, status, priority, startDate, endDate, assigneeIds } = req.body ?? {};
+    const {
+      title,
+      description,
+      status,
+      priority,
+      startDate,
+      endDate,
+      assigneeIds,
+      checklist,
+      relatedTaskIds,
+      defaultPermission,
+      collaborators,
+      isPrivate,
+    } = req.body ?? {};
     const task = await Task.findById(taskId).lean();
     if (!task) return res.status(404).json({ message: 'Task not found' });
 
@@ -1783,6 +1892,60 @@ export function buildRoutes() {
     if (typeof startDate !== 'undefined') updates.startDate = startDate ? new Date(startDate) : null;
     if (typeof endDate !== 'undefined') updates.dueDate = endDate ? new Date(endDate) : null;
 
+    // Checklist: replace entire array when provided. Normalize items.
+    if (Array.isArray(checklist)) {
+      updates.checklist = checklist
+        .map((item) => ({
+          id: typeof item?.id === 'string' && item.id.trim() ? item.id.trim() : randomUUID(),
+          text: typeof item?.text === 'string' ? item.text.slice(0, 500) : '',
+          done: Boolean(item?.done),
+          assigneeIds: Array.isArray(item?.assigneeIds)
+            ? [...new Set(item.assigneeIds.map((x) => String(x).trim()).filter(Boolean))].slice(0, 20)
+            : [],
+        }))
+        .filter((item) => item.text.trim().length > 0)
+        .slice(0, 200);
+    }
+
+    // Related tasks: replace entire list; validate ids exist and exclude self.
+    if (Array.isArray(relatedTaskIds)) {
+      const ids = [...new Set(relatedTaskIds.map((id) => String(id).trim()).filter(Boolean))].filter(
+        (id) => id !== taskId
+      );
+      if (ids.length > 0) {
+        const existing = await Task.find({ _id: { $in: ids } }, { _id: 1 }).lean();
+        updates.relatedTaskIds = existing.map((t) => t._id);
+      } else {
+        updates.relatedTaskIds = [];
+      }
+    }
+
+    // Share-dialog fields: per-task default permission + per-user collaborator roles.
+    const PERMISSION_VALUES = ['full_edit', 'edit', 'comment', 'view'];
+    if (typeof defaultPermission === 'string') {
+      if (!PERMISSION_VALUES.includes(defaultPermission)) {
+        return res.status(400).json({ message: 'Invalid default permission' });
+      }
+      updates.defaultPermission = defaultPermission;
+    }
+    if (Array.isArray(collaborators)) {
+      // De-dupe by userId (last occurrence wins), drop empty ids, clamp to 100 entries.
+      const seen = new Map();
+      for (const c of collaborators) {
+        const uid = String(c?.userId || '').trim();
+        if (!uid) continue;
+        const r = String(c?.role || 'full_edit');
+        const role = PERMISSION_VALUES.includes(r) ? r : 'full_edit';
+        seen.set(uid, role);
+      }
+      updates.collaborators = Array.from(seen.entries())
+        .slice(0, 100)
+        .map(([userId, role]) => ({ userId, role, addedAt: new Date() }));
+    }
+    if (typeof isPrivate === 'boolean') {
+      updates.isPrivate = isPrivate;
+    }
+
     if (Object.keys(updates).length > 0) {
       await Task.updateOne({ _id: taskId }, { $set: updates });
     }
@@ -1825,22 +1988,7 @@ export function buildRoutes() {
         console.error('Failed to send task-completed emails (patch)', err);
       }
     }
-    res.json({
-      task: {
-        id: refreshed._id,
-        list_id: refreshed.listId,
-        title: refreshed.title,
-        description: refreshed.description ?? undefined,
-        status: refreshed.status,
-        priority: refreshed.priority,
-        start_date: refreshed.startDate ? refreshed.startDate.toISOString() : undefined,
-        due_date: refreshed.dueDate ? refreshed.dueDate.toISOString() : undefined,
-        assignee_ids: assignees.map((a) => a.userId),
-        created_by: refreshed.createdBy,
-        created_at: refreshed.createdAt.toISOString(),
-        updated_at: refreshed.updatedAt.toISOString(),
-      },
-    });
+    res.json({ task: taskToDTO(refreshed, assignees.map((a) => a.userId)) });
   });
 
   router.delete('/tasks/:taskId', requireAuth, async (req, res) => {
@@ -1920,20 +2068,7 @@ export function buildRoutes() {
     const assignees = await TaskAssignee.find({ taskId }).lean();
 
     res.json({
-      task: {
-        id: task._id,
-        list_id: task.listId,
-        title: task.title,
-        description: task.description ?? undefined,
-        status: task.status,
-        priority: task.priority,
-        assignee_ids: assignees.map((a) => a.userId),
-        start_date: task.startDate ? task.startDate.toISOString() : undefined,
-        due_date: task.dueDate ? task.dueDate.toISOString() : undefined,
-        created_by: task.createdBy,
-        created_at: task.createdAt.toISOString(),
-        updated_at: task.updatedAt.toISOString(),
-      },
+      task: taskToDTO(task, assignees.map((a) => a.userId)),
       context: {
         workspace_id: space.workspaceId,
         space_id: space._id,
@@ -1957,35 +2092,21 @@ export function buildRoutes() {
     const comments = await TaskComment.find({ taskId }).sort({ createdAt: 1 }).lean();
     const authorIds = comments.map((c) => c.userId);
     const readerIds = comments.flatMap((c) => (c.readBy || []).map((r) => r.userId));
-    const userIds = [...new Set([...authorIds, ...readerIds])];
+    const reactorIds = comments.flatMap((c) => (c.reactions || []).map((r) => r.userId));
+    const userIds = [...new Set([...authorIds, ...readerIds, ...reactorIds])];
     const users = await User.find({ _id: { $in: userIds } }).lean();
     const userMap = Object.fromEntries(
       users.map((u) => [u._id, u.displayName || u.email || 'Unknown user'])
     );
 
     res.json({
-      comments: comments.map((comment) => ({
-        id: comment._id,
-        task_id: comment.taskId,
-        user_id: comment.userId,
-        content: comment.content,
-        attachments: comment.attachments || [],
-        created_at: comment.createdAt.toISOString(),
-        author_name: userMap[comment.userId] ?? 'Unknown user',
-        read_by: (comment.readBy || [])
-          .filter((r) => r.userId !== comment.userId)
-          .map((r) => ({
-            user_id: r.userId,
-            read_at: r.readAt ? new Date(r.readAt).toISOString() : undefined,
-            name: userMap[r.userId] ?? 'Unknown user',
-          })),
-      })),
+      comments: comments.map((comment) => serializeComment(comment, userMap)),
     });
   });
 
   router.post('/tasks/:taskId/comments', requireAuth, async (req, res) => {
     const { taskId } = req.params;
-    const { content, attachments } = req.body ?? {};
+    const { content, attachments, parentCommentId } = req.body ?? {};
     const text = String(content || '').trim();
     const attachmentList = Array.isArray(attachments)
       ? attachments.map((attachment) => ({
@@ -2008,25 +2129,78 @@ export function buildRoutes() {
     const role = await getRole(space.workspaceId, req.session.userId);
     if (!canUpdateTask(role)) return res.status(403).json({ message: 'No permission' });
 
+    // Validate the parent reference — it must be an existing comment on the SAME task,
+    // and we flatten nested threads (reply-to-a-reply points to the original parent).
+    let normalizedParentId = null;
+    if (parentCommentId) {
+      const parent = await TaskComment.findOne({ _id: String(parentCommentId), taskId }).lean();
+      if (!parent) {
+        return res.status(400).json({ message: 'Parent comment not found' });
+      }
+      normalizedParentId = parent.parentCommentId ?? parent._id;
+    }
+
     const comment = await TaskComment.create({
       _id: randomUUID(),
       taskId,
       userId: req.session.userId,
       content: text,
       attachments: attachmentList,
+      parentCommentId: normalizedParentId,
     });
 
-    res.json({
-      comment: {
-        id: comment._id,
-        task_id: comment.taskId,
-        user_id: comment.userId,
-        content: comment.content,
-        attachments: comment.attachments || [],
-        created_at: comment.createdAt.toISOString(),
-        read_by: [],
-      },
-    });
+    const author = await User.findById(req.session.userId).lean();
+    const userMap = author
+      ? { [author._id]: author.displayName || author.email || 'Unknown user' }
+      : {};
+
+    res.json({ comment: serializeComment(comment.toObject(), userMap) });
+  });
+
+  /**
+   * Toggle an emoji reaction for the current user on a comment.
+   * Body: { emoji: string }
+   * - If the user already reacted with this exact emoji → remove it.
+   * - Otherwise → add it.
+   * Returns the refreshed comment DTO.
+   */
+  router.post('/tasks/:taskId/comments/:commentId/reactions', requireAuth, async (req, res) => {
+    const { taskId, commentId } = req.params;
+    const emoji = String(req.body?.emoji || '').trim();
+    if (!emoji) return res.status(400).json({ message: 'emoji required' });
+    // Keep to a short symbol so we can't be abused with multi-KB payloads.
+    if (emoji.length > 8) return res.status(400).json({ message: 'emoji too long' });
+
+    const task = await Task.findById(taskId).lean();
+    if (!task) return res.status(404).json({ message: 'Task not found' });
+    const list = await List.findById(task.listId).lean();
+    if (!list) return res.status(404).json({ message: 'List not found' });
+    const space = await Space.findById(list.spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+    const role = await getRole(space.workspaceId, req.session.userId);
+    if (!role) return res.status(403).json({ message: 'No permission' });
+
+    const doc = await TaskComment.findOne({ _id: commentId, taskId });
+    if (!doc) return res.status(404).json({ message: 'Comment not found' });
+
+    const viewerId = req.session.userId;
+    const existingIdx = (doc.reactions || []).findIndex(
+      (r) => r.userId === viewerId && r.emoji === emoji,
+    );
+    if (existingIdx >= 0) {
+      doc.reactions.splice(existingIdx, 1);
+    } else {
+      doc.reactions.push({ emoji, userId: viewerId, createdAt: new Date() });
+    }
+    await doc.save();
+
+    const reactorIds = (doc.reactions || []).map((r) => r.userId);
+    const userIds = [...new Set([doc.userId, ...reactorIds])];
+    const users = await User.find({ _id: { $in: userIds } }).lean();
+    const userMap = Object.fromEntries(
+      users.map((u) => [u._id, u.displayName || u.email || 'Unknown user']),
+    );
+    res.json({ comment: serializeComment(doc.toObject(), userMap) });
   });
 
   /** Record that the current user has seen these comments (read receipts). Skips the viewer's own messages. */
@@ -2240,6 +2414,147 @@ export function buildRoutes() {
     }
 
     await SpaceDiscussionMessage.deleteOne({ _id: messageId });
+    res.json({ ok: true });
+  });
+
+  // ---------------- Reminders ----------------
+
+  function serializeReminder(r) {
+    return {
+      id: r._id,
+      workspaceId: r.workspaceId,
+      title: r.title,
+      description: r.description || '',
+      dueDate: r.dueDate ? new Date(r.dueDate).toISOString() : null,
+      status: r.status,
+      createdBy: r.createdBy,
+      notifyUserIds: Array.isArray(r.notifyUserIds) ? r.notifyUserIds : [],
+      preDayNotifiedAt: r.preDayNotifiedAt ? new Date(r.preDayNotifiedAt).toISOString() : null,
+      dueDayNotifiedAt: r.dueDayNotifiedAt ? new Date(r.dueDayNotifiedAt).toISOString() : null,
+      createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : null,
+      updatedAt: r.updatedAt ? new Date(r.updatedAt).toISOString() : null,
+    };
+  }
+
+  router.get('/reminders', requireAuth, async (req, res) => {
+    const userId = req.session.userId;
+    const reminders = await Reminder.find({
+      $or: [{ createdBy: userId }, { notifyUserIds: userId }],
+    })
+      .sort({ dueDate: 1 })
+      .limit(500)
+      .lean();
+    res.json({ reminders: reminders.map(serializeReminder) });
+  });
+
+  router.post('/reminders', requireAuth, async (req, res) => {
+    const userId = req.session.userId;
+    const { workspaceId, title, description, dueDate, notifyUserIds } = req.body ?? {};
+
+    const safeTitle = String(title || '').trim();
+    if (!safeTitle) return res.status(400).json({ message: 'Reminder title is required' });
+    if (safeTitle.length > 300) {
+      return res.status(400).json({ message: 'Reminder title is too long' });
+    }
+
+    if (!workspaceId) return res.status(400).json({ message: 'workspaceId is required' });
+    const role = await getRole(String(workspaceId), userId);
+    if (!role) return res.status(403).json({ message: 'No permission for this workspace' });
+
+    const parsedDue = dueDate ? new Date(dueDate) : null;
+    if (!parsedDue || Number.isNaN(parsedDue.getTime())) {
+      return res.status(400).json({ message: 'A valid dueDate is required' });
+    }
+
+    // Sanitize notifyUserIds: unique strings, always include creator unless explicitly excluded.
+    const rawTargets = Array.isArray(notifyUserIds) ? notifyUserIds : [];
+    const targetSet = new Set(
+      rawTargets
+        .map((id) => (typeof id === 'string' ? id.trim() : ''))
+        .filter(Boolean)
+    );
+    targetSet.add(userId);
+
+    // Validate targets are members of this workspace.
+    const memberIds = new Set(
+      (await WorkspaceMember.find({ workspaceId, userId: { $in: Array.from(targetSet) } }).lean()).map(
+        (m) => m.userId
+      )
+    );
+    const notifyUserIdsClean = Array.from(targetSet).filter((id) => memberIds.has(id));
+    if (notifyUserIdsClean.length === 0) notifyUserIdsClean.push(userId);
+
+    const reminder = await Reminder.create({
+      _id: randomUUID(),
+      workspaceId: String(workspaceId),
+      createdBy: userId,
+      notifyUserIds: notifyUserIdsClean,
+      title: safeTitle,
+      description: typeof description === 'string' ? description.slice(0, 2000) : '',
+      dueDate: parsedDue,
+      status: 'pending',
+    });
+
+    res.json({ reminder: serializeReminder(reminder.toObject()) });
+  });
+
+  router.patch('/reminders/:id', requireAuth, async (req, res) => {
+    const reminder = await Reminder.findById(req.params.id);
+    if (!reminder) return res.status(404).json({ message: 'Reminder not found' });
+    if (reminder.createdBy !== req.session.userId) {
+      return res.status(403).json({ message: 'Only the creator can update this reminder' });
+    }
+
+    const { title, description, dueDate, status, notifyUserIds } = req.body ?? {};
+    if (typeof title === 'string') {
+      const safeTitle = title.trim();
+      if (!safeTitle) return res.status(400).json({ message: 'Title cannot be empty' });
+      reminder.title = safeTitle.slice(0, 300);
+    }
+    if (typeof description === 'string') {
+      reminder.description = description.slice(0, 2000);
+    }
+    if (dueDate !== undefined) {
+      const parsedDue = new Date(dueDate);
+      if (Number.isNaN(parsedDue.getTime())) {
+        return res.status(400).json({ message: 'Invalid dueDate' });
+      }
+      reminder.dueDate = parsedDue;
+      // New due date -> re-arm notifications.
+      reminder.preDayNotifiedAt = null;
+      reminder.dueDayNotifiedAt = null;
+    }
+    if (typeof status === 'string' && ['pending', 'done', 'cancelled'].includes(status)) {
+      reminder.status = status;
+    }
+    if (Array.isArray(notifyUserIds)) {
+      const targetSet = new Set(
+        notifyUserIds.map((id) => (typeof id === 'string' ? id.trim() : '')).filter(Boolean)
+      );
+      targetSet.add(reminder.createdBy);
+      const memberIds = new Set(
+        (
+          await WorkspaceMember.find({
+            workspaceId: reminder.workspaceId,
+            userId: { $in: Array.from(targetSet) },
+          }).lean()
+        ).map((m) => m.userId)
+      );
+      const clean = Array.from(targetSet).filter((id) => memberIds.has(id));
+      reminder.notifyUserIds = clean.length > 0 ? clean : [reminder.createdBy];
+    }
+
+    await reminder.save();
+    res.json({ reminder: serializeReminder(reminder.toObject()) });
+  });
+
+  router.delete('/reminders/:id', requireAuth, async (req, res) => {
+    const reminder = await Reminder.findById(req.params.id).lean();
+    if (!reminder) return res.status(404).json({ message: 'Reminder not found' });
+    if (reminder.createdBy !== req.session.userId) {
+      return res.status(403).json({ message: 'Only the creator can delete this reminder' });
+    }
+    await Reminder.deleteOne({ _id: req.params.id });
     res.json({ ok: true });
   });
 

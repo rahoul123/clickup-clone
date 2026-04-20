@@ -88,6 +88,8 @@ export const api = {
       startDate?: string;
       endDate?: string;
       description?: string;
+      /** Optional parent task id — creates a subtask of an existing task. */
+      parentTaskId?: string;
     }) => request('/tasks', { method: 'POST', body: JSON.stringify(payload) }),
     moveTask: (taskId: string, status: string) =>
       request(`/tasks/${taskId}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }),
@@ -101,8 +103,24 @@ export const api = {
         assigneeIds?: string[];
         startDate?: string;
         endDate?: string;
+        checklist?: Array<{ id?: string; text: string; done: boolean; assigneeIds?: string[] }>;
+        relatedTaskIds?: string[];
+        /** Fallback access level applied to non-collaborators. */
+        defaultPermission?: 'full_edit' | 'edit' | 'comment' | 'view';
+        /** Full replacement of the task's explicit collaborator list. */
+        collaborators?: Array<{
+          userId: string;
+          role: 'full_edit' | 'edit' | 'comment' | 'view';
+        }>;
+        /** Toggle "Make private" on the task. */
+        isPrivate?: boolean;
       }
     ) => request(`/tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+    searchTasks: (workspaceId: string, query: string, excludeTaskId?: string) => {
+      const params = new URLSearchParams({ q: query });
+      if (excludeTaskId) params.set('exclude', excludeTaskId);
+      return request(`/workspaces/${workspaceId}/tasks-search?${params.toString()}`);
+    },
     deleteTask: (taskId: string) => request(`/tasks/${taskId}`, { method: 'DELETE' }),
     getTask: (taskId: string) => request(`/tasks/${taskId}`),
     taskComments: (taskId: string) => request(`/tasks/${taskId}/comments`),
@@ -111,12 +129,20 @@ export const api = {
       payload: {
         content: string;
         attachments?: Array<{ filename: string; mimeType: string; dataUrl: string }>;
+        /** When provided, the new comment becomes a threaded reply under this comment. */
+        parentCommentId?: string;
       }
     ) => request(`/tasks/${taskId}/comments`, { method: 'POST', body: JSON.stringify(payload) }),
     markTaskCommentsRead: (taskId: string, payload: { commentIds: string[] }) =>
       request(`/tasks/${taskId}/comments/mark-read`, {
         method: 'POST',
         body: JSON.stringify(payload),
+      }),
+    /** Toggle an emoji reaction on a comment for the current user. */
+    toggleCommentReaction: (taskId: string, commentId: string, emoji: string) =>
+      request(`/tasks/${taskId}/comments/${commentId}/reactions`, {
+        method: 'POST',
+        body: JSON.stringify({ emoji }),
       }),
     notifications: () => request('/notifications'),
     markNotificationRead: (id: string) => request(`/notifications/${id}/read`, { method: 'PATCH' }),
@@ -149,5 +175,26 @@ export const api = {
       }),
     deleteSpaceDiscussionMessage: (spaceId: string, messageId: string) =>
       request(`/spaces/${spaceId}/discussion/${messageId}`, { method: 'DELETE' }),
+    listReminders: () => request('/reminders'),
+    createReminder: (payload: {
+      workspaceId: string;
+      title: string;
+      description?: string;
+      /** ISO string for the moment the reminder fires. */
+      dueDate: string;
+      /** User ids that should get notified; creator is always included. */
+      notifyUserIds?: string[];
+    }) => request('/reminders', { method: 'POST', body: JSON.stringify(payload) }),
+    updateReminder: (
+      id: string,
+      payload: {
+        title?: string;
+        description?: string;
+        dueDate?: string;
+        status?: 'pending' | 'done' | 'cancelled';
+        notifyUserIds?: string[];
+      }
+    ) => request(`/reminders/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+    deleteReminder: (id: string) => request(`/reminders/${id}`, { method: 'DELETE' }),
   },
 };

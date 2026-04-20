@@ -636,6 +636,9 @@ const Index = () => {
         created_by: data.created_by,
         created_at: data.created_at,
         updated_at: data.updated_at,
+        parent_task_id: data.parent_task_id ?? null,
+        checklist: data.checklist ?? [],
+        related_task_ids: data.related_task_ids ?? [],
       },
       ...prev,
     ]);
@@ -671,6 +674,42 @@ const Index = () => {
     hydrateTasks(targetListId).catch((refreshError) => console.error('Task refresh failed after create', refreshError));
   };
 
+  const createReminder = async (payload: {
+    title: string;
+    description?: string;
+    dueDate: string;
+    notifyUserIds?: string[];
+  }) => {
+    if (!user) return;
+    if (!activeWorkspaceId) {
+      toast.error('Open a workspace before creating a reminder.');
+      return;
+    }
+    try {
+      await api.app.createReminder({
+        workspaceId: activeWorkspaceId,
+        title: payload.title,
+        description: payload.description,
+        dueDate: payload.dueDate,
+        notifyUserIds: payload.notifyUserIds,
+      });
+      const due = new Date(payload.dueDate);
+      toast.success(
+        `Reminder "${payload.title}" set for ${due.toLocaleString('en-GB', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        })}. You'll be notified 1 day before and on the day.`
+      );
+      fetchNotifications().catch((err) => console.error('Failed to refresh notifications', err));
+    } catch (error) {
+      console.error('Failed to create reminder', error);
+      toast.error(error instanceof Error ? error.message : 'Could not create reminder.');
+    }
+  };
+
   const moveTask = async (taskId: string, nextStatus: string) => {
     if (!canCreateTasks) {
       window.alert('Aapke role me drag-drop permission nahi hai.');
@@ -701,6 +740,11 @@ const Index = () => {
       assigneeIds?: string[];
       startDate?: string;
       endDate?: string;
+      checklist?: Array<{ id?: string; text: string; done: boolean; assigneeIds?: string[] }>;
+      relatedTaskIds?: string[];
+      defaultPermission?: 'full_edit' | 'edit' | 'comment' | 'view';
+      collaborators?: Array<{ userId: string; role: 'full_edit' | 'edit' | 'comment' | 'view' }>;
+      isPrivate?: boolean;
     }
   ) => {
     const currentTask = tasks.find((item) => item.id === taskId);
@@ -719,12 +763,119 @@ const Index = () => {
       created_by: task.created_by,
       created_at: task.created_at,
       updated_at: task.updated_at,
+      parent_task_id: task.parent_task_id ?? null,
+      checklist: task.checklist ?? [],
+      related_task_ids: task.related_task_ids ?? [],
+      default_permission: task.default_permission ?? 'full_edit',
+      collaborators: task.collaborators ?? [],
+      is_private: Boolean(task.is_private),
     };
     setTasks((prev) => prev.map((item) => (item.id === taskId ? normalized : item)));
     if (payload.status && previousStatus && payload.status !== previousStatus) {
       toast.success(`"${normalized.title}" moved to ${formatStatusLabel(payload.status)}.`);
     }
     return normalized;
+  };
+
+  const createSubtask = async (
+    parentTaskId: string,
+    payload: {
+      title: string;
+      priority?: 'urgent' | 'high' | 'normal' | 'low';
+      assigneeIds?: string[];
+      startDate?: string;
+      dueDate?: string;
+    }
+  ) => {
+    const parent = tasks.find((t) => t.id === parentTaskId);
+    if (!parent) {
+      toast.error('Parent task not found.');
+      return;
+    }
+    try {
+      const { task: data } = await api.app.createTask({
+        listId: parent.list_id,
+        title: payload.title,
+        status: 'todo',
+        priority: payload.priority ?? 'normal',
+        assigneeIds: payload.assigneeIds ?? [],
+        startDate: payload.startDate,
+        endDate: payload.dueDate,
+        parentTaskId: parent.id,
+      });
+      setTasks((prev) => [
+        {
+          id: data.id,
+          list_id: data.list_id,
+          title: data.title,
+          description: data.description ?? undefined,
+          status: data.status,
+          priority: data.priority,
+          start_date: data.start_date ?? undefined,
+          due_date: data.due_date ?? undefined,
+          assignee_ids: data.assignee_ids ?? [],
+          created_by: data.created_by,
+          created_at: data.created_at,
+          updated_at: data.updated_at,
+          parent_task_id: data.parent_task_id ?? null,
+          checklist: data.checklist ?? [],
+          related_task_ids: data.related_task_ids ?? [],
+        },
+        ...prev,
+      ]);
+      toast.success(`Subtask "${data.title}" added.`);
+    } catch (error) {
+      console.error('Failed to create subtask', error);
+      toast.error(error instanceof Error ? error.message : 'Could not create subtask.');
+    }
+  };
+
+  const searchWorkspaceTasks = async (query: string, excludeTaskId?: string) => {
+    if (!activeWorkspaceId) return [];
+    try {
+      const { tasks: rows } = await api.app.searchTasks(activeWorkspaceId, query, excludeTaskId);
+      return rows as Array<{
+        id: string;
+        title: string;
+        status: string;
+        list_name?: string | null;
+        space_name?: string | null;
+      }>;
+    } catch (error) {
+      console.error('Task search failed', error);
+      return [];
+    }
+  };
+
+  const resolveRelatedTasks = async (taskIds: string[]) => {
+    if (taskIds.length === 0 || !activeWorkspaceId) return [];
+    // Try the local tasks cache first so we don't hit the API unnecessarily.
+    const known = new Map<string, { id: string; title: string; status: string }>();
+    for (const t of tasks) {
+      if (taskIds.includes(t.id)) known.set(t.id, { id: t.id, title: t.title, status: t.status });
+    }
+    const missing = taskIds.filter((id) => !known.has(id));
+    if (missing.length === 0) {
+      return Array.from(known.values());
+    }
+    // For missing ones, do a series of getTask calls (small count in practice).
+    const extra = await Promise.all(
+      missing.map(async (id) => {
+        try {
+          const { task: t } = await api.app.getTask(id);
+          return {
+            id: t.id as string,
+            title: t.title as string,
+            status: t.status as string,
+            list_name: null as string | null,
+            space_name: null as string | null,
+          };
+        } catch {
+          return null;
+        }
+      }),
+    );
+    return [...Array.from(known.values()), ...extra.filter(Boolean) as Array<{ id: string; title: string; status: string }>];
   };
 
   const deleteTaskDetails = async (taskId: string) => {
@@ -972,6 +1123,10 @@ const Index = () => {
                   spaceDiscussionId={activeSpaceView.spaceId}
                   spaceDiscussionName={activeSpaceView.spaceName}
                   onUpdateKanban={undefined}
+                  onCreateReminder={createReminder}
+                  onCreateSubtask={createSubtask}
+                  onSearchTasks={searchWorkspaceTasks}
+                  onResolveRelatedTasks={resolveRelatedTasks}
                 />
               );
             })()
@@ -1006,6 +1161,10 @@ const Index = () => {
               kanbanCustomColumns={activeListEntity?.kanban_custom_columns ?? []}
               canManageKanban={canManageStructure}
               onUpdateKanban={patchListKanban}
+              onCreateReminder={createReminder}
+              onCreateSubtask={createSubtask}
+              onSearchTasks={searchWorkspaceTasks}
+              onResolveRelatedTasks={resolveRelatedTasks}
             />
           )}
         </div>

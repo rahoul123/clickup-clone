@@ -121,6 +121,55 @@ const taskSchema = new Schema(
     startDate: { type: Date, default: null },
     dueDate: { type: Date, default: null },
     createdBy: { type: String, required: true },
+    /** Parent task id for subtasks (null for top-level tasks). */
+    parentTaskId: { type: String, default: null, index: true },
+    /** Lightweight inline checklist (e.g. "Review copy", "Publish"). */
+    checklist: {
+      type: [
+        {
+          _id: false,
+          id: { type: String, required: true },
+          text: { type: String, required: true },
+          done: { type: Boolean, default: false },
+          /** Optional per-item assignees (shown as avatar chips in the UI). */
+          assigneeIds: { type: [String], default: [] },
+        },
+      ],
+      default: [],
+    },
+    /** Other task ids this task is linked to (bi-directional on read). */
+    relatedTaskIds: { type: [String], default: [] },
+    /**
+     * Access level granted to any workspace member who isn't an explicit collaborator.
+     * UI-facing only (the server still enforces workspace-level RBAC), but useful so
+     * the client can gate destructive actions per task.
+     */
+    defaultPermission: {
+      type: String,
+      enum: ['full_edit', 'edit', 'comment', 'view'],
+      default: 'full_edit',
+    },
+    /**
+     * People the task has been explicitly shared with (in addition to assignees / owner).
+     * Each entry carries a per-user role selected via the Share dialog.
+     */
+    collaborators: {
+      type: [
+        {
+          _id: false,
+          userId: { type: String, required: true },
+          role: {
+            type: String,
+            enum: ['full_edit', 'edit', 'comment', 'view'],
+            default: 'full_edit',
+          },
+          addedAt: { type: Date, default: () => new Date() },
+        },
+      ],
+      default: [],
+    },
+    /** When true, only explicit collaborators + assignees + admins see the task in the UI. */
+    isPrivate: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
@@ -160,6 +209,24 @@ const taskCommentSchema = new Schema(
       ],
       default: [],
     },
+    /**
+     * Emoji reactions left on this comment. One (emoji, userId) pair per entry;
+     * a user may react with multiple different emojis but each emoji is toggle-only
+     * for them (second click removes it).
+     */
+    reactions: {
+      type: [
+        {
+          _id: false,
+          emoji: { type: String, required: true },
+          userId: { type: String, required: true },
+          createdAt: { type: Date, default: () => new Date() },
+        },
+      ],
+      default: [],
+    },
+    /** When non-null, this comment is a threaded reply to the referenced comment. */
+    parentCommentId: { type: String, default: null, index: true },
   },
   { timestamps: true }
 );
@@ -170,7 +237,12 @@ const notificationSchema = new Schema(
     userId: { type: String, required: true, index: true },
     workspaceId: { type: String, required: true, index: true },
     taskId: { type: String, default: null },
-    type: { type: String, enum: ['task_created', 'task_status_changed'], required: true },
+    type: {
+      type: String,
+      enum: ['task_created', 'task_status_changed', 'reminder_pre_day', 'reminder_due'],
+      required: true,
+    },
+    reminderId: { type: String, default: null },
     message: { type: String, required: true },
     read: { type: Boolean, default: false },
   },
@@ -212,6 +284,37 @@ const spaceDiscussionMessageSchema = new Schema(
   { timestamps: true }
 );
 
+const reminderSchema = new Schema(
+  {
+    _id: { type: String, required: true },
+    workspaceId: { type: String, required: true, index: true },
+    /** User who created the reminder. */
+    createdBy: { type: String, required: true, index: true },
+    /** Target users who should receive notifications. Always includes createdBy unless filtered out explicitly. */
+    notifyUserIds: {
+      type: [String],
+      default: [],
+      index: true,
+    },
+    title: { type: String, required: true },
+    description: { type: String, default: '' },
+    /** When the reminder fires. */
+    dueDate: { type: Date, required: true, index: true },
+    status: {
+      type: String,
+      enum: ['pending', 'done', 'cancelled'],
+      default: 'pending',
+      index: true,
+    },
+    /** Timestamp when the one-day-before notification was dispatched. */
+    preDayNotifiedAt: { type: Date, default: null },
+    /** Timestamp when the due-day notification was dispatched. */
+    dueDayNotifiedAt: { type: Date, default: null },
+  },
+  { timestamps: true }
+);
+reminderSchema.index({ status: 1, dueDate: 1 });
+
 const workspaceDocSchema = new Schema(
   {
     _id: { type: String, required: true },
@@ -245,3 +348,4 @@ export const Notification = model('Notification', notificationSchema);
 export const WorkspaceInvite = model('WorkspaceInvite', workspaceInviteSchema);
 export const WorkspaceDoc = model('WorkspaceDoc', workspaceDocSchema);
 export const SpaceDiscussionMessage = model('SpaceDiscussionMessage', spaceDiscussionMessageSchema);
+export const Reminder = model('Reminder', reminderSchema);

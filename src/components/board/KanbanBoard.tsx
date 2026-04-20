@@ -99,6 +99,11 @@ interface KanbanBoardProps {
       assigneeIds?: string[];
       startDate?: string;
       endDate?: string;
+      checklist?: Array<{ id?: string; text: string; done: boolean; assigneeIds?: string[] }>;
+      relatedTaskIds?: string[];
+      defaultPermission?: 'full_edit' | 'edit' | 'comment' | 'view';
+      collaborators?: Array<{ userId: string; role: 'full_edit' | 'edit' | 'comment' | 'view' }>;
+      isPrivate?: boolean;
     }
   ) => Promise<Task | void> | Task | void;
   onDeleteTask: (taskId: string) => Promise<void> | void;
@@ -121,6 +126,37 @@ interface KanbanBoardProps {
     deleteKanbanCustomColumn?: { id: string };
     deleteKanbanColumn?: { id: string };
   }) => Promise<void> | void;
+  /** Persist a reminder (with scheduled pre-day + due-day notifications). */
+  onCreateReminder?: (payload: {
+    title: string;
+    description?: string;
+    dueDate: string;
+    notifyUserIds?: string[];
+  }) => Promise<void> | void;
+  /** Create a subtask under an existing task (parentTaskId is injected by the dialog). */
+  onCreateSubtask?: (
+    parentTaskId: string,
+    payload: {
+      title: string;
+      priority?: TaskPriority;
+      assigneeIds?: string[];
+      startDate?: string;
+      dueDate?: string;
+    }
+  ) => Promise<void> | void;
+  /** Workspace-scoped task title search (for Relate items picker). */
+  onSearchTasks?: (
+    query: string,
+    excludeTaskId?: string
+  ) => Promise<
+    Array<{ id: string; title: string; status: string; list_name?: string | null; space_name?: string | null }>
+  >;
+  /** Resolve metadata for a batch of task ids already linked (used to render labels). */
+  onResolveRelatedTasks?: (
+    taskIds: string[]
+  ) => Promise<
+    Array<{ id: string; title: string; status: string; list_name?: string | null; space_name?: string | null }>
+  >;
 }
 
 const CUSTOM_COLUMN_COLOR_OPTIONS = [
@@ -158,6 +194,10 @@ export function KanbanBoard({
   spaceDiscussionId,
   spaceDiscussionName,
   onUpdateKanban,
+  onCreateReminder,
+  onCreateSubtask,
+  onSearchTasks,
+  onResolveRelatedTasks,
 }: KanbanBoardProps) {
   const { user } = useAuth();
   const [activeView, setActiveView] = useState<'board' | 'list' | 'discussion'>('board');
@@ -327,10 +367,11 @@ export function KanbanBoard({
 
   const sendTaskComment = async (
     content: string,
-    attachments?: Array<{ filename: string; mimeType: string; dataUrl: string }>
+    attachments?: Array<{ filename: string; mimeType: string; dataUrl: string }>,
+    parentCommentId?: string,
   ) => {
     if (!selectedTask) return;
-    await api.app.addTaskComment(selectedTask.id, { content, attachments });
+    await api.app.addTaskComment(selectedTask.id, { content, attachments, parentCommentId });
     try {
       const refreshed = await api.app.taskComments(selectedTask.id);
       setTaskComments(refreshed.comments ?? []);
@@ -339,9 +380,27 @@ export function KanbanBoard({
     }
   };
 
+  /**
+   * Toggle an emoji reaction on a task comment. Swaps the server's returned comment
+   * into local state so the UI updates instantly without a full refetch.
+   */
+  const toggleTaskCommentReaction = async (commentId: string, emoji: string) => {
+    if (!selectedTask) return;
+    try {
+      const { comment } = await api.app.toggleCommentReaction(selectedTask.id, commentId, emoji);
+      setTaskComments((prev) =>
+        prev.map((c) => (c.id === commentId ? { ...c, ...comment } : c)),
+      );
+    } catch (e) {
+      console.error('Failed to toggle reaction', e);
+    }
+  };
+
   const tasksByStatus = useMemo(() => {
     const acc: Record<string, Task[]> = {};
+    // Exclude subtasks from the top-level board — they're rendered inside their parent's panel.
     for (const t of tasks) {
+      if (t.parent_task_id) continue;
       const k = t.status;
       if (!acc[k]) acc[k] = [];
       acc[k].push(t);
@@ -636,6 +695,15 @@ export function KanbanBoard({
           onClose={() => setAddTaskStatus(null)}
           onCreate={handleCreateTask}
           memberOptions={memberOptions}
+          currentUserId={user?.id}
+          onCreateReminder={
+            onCreateReminder
+              ? async (payload) => {
+                  await onCreateReminder(payload);
+                  setAddTaskStatus(null);
+                }
+              : undefined
+          }
         />
       )}
 
@@ -646,12 +714,23 @@ export function KanbanBoard({
           comments={taskComments}
           loadingComments={loadingComments}
           onSendComment={sendTaskComment}
+          onToggleReaction={toggleTaskCommentReaction}
           statusOptions={statusOptions}
           onUpdateTask={async (payload) => {
             const updated = await onUpdateTask(selectedTask.id, payload);
             if (updated) setSelectedTask(updated);
           }}
           onClose={() => setSelectedTask(null)}
+          onCreateReminder={onCreateReminder}
+          currentUserId={user?.id}
+          subtasks={tasks.filter((t) => t.parent_task_id === selectedTask.id)}
+          onCreateSubtask={onCreateSubtask}
+          onOpenTask={(taskId) => {
+            const next = tasks.find((t) => t.id === taskId);
+            if (next) setSelectedTask(next);
+          }}
+          onSearchTasks={onSearchTasks ? (q) => onSearchTasks(q, selectedTask.id) : undefined}
+          onResolveRelatedTasks={onResolveRelatedTasks}
         />
       )}
 

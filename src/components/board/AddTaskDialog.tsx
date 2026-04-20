@@ -37,6 +37,8 @@ interface AddTaskDialogProps {
   onSelectList?: (listId: string) => void;
   onClose: () => void;
   memberOptions: { id: string; label: string }[];
+  /** Logged-in user id — used to default reminder "For me" / "Notify me" actions. */
+  currentUserId?: string;
   onCreate: (payload: {
     listId?: string;
     status: string;
@@ -52,6 +54,18 @@ interface AddTaskDialogProps {
     /** Optional files picked via the Upload button; caller can persist them. */
     attachments?: File[];
   }) => void;
+  /**
+   * Create a real reminder (persisted server-side with scheduled notifications).
+   * If omitted, the dialog falls back to creating a task tagged `[Reminder] …`.
+   */
+  onCreateReminder?: (payload: {
+    title: string;
+    description?: string;
+    /** ISO string for the moment the reminder fires. */
+    dueDate: string;
+    /** User ids to notify in addition to the creator (who is always included). */
+    notifyUserIds?: string[];
+  }) => Promise<void> | void;
 }
 
 export function AddTaskDialog({
@@ -63,6 +77,8 @@ export function AddTaskDialog({
   onClose,
   onCreate,
   memberOptions,
+  currentUserId,
+  onCreateReminder,
 }: AddTaskDialogProps) {
   const [activeTab, setActiveTab] = useState<'Task' | 'Doc' | 'Reminder' | 'Whiteboard' | 'Dashboard'>('Task');
   const [title, setTitle] = useState('');
@@ -74,6 +90,9 @@ export function AddTaskDialog({
   const [docBody, setDocBody] = useState('');
   const [reminderTitle, setReminderTitle] = useState('');
   const [reminderBody, setReminderBody] = useState('');
+  const [reminderDate, setReminderDate] = useState(''); // yyyy-mm-dd
+  const [reminderTime, setReminderTime] = useState('09:00'); // HH:mm
+  const [reminderSubmitting, setReminderSubmitting] = useState(false);
   const [whiteboardTitle, setWhiteboardTitle] = useState('');
   const [dashboardTitle, setDashboardTitle] = useState('');
   const [isPrivateAsset, setIsPrivateAsset] = useState(false);
@@ -187,8 +206,52 @@ export function AddTaskDialog({
     });
   };
 
-  const submitFromNonTaskTab = () => {
+  const submitFromNonTaskTab = async () => {
     if (activeTab === 'Task') return;
+
+    // Reminders are first-class entities now — persist them via the proper API
+    // (which also schedules pre-day + due-day notifications on the server).
+    if (activeTab === 'Reminder' && onCreateReminder) {
+      const titleTrim = reminderTitle.trim();
+      if (!titleTrim) {
+        toast({ title: 'Reminder needs a name' });
+        return;
+      }
+      if (!reminderDate) {
+        toast({ title: 'Pick a date', description: 'Choose when this reminder should fire.' });
+        return;
+      }
+      const timeStr = reminderTime && /^\d{2}:\d{2}$/.test(reminderTime) ? reminderTime : '09:00';
+      const [hh, mm] = timeStr.split(':').map((n) => Number(n));
+      const [y, m, d] = reminderDate.split('-').map((n) => Number(n));
+      const dueLocal = new Date(y, (m || 1) - 1, d || 1, hh || 9, mm || 0, 0, 0);
+      if (Number.isNaN(dueLocal.getTime())) {
+        toast({ title: 'Invalid reminder date' });
+        return;
+      }
+
+      const notifyIds = Array.from(
+        new Set([
+          ...(currentUserId ? [currentUserId] : []),
+          ...assigneeIds,
+          ...notifyOnlyUserIds,
+        ])
+      );
+
+      setReminderSubmitting(true);
+      try {
+        await onCreateReminder({
+          title: titleTrim,
+          description: reminderBody.trim() || undefined,
+          dueDate: dueLocal.toISOString(),
+          notifyUserIds: notifyIds.length > 0 ? notifyIds : undefined,
+        });
+      } finally {
+        setReminderSubmitting(false);
+      }
+      return;
+    }
+
     const payloadByTab: Record<'Doc' | 'Reminder' | 'Whiteboard' | 'Dashboard', { title: string; description?: string }> = {
       Doc: { title: docTitle.trim(), description: docBody.trim() || undefined },
       Reminder: { title: reminderTitle.trim(), description: reminderBody.trim() || undefined },
@@ -729,29 +792,92 @@ export function AddTaskDialog({
                     placeholder="Add description"
                     className="w-full bg-transparent text-lg text-gray-700 dark:text-slate-300 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500"
                   />
-                  <div className="flex items-center gap-2 pt-2">
+
+                  <div className="grid grid-cols-[auto_auto_1fr] items-center gap-3 pt-1">
+                    <label className="text-[12px] font-medium text-gray-500 dark:text-slate-400">When</label>
+                    <input
+                      type="date"
+                      value={reminderDate}
+                      onChange={(e) => setReminderDate(e.target.value)}
+                      className="h-9 rounded-md border border-gray-200 dark:border-slate-700 bg-transparent px-2 text-[13px] text-gray-700 dark:text-slate-200 outline-none focus:border-purple-500"
+                    />
+                    <input
+                      type="time"
+                      value={reminderTime}
+                      onChange={(e) => setReminderTime(e.target.value)}
+                      className="h-9 w-28 rounded-md border border-gray-200 dark:border-slate-700 bg-transparent px-2 text-[13px] text-gray-700 dark:text-slate-200 outline-none focus:border-purple-500"
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-1">
                     <button
                       type="button"
-                      onClick={() => setEndDate(new Date().toISOString().slice(0, 10))}
+                      onClick={() => {
+                        const today = new Date();
+                        const y = today.getFullYear();
+                        const m = String(today.getMonth() + 1).padStart(2, '0');
+                        const d = String(today.getDate()).padStart(2, '0');
+                        setReminderDate(`${y}-${m}-${d}`);
+                      }}
                       className="rounded border border-gray-200 dark:border-slate-700 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
                     >
                       Today
                     </button>
                     <button
                       type="button"
-                      onClick={() => setAssigneeIds(memberOptions[0]?.id ? [memberOptions[0].id] : [])}
+                      onClick={() => {
+                        const t = new Date();
+                        t.setDate(t.getDate() + 1);
+                        const y = t.getFullYear();
+                        const m = String(t.getMonth() + 1).padStart(2, '0');
+                        const d = String(t.getDate()).padStart(2, '0');
+                        setReminderDate(`${y}-${m}-${d}`);
+                      }}
+                      className="rounded border border-gray-200 dark:border-slate-700 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
+                    >
+                      Tomorrow
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (currentUserId) {
+                          setAssigneeIds((prev) => (prev.includes(currentUserId) ? prev : [...prev, currentUserId]));
+                        }
+                      }}
                       className="rounded border border-gray-200 dark:border-slate-700 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
                     >
                       For me
                     </button>
                     <button
                       type="button"
-                      onClick={() => setNotifyOnlyUserIds(memberOptions[0]?.id ? [memberOptions[0].id] : [])}
+                      onClick={() => setBellMemberDropdownOpen(true)}
                       className="rounded border border-gray-200 dark:border-slate-700 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
                     >
-                      Notify me
+                      Notify others…
                     </button>
                   </div>
+
+                  {(assigneeIds.length > 0 || notifyOnlyUserIds.length > 0) && (
+                    <div className="flex flex-wrap items-center gap-2 text-[12px] text-gray-600 dark:text-slate-400">
+                      <span className="font-medium">Notify:</span>
+                      {[...new Set([...assigneeIds, ...notifyOnlyUserIds])].map((id) => {
+                        const member = memberOptions.find((m) => m.id === id);
+                        if (!member) return null;
+                        return (
+                          <span
+                            key={id}
+                            className="inline-flex items-center gap-1 rounded-full border border-purple-200 dark:border-purple-800/60 bg-purple-50 dark:bg-purple-900/30 px-2 py-0.5 text-purple-700 dark:text-purple-300"
+                          >
+                            {member.label}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <p className="text-[11px] text-gray-400 dark:text-slate-500">
+                    We'll send a heads-up notification <span className="font-medium">one day before</span> and again on the <span className="font-medium">reminder date</span>.
+                  </p>
                 </div>
               )}
 
@@ -794,9 +920,10 @@ export function AddTaskDialog({
                 <button
                   type="button"
                   onClick={submitFromNonTaskTab}
-                  className="rounded bg-[#7C4DFF] px-5 py-2 text-[14px] font-bold text-white hover:bg-[#6b3deb]"
+                  disabled={activeTab === 'Reminder' && reminderSubmitting}
+                  className="rounded bg-[#7C4DFF] px-5 py-2 text-[14px] font-bold text-white hover:bg-[#6b3deb] disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  Create {activeTab}
+                  {activeTab === 'Reminder' && reminderSubmitting ? 'Creating…' : `Create ${activeTab}`}
                 </button>
               </div>
             </div>

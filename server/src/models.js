@@ -310,6 +310,18 @@ const reminderSchema = new Schema(
     preDayNotifiedAt: { type: Date, default: null },
     /** Timestamp when the due-day notification was dispatched. */
     dueDayNotifiedAt: { type: Date, default: null },
+    /** Optional file attachments (stored as base64 data URLs, same shape as comment attachments). */
+    attachments: {
+      type: [
+        {
+          _id: false,
+          filename: { type: String, default: '' },
+          mimeType: { type: String, default: 'application/octet-stream' },
+          dataUrl: { type: String, default: '' },
+        },
+      ],
+      default: [],
+    },
   },
   { timestamps: true }
 );

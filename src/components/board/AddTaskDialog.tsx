@@ -65,6 +65,8 @@ interface AddTaskDialogProps {
     dueDate: string;
     /** User ids to notify in addition to the creator (who is always included). */
     notifyUserIds?: string[];
+    /** Optional files selected via the paperclip button in the reminder composer. */
+    attachments?: File[];
   }) => Promise<void> | void;
 }
 
@@ -105,11 +107,14 @@ export function AddTaskDialog({
   const [bellMemberDropdownOpen, setBellMemberDropdownOpen] = useState(false);
   const [assigneeSearch, setAssigneeSearch] = useState('');
   const [attachments, setAttachments] = useState<File[]>([]);
+  const [reminderAttachments, setReminderAttachments] = useState<File[]>([]);
   const assigneeRef = useRef<HTMLDivElement | null>(null);
   const attachRef = useRef<HTMLDivElement | null>(null);
   const bellRef = useRef<HTMLDivElement | null>(null);
+  const reminderNotifyRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const reminderFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.currentTarget.files;
@@ -131,6 +136,32 @@ export function AddTaskDialog({
 
   const removeAttachment = (index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleReminderFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.currentTarget.files;
+    if (files) {
+      const nextFiles = Array.from(files);
+      const oversize = nextFiles.find((file) => file.size > MAX_ATTACHMENT_SIZE_BYTES);
+      if (oversize) {
+        toast({
+          title: 'File too large',
+          description: `${oversize.name} is larger than 4 MB.`,
+        });
+        e.currentTarget.value = '';
+        return;
+      }
+      setReminderAttachments((prev) => [...prev, ...nextFiles]);
+    }
+    e.currentTarget.value = '';
+  };
+
+  const removeReminderAttachment = (index: number) => {
+    setReminderAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const triggerReminderFilePicker = () => {
+    reminderFileInputRef.current?.click();
   };
 
   const triggerFilePicker = () => {
@@ -182,8 +213,12 @@ export function AddTaskDialog({
       if (notifyDropdownOpen && assigneeRef.current && !assigneeRef.current.contains(t)) {
         setNotifyDropdownOpen(false);
       }
-      if (bellMemberDropdownOpen && bellRef.current && !bellRef.current.contains(t)) {
-        setBellMemberDropdownOpen(false);
+      if (bellMemberDropdownOpen) {
+        const insideTaskBell = bellRef.current?.contains(t);
+        const insideReminderBell = reminderNotifyRef.current?.contains(t);
+        if (!insideTaskBell && !insideReminderBell) {
+          setBellMemberDropdownOpen(false);
+        }
       }
     };
     document.addEventListener('mousedown', onDown);
@@ -245,6 +280,7 @@ export function AddTaskDialog({
           description: reminderBody.trim() || undefined,
           dueDate: dueLocal.toISOString(),
           notifyUserIds: notifyIds.length > 0 ? notifyIds : undefined,
+          attachments: reminderAttachments.length > 0 ? reminderAttachments : undefined,
         });
       } finally {
         setReminderSubmitting(false);
@@ -848,13 +884,29 @@ export function AddTaskDialog({
                     >
                       For me
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setBellMemberDropdownOpen(true)}
-                      className="rounded border border-gray-200 dark:border-slate-700 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
-                    >
-                      Notify others…
-                    </button>
+                    <div className="relative" ref={reminderNotifyRef}>
+                      <button
+                        type="button"
+                        onClick={() => setBellMemberDropdownOpen((prev) => !prev)}
+                        className={`rounded border px-2.5 py-1.5 text-[12px] transition-colors ${
+                          bellMemberDropdownOpen
+                            ? 'border-blue-300 dark:border-blue-500/60 bg-blue-50 dark:bg-blue-500/15 text-blue-700 dark:text-blue-300'
+                            : 'border-gray-200 dark:border-slate-700 text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        Notify others…
+                        {notifyOnlyUserIds.length > 0 && (
+                          <span className="ml-1.5 rounded bg-blue-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                            {notifyOnlyUserIds.length}
+                          </span>
+                        )}
+                      </button>
+                      {bellMemberDropdownOpen && (
+                        <div className="absolute left-0 top-full z-[70] mt-2 w-[min(calc(100vw-2rem),20rem)] overflow-hidden rounded-xl border border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl">
+                          {bellPickerContent}
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {(assigneeIds.length > 0 || notifyOnlyUserIds.length > 0) && (
@@ -872,6 +924,38 @@ export function AddTaskDialog({
                           </span>
                         );
                       })}
+                    </div>
+                  )}
+
+                  {reminderAttachments.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="text-[12px] font-medium text-gray-500 dark:text-slate-400">
+                        Attachments ({reminderAttachments.length})
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {reminderAttachments.map((file, idx) => (
+                          <div
+                            key={`${file.name}-${idx}`}
+                            className="group inline-flex max-w-full items-center gap-2 rounded-md border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800/60 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-200"
+                          >
+                            <Paperclip size={12} className="flex-shrink-0 text-gray-400 dark:text-slate-500" />
+                            <span className="truncate" title={file.name}>
+                              {file.name}
+                            </span>
+                            <span className="flex-shrink-0 text-[10px] text-gray-400 dark:text-slate-500">
+                              {(file.size / 1024).toFixed(0)} KB
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => removeReminderAttachment(idx)}
+                              className="ml-1 flex-shrink-0 rounded p-0.5 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10"
+                              title="Remove"
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
 
@@ -916,7 +1000,38 @@ export function AddTaskDialog({
                 Private
               </label>
               <div className="flex items-center gap-4">
-                {activeTab === 'Reminder' && <Paperclip size={16} className="text-gray-400 dark:text-slate-500" />}
+                {activeTab === 'Reminder' && (
+                  <>
+                    <input
+                      ref={reminderFileInputRef}
+                      type="file"
+                      multiple
+                      hidden
+                      onChange={handleReminderFileSelect}
+                    />
+                    <button
+                      type="button"
+                      onClick={triggerReminderFilePicker}
+                      title={
+                        reminderAttachments.length > 0
+                          ? `${reminderAttachments.length} file${reminderAttachments.length > 1 ? 's' : ''} attached`
+                          : 'Attach files to this reminder'
+                      }
+                      className={`relative inline-flex items-center justify-center rounded-md p-2 transition-colors ${
+                        reminderAttachments.length > 0
+                          ? 'text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-500/10'
+                          : 'text-gray-500 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800 hover:text-gray-700 dark:hover:text-slate-200'
+                      }`}
+                    >
+                      <Paperclip size={16} />
+                      {reminderAttachments.length > 0 && (
+                        <span className="absolute -right-1 -top-1 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-purple-600 px-1 text-[10px] font-bold leading-none text-white">
+                          {reminderAttachments.length}
+                        </span>
+                      )}
+                    </button>
+                  </>
+                )}
                 <button
                   type="button"
                   onClick={submitFromNonTaskTab}

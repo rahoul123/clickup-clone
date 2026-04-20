@@ -1,7 +1,18 @@
 import { useMemo, useState } from 'react';
 import { format, parseISO, startOfDay, subDays } from 'date-fns';
-import { CheckCircle2, Circle, Flag, MessageSquare, Settings, Filter, Inbox, Clock3, Sparkles } from 'lucide-react';
-import type { HomeTask } from '@/types';
+import {
+  Bell,
+  CheckCircle2,
+  Circle,
+  Clock3,
+  Filter,
+  Flag,
+  Inbox,
+  MessageSquare,
+  Settings,
+  Sparkles,
+} from 'lucide-react';
+import type { HomeTask, Reminder } from '@/types';
 import { STATUS_CONFIG } from '@/types';
 import { cn } from '@/lib/utils';
 
@@ -13,7 +24,20 @@ interface HomeInboxProps {
   currentUserId: string | null;
   onRefresh: () => void;
   onOpenTask: (task: HomeTask) => void;
+  /** Reminders the current user created or was notified on. */
+  reminders?: Reminder[];
+  /** Open the reminder detail side panel. */
+  onOpenReminder?: (reminder: Reminder) => void;
 }
+
+/**
+ * Unified inbox row — either a workspace task or a standalone reminder.
+ * Reminders surface under the same Today / Last 7 days buckets but render
+ * with a distinct yellow alarm accent so they stand out.
+ */
+type InboxItem =
+  | { kind: 'task'; sortTime: number; data: HomeTask }
+  | { kind: 'reminder'; sortTime: number; data: Reminder };
 
 function bucketForDate(date: Date, now: Date): string {
   const sod = startOfDay(now);
@@ -59,7 +83,15 @@ function formatRowTime(iso: string, now: Date): string {
   return format(d, 'MMM d, yyyy');
 }
 
-export function HomeInbox({ tasks, loading, currentUserId, onRefresh, onOpenTask }: HomeInboxProps) {
+export function HomeInbox({
+  tasks,
+  loading,
+  currentUserId,
+  onRefresh,
+  onOpenTask,
+  reminders = [],
+  onOpenReminder,
+}: HomeInboxProps) {
   const [tab, setTab] = useState<InboxTab>('primary');
   const [filterOpen, setFilterOpen] = useState(false);
   const [spaceFilter, setSpaceFilter] = useState<string | null>(null);
@@ -80,16 +112,49 @@ export function HomeInbox({ tasks, loading, currentUserId, onRefresh, onOpenTask
     return list;
   }, [tasks, tab, currentUserId, spaceFilter]);
 
+  // Reminders surface in Primary / Later / Cleared based on their status so
+  // the existing task-tab mental model keeps working when the two are merged.
+  const filteredReminders = useMemo(() => {
+    if (spaceFilter) return [] as Reminder[];
+    return reminders.filter((r) => {
+      switch (tab) {
+        case 'primary':
+        case 'other':
+          return r.status === 'pending';
+        case 'later':
+          return r.status === 'pending';
+        case 'cleared':
+          return r.status === 'done' || r.status === 'cancelled';
+        default:
+          return true;
+      }
+    });
+  }, [reminders, tab, spaceFilter]);
+
   const grouped = useMemo(() => {
     const now = new Date();
-    const buckets: Record<string, HomeTask[]> = {};
+    const buckets: Record<string, InboxItem[]> = {};
+
     for (const t of filtered) {
       const d = parseISO(t.updated_at);
       if (Number.isNaN(d.getTime())) continue;
       const key = bucketForDate(d, now);
       if (!buckets[key]) buckets[key] = [];
-      buckets[key].push(t);
+      buckets[key].push({ kind: 'task', sortTime: d.getTime(), data: t });
     }
+
+    for (const r of filteredReminders) {
+      // Reminders are sorted by their due date — that's the moment the user
+      // actually cares about. Fall back to createdAt so fresh ones still group.
+      const iso = r.dueDate ?? r.createdAt ?? null;
+      if (!iso) continue;
+      const d = parseISO(iso);
+      if (Number.isNaN(d.getTime())) continue;
+      const key = bucketForDate(d, now);
+      if (!buckets[key]) buckets[key] = [];
+      buckets[key].push({ kind: 'reminder', sortTime: d.getTime(), data: r });
+    }
+
     const order = (k: string) => {
       if (k === 'today') return 0;
       if (k === 'week') return 1;
@@ -100,7 +165,7 @@ export function HomeInbox({ tasks, loading, currentUserId, onRefresh, onOpenTask
       const ob = order(b);
       if (oa !== ob) return oa - ob;
       if (oa === 2 && ob === 2) {
-        return parseISO(buckets[b][0].updated_at).getTime() - parseISO(buckets[a][0].updated_at).getTime();
+        return buckets[b][0].sortTime - buckets[a][0].sortTime;
       }
       return a.localeCompare(b);
     });
@@ -112,9 +177,9 @@ export function HomeInbox({ tasks, loading, currentUserId, onRefresh, onOpenTask
           : k === 'week'
             ? 'Last 7 days'
             : k,
-      items: buckets[k].sort((a, b) => parseISO(b.updated_at).getTime() - parseISO(a.updated_at).getTime()),
+      items: buckets[k].sort((a, b) => b.sortTime - a.sortTime),
     }));
-  }, [filtered]);
+  }, [filtered, filteredReminders]);
 
   const tabCounts = useMemo(() => {
     const c = (t: InboxTab) => filterByTab(tasks, t, currentUserId).length;
@@ -240,9 +305,9 @@ export function HomeInbox({ tasks, loading, currentUserId, onRefresh, onOpenTask
           <div className="mt-4 rounded-2xl border border-border bg-card p-10 text-center text-sm text-muted-foreground shadow-sm">
             Loading all team tasks...
           </div>
-        ) : filtered.length === 0 ? (
+        ) : grouped.length === 0 ? (
           <div className="mt-4 rounded-2xl border border-border bg-card p-10 text-center text-sm text-muted-foreground shadow-sm">
-            No tasks in this view.
+            Nothing in this view yet.
           </div>
         ) : (
           <div className="mt-2 overflow-hidden rounded-xl border border-border/70 bg-card">
@@ -252,78 +317,124 @@ export function HomeInbox({ tasks, loading, currentUserId, onRefresh, onOpenTask
                   {section.label}
                 </div>
                 <ul className="space-y-1.5 p-1.5">
-                  {section.items.map((task) => (
-                    <li key={task.id}>
-                      <button
-                        type="button"
-                        onClick={() => onOpenTask(task)}
-                        className="flex w-full gap-3 rounded-lg border border-transparent bg-background px-3.5 py-2.5 text-left transition-colors hover:border-border/70 hover:bg-muted/30"
-                      >
-                        <span className="flex-shrink-0 pt-0.5">
-                          {task.status === 'complete' ? (
-                            <CheckCircle2 className="w-5 h-5 text-emerald-600" aria-hidden />
-                          ) : (
-                            <Circle className="w-5 h-5 text-muted-foreground/50" aria-hidden />
-                          )}
-                        </span>
-
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-start justify-between gap-2">
-                            <p className="line-clamp-1 text-sm font-medium leading-snug text-foreground">{task.title}</p>
-                            <span className="whitespace-nowrap text-[11px] text-muted-foreground">
-                              {formatRowTime(task.updated_at, now)}
+                  {section.items.map((item) => {
+                    if (item.kind === 'reminder') {
+                      const reminder = item.data;
+                      const iso = reminder.dueDate ?? reminder.createdAt ?? null;
+                      return (
+                        <li key={`r-${reminder.id}`}>
+                          <button
+                            type="button"
+                            onClick={() => onOpenReminder?.(reminder)}
+                            className="flex w-full gap-3 rounded-lg border border-transparent bg-background px-3.5 py-2.5 text-left transition-colors hover:border-amber-300/70 hover:bg-amber-50/60 dark:hover:bg-amber-950/20"
+                          >
+                            <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center pt-0.5 text-amber-500">
+                              <Bell className="h-4 w-4" aria-hidden />
                             </span>
-                          </div>
-
-                          {task.description && (
-                            <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{task.description}</p>
-                          )}
-
-                          <p className="mt-1 text-[11px] text-muted-foreground">
-                            <span className="text-foreground/90">{task.workspace_name}</span> · <span>{task.space_name}</span> ·{' '}
-                            <span>{task.list_name}</span>
-                          </p>
-
-                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                            {task.creator_label && (
-                              <span className="rounded-full border border-border/60 bg-muted/70 px-2 py-0.5 text-[10px] text-muted-foreground">
-                                {task.creator_label}
-                                {task.assignee_labels && task.assignee_labels.length > 0
-                                  ? ` -> ${task.assignee_labels.join(', ')}`
-                                  : ''}
-                              </span>
-                            )}
-                            {task.status === 'complete' && (
-                              <span
-                                className={cn(
-                                  'rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase',
-                                  STATUS_CONFIG.complete.bgClass,
-                                  STATUS_CONFIG.complete.colorClass
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-start justify-between gap-2">
+                                <p className="line-clamp-1 text-sm font-medium leading-snug text-foreground">
+                                  {reminder.title || 'Reminder'}
+                                </p>
+                                <span className="whitespace-nowrap text-[11px] text-muted-foreground">
+                                  {iso ? formatRowTime(iso, now) : ''}
+                                </span>
+                              </div>
+                              {reminder.description && (
+                                <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">
+                                  {reminder.description}
+                                </p>
+                              )}
+                              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                <span className="inline-flex items-center gap-1 rounded-full border border-amber-200/80 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:border-amber-800/60 dark:bg-amber-950/40 dark:text-amber-300">
+                                  <Bell className="h-2.5 w-2.5" />
+                                  Reminder
+                                </span>
+                                {reminder.status === 'done' && (
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                                    Done
+                                  </span>
                                 )}
-                              >
-                                {STATUS_CONFIG.complete.label}
+                              </div>
+                            </div>
+                          </button>
+                        </li>
+                      );
+                    }
+                    const task = item.data;
+                    return (
+                      <li key={`t-${task.id}`}>
+                        <button
+                          type="button"
+                          onClick={() => onOpenTask(task)}
+                          className="flex w-full gap-3 rounded-lg border border-transparent bg-background px-3.5 py-2.5 text-left transition-colors hover:border-border/70 hover:bg-muted/30"
+                        >
+                          <span className="flex-shrink-0 pt-0.5">
+                            {task.status === 'complete' ? (
+                              <CheckCircle2 className="w-5 h-5 text-emerald-600" aria-hidden />
+                            ) : (
+                              <Circle className="w-5 h-5 text-muted-foreground/50" aria-hidden />
+                            )}
+                          </span>
+
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-start justify-between gap-2">
+                              <p className="line-clamp-1 text-sm font-medium leading-snug text-foreground">{task.title}</p>
+                              <span className="whitespace-nowrap text-[11px] text-muted-foreground">
+                                {formatRowTime(task.updated_at, now)}
+                              </span>
+                            </div>
+
+                            {task.description && (
+                              <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{task.description}</p>
+                            )}
+
+                            <p className="mt-1 text-[11px] text-muted-foreground">
+                              <span className="text-foreground/90">{task.workspace_name}</span> · <span>{task.space_name}</span> ·{' '}
+                              <span>{task.list_name}</span>
+                            </p>
+
+                            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                              {task.creator_label && (
+                                <span className="rounded-full border border-border/60 bg-muted/70 px-2 py-0.5 text-[10px] text-muted-foreground">
+                                  {task.creator_label}
+                                  {task.assignee_labels && task.assignee_labels.length > 0
+                                    ? ` -> ${task.assignee_labels.join(', ')}`
+                                    : ''}
+                                </span>
+                              )}
+                              {task.status === 'complete' && (
+                                <span
+                                  className={cn(
+                                    'rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase',
+                                    STATUS_CONFIG.complete.bgClass,
+                                    STATUS_CONFIG.complete.colorClass
+                                  )}
+                                >
+                                  {STATUS_CONFIG.complete.label}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex flex-shrink-0 flex-col items-end gap-1">
+                            {(task.priority === 'urgent' || task.priority === 'high') && (
+                              <Flag
+                                className={cn('w-4 h-4', task.priority === 'urgent' ? 'text-red-600' : 'text-orange-500')}
+                                aria-hidden
+                              />
+                            )}
+                            {(task.comment_count ?? 0) > 0 && (
+                              <span className="inline-flex items-center gap-0.5 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                                <MessageSquare className="w-3 h-3" />
+                                {task.comment_count}
                               </span>
                             )}
                           </div>
-                        </div>
-
-                        <div className="flex flex-shrink-0 flex-col items-end gap-1">
-                          {(task.priority === 'urgent' || task.priority === 'high') && (
-                            <Flag
-                              className={cn('w-4 h-4', task.priority === 'urgent' ? 'text-red-600' : 'text-orange-500')}
-                              aria-hidden
-                            />
-                          )}
-                          {(task.comment_count ?? 0) > 0 && (
-                            <span className="inline-flex items-center gap-0.5 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-                              <MessageSquare className="w-3 h-3" />
-                              {task.comment_count}
-                            </span>
-                          )}
-                        </div>
-                      </button>
-                    </li>
-                  ))}
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
             ))}

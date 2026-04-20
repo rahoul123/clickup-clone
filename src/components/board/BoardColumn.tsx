@@ -57,6 +57,8 @@ interface BoardColumnProps {
   onDropTask: (taskId: string, nextStatus: string) => void;
   onDeleteTask: (taskId: string) => void;
   assigneeNameById?: Record<string, string>;
+  /** Map of parentTaskId → subtasks, so cards can render expandable subtask lists. */
+  subtasksByParentId?: Record<string, Task[]>;
   canCreateTask?: boolean;
   /** Admin: column menu (rename / reorder board) */
   canManageKanban?: boolean;
@@ -80,6 +82,7 @@ export function BoardColumn({
   onDropTask,
   onDeleteTask,
   assigneeNameById = {},
+  subtasksByParentId = {},
   canCreateTask = true,
   canManageKanban = false,
   onRenameColumn,
@@ -245,6 +248,9 @@ export function BoardColumn({
               onClick={() => onTaskClick(task)}
               onDelete={() => onDeleteTask(task.id)}
               assigneeNameById={assigneeNameById}
+              subtasks={subtasksByParentId[task.id] ?? []}
+              onSubtaskClick={(sub) => onTaskClick(sub)}
+              onDeleteSubtask={(id) => onDeleteTask(id)}
             />
           ))}
         </div>

@@ -12,6 +12,29 @@ export interface Workspace {
   created_at: string;
 }
 
+export interface ReminderAttachment {
+  filename: string;
+  mimeType: string;
+  dataUrl: string;
+}
+
+export interface Reminder {
+  id: string;
+  workspaceId: string;
+  title: string;
+  description?: string;
+  /** ISO date-time string for the moment the reminder fires. */
+  dueDate: string | null;
+  status: 'pending' | 'done' | 'cancelled';
+  createdBy: string;
+  notifyUserIds: string[];
+  attachments?: ReminderAttachment[];
+  preDayNotifiedAt?: string | null;
+  dueDayNotifiedAt?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
 export interface Notification {
   id: string;
   taskId?: string | null;

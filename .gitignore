@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Electron packaging output
+release
+*.exe
+*.dmg
+*.blockmap
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

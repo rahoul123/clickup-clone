@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Building2, UserCircle2, ChevronDown } from 'lucide-react';
 import { AppSidebar } from '@/components/layout/AppSidebar';
+import { GlobalSearch } from '@/components/layout/GlobalSearch';
 import { ExportReportDialog } from '@/components/layout/ExportReportDialog';
 import { KanbanBoard } from '@/components/board/KanbanBoard';
 import { HomeInbox } from '@/components/home/HomeInbox';
@@ -9,6 +10,7 @@ import { NotificationsPanel } from '@/components/notifications/NotificationsPane
 import { TeamMembersPage } from '@/components/team/TeamMembersPage';
 import { DocsPage } from '@/components/docs/DocsPage';
 import { TimesheetsPage } from '@/components/timesheets/TimesheetsPage';
+import { ReminderDetailDialog } from '@/components/reminders/ReminderDetailDialog';
 import { useAuth } from '@/contexts/AuthContext';
 import type {
   AppRole,
@@ -16,6 +18,7 @@ import type {
   HomeTask,
   List,
   Notification as AppNotification,
+  Reminder,
   Space,
   Task,
   TaskStatus,
@@ -26,6 +29,7 @@ import { isBuiltinTaskStatus } from '@/types';
 import { filterSpacesForExport } from '@/lib/departmentAccess';
 import { api } from '@/lib/api';
 import { toast } from '@/components/ui/sonner';
+import { useRealtimeEvent } from '@/contexts/RealtimeContext';
 
 const Index = () => {
   const { user, signOut } = useAuth();
@@ -56,6 +60,10 @@ const Index = () => {
   const [docsLoading, setDocsLoading] = useState(false);
   const [taskToOpenId, setTaskToOpenId] = useState<string | null>(null);
   const [exportReportWorkspaceId, setExportReportWorkspaceId] = useState<string | null>(null);
+  // Reminders the current user created or is being notified on. Rendered
+  // inside the Home inbox alongside tasks so they're never forgotten.
+  const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [activeReminder, setActiveReminder] = useState<Reminder | null>(null);
   const seenNotificationIdsRef = useRef<Set<string>>(new Set());
   const initializedNotificationsRef = useRef(false);
 
@@ -204,6 +212,15 @@ const Index = () => {
   const canDeleteSpaces = activeRole === 'admin';
   const canCreateTasks = activeRole !== 'guest';
   const userDisplayLabel = user?.displayName?.trim() || user?.email || 'User';
+  // Lookup table shared with dialogs/panels that need to show user display names
+  // (e.g. reminder notify chips) without pulling the full option list around.
+  const memberLabelById = useMemo(() => {
+    const map: Record<string, string> = {};
+    memberOptions.forEach((m) => {
+      map[m.id] = m.label;
+    });
+    return map;
+  }, [memberOptions]);
   const formatStatusLabel = (status: string) => {
     if (isBuiltinTaskStatus(status)) {
       return status
@@ -319,6 +336,60 @@ const Index = () => {
     }
   }, [playNotificationSound]);
 
+  // ────────────────────────────────────────────────────────────────────
+  // Realtime fan-in: patch local caches when other users mutate things.
+  //
+  // Rationale: the REST endpoints still return the freshest data, but without
+  // this wiring a second client has to refresh the page to see changes. Each
+  // handler only touches the piece of state it owns so there's no stampede
+  // of re-fetches on every broadcast.
+  // ────────────────────────────────────────────────────────────────────
+  useRealtimeEvent<{ task: Task; list_id: string }>('task:created', ({ task }) => {
+    if (!task?.id) return;
+    setTasks((prev) => (prev.some((t) => t.id === task.id) ? prev : [...prev, task]));
+  });
+
+  useRealtimeEvent<{ task_id: string; list_id: string; task?: Task; patch?: Partial<Task> }>(
+    'task:updated',
+    ({ task_id, task, patch }) => {
+      if (!task_id) return;
+      setTasks((prev) =>
+        prev.map((t) => (t.id === task_id ? { ...t, ...(task ?? patch ?? {}) } : t)),
+      );
+      setHomeTasks((prev) =>
+        prev.map((t) =>
+          t.id === task_id ? { ...t, ...(task ?? patch ?? {}) } : t,
+        ) as HomeTask[],
+      );
+    },
+  );
+
+  useRealtimeEvent<{ task_id: string }>('task:deleted', ({ task_id }) => {
+    if (!task_id) return;
+    setTasks((prev) => prev.filter((t) => t.id !== task_id));
+    setHomeTasks((prev) => prev.filter((t) => t.id !== task_id));
+  });
+
+  useRealtimeEvent<AppNotification>('notification:new', (notification) => {
+    if (!notification?.id) return;
+    setNotifications((prev) =>
+      prev.some((n) => n.id === notification.id) ? prev : [notification, ...prev],
+    );
+    if (!notification.read) {
+      setNotificationUnreadCount((prev) => prev + 1);
+    }
+    toast(notification.message);
+    if (
+      typeof document !== 'undefined' &&
+      document.hidden &&
+      'Notification' in window &&
+      Notification.permission === 'granted'
+    ) {
+      new Notification('DigitechIO', { body: notification.message, tag: notification.id });
+    }
+    playNotificationSound();
+  });
+
   const fetchWorkspaceDocs = useCallback(async (workspaceId?: string | null) => {
     if (!workspaceId) {
       setWorkspaceDocs([]);
@@ -353,6 +424,24 @@ const Index = () => {
       if (timer) window.clearInterval(timer);
     };
   }, [user?.id, fetchNotifications]);
+
+  const fetchReminders = useCallback(async () => {
+    try {
+      const result = await api.app.listReminders();
+      setReminders((result?.reminders ?? []) as Reminder[]);
+    } catch (error) {
+      console.error('Failed to fetch reminders', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    fetchReminders();
+    // Reminders are fired by the backend scheduler; polling every 60s keeps
+    // the Home inbox fresh without hammering the API on every notification tick.
+    const timer = window.setInterval(fetchReminders, 60000);
+    return () => window.clearInterval(timer);
+  }, [user?.id, fetchReminders]);
 
   useEffect(() => {
     if (!user || !('Notification' in window)) return;
@@ -622,26 +711,30 @@ const Index = () => {
       endDate: payload.endDate,
       description: payload.description,
     });
-    setTasks((prev) => [
-      {
-        id: data.id,
-        list_id: data.list_id,
-        title: data.title,
-        description: data.description ?? undefined,
-        status: data.status,
-        priority: data.priority,
-        start_date: data.start_date ?? undefined,
-        due_date: data.due_date ?? undefined,
-        assignee_ids: [],
-        created_by: data.created_by,
-        created_at: data.created_at,
-        updated_at: data.updated_at,
-        parent_task_id: data.parent_task_id ?? null,
-        checklist: data.checklist ?? [],
-        related_task_ids: data.related_task_ids ?? [],
-      },
-      ...prev,
-    ]);
+    setTasks((prev) => {
+      // Realtime `task:created` may have already added this task (socket race).
+      if (prev.some((t) => t.id === data.id)) return prev;
+      return [
+        {
+          id: data.id,
+          list_id: data.list_id,
+          title: data.title,
+          description: data.description ?? undefined,
+          status: data.status,
+          priority: data.priority,
+          start_date: data.start_date ?? undefined,
+          due_date: data.due_date ?? undefined,
+          assignee_ids: [],
+          created_by: data.created_by,
+          created_at: data.created_at,
+          updated_at: data.updated_at,
+          parent_task_id: data.parent_task_id ?? null,
+          checklist: data.checklist ?? [],
+          related_task_ids: data.related_task_ids ?? [],
+        },
+        ...prev,
+      ];
+    });
     toast.success(`Task "${data.title}" created.`);
 
     // Persist any files picked via the "Upload file" flow as the first comment attachment.
@@ -679,12 +772,40 @@ const Index = () => {
     description?: string;
     dueDate: string;
     notifyUserIds?: string[];
+    attachments?: File[];
   }) => {
     if (!user) return;
     if (!activeWorkspaceId) {
       toast.error('Open a workspace before creating a reminder.');
       return;
     }
+
+    // Convert any Files from the composer into base64 data-URL payloads the
+    // backend understands (same contract as comment/discussion attachments).
+    let attachmentPayloads: Array<{ filename: string; mimeType: string; dataUrl: string }> | undefined;
+    if (payload.attachments && payload.attachments.length > 0) {
+      try {
+        const fileToDataUrl = (file: File) =>
+          new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = () => reject(new Error('Failed to read file'));
+            reader.readAsDataURL(file);
+          });
+        attachmentPayloads = await Promise.all(
+          payload.attachments.map(async (file) => ({
+            filename: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            dataUrl: await fileToDataUrl(file),
+          })),
+        );
+      } catch (readError) {
+        console.error('Failed to read reminder attachments', readError);
+        toast.error('Could not read one of the attached files.');
+        return;
+      }
+    }
+
     try {
       await api.app.createReminder({
         workspaceId: activeWorkspaceId,
@@ -692,6 +813,7 @@ const Index = () => {
         description: payload.description,
         dueDate: payload.dueDate,
         notifyUserIds: payload.notifyUserIds,
+        attachments: attachmentPayloads,
       });
       const due = new Date(payload.dueDate);
       toast.success(
@@ -704,9 +826,34 @@ const Index = () => {
         })}. You'll be notified 1 day before and on the day.`
       );
       fetchNotifications().catch((err) => console.error('Failed to refresh notifications', err));
+      fetchReminders().catch((err) => console.error('Failed to refresh reminders', err));
     } catch (error) {
       console.error('Failed to create reminder', error);
       toast.error(error instanceof Error ? error.message : 'Could not create reminder.');
+    }
+  };
+
+  const markReminderDone = async (id: string) => {
+    try {
+      await api.app.updateReminder(id, { status: 'done' });
+      setReminders((prev) => prev.map((r) => (r.id === id ? { ...r, status: 'done' } : r)));
+      setActiveReminder((curr) => (curr && curr.id === id ? { ...curr, status: 'done' } : curr));
+      toast.success('Reminder marked as done.');
+    } catch (error) {
+      console.error('Failed to mark reminder done', error);
+      toast.error(error instanceof Error ? error.message : 'Could not update reminder.');
+    }
+  };
+
+  const deleteReminder = async (id: string) => {
+    try {
+      await api.app.deleteReminder(id);
+      setReminders((prev) => prev.filter((r) => r.id !== id));
+      setActiveReminder(null);
+      toast.success('Reminder deleted.');
+    } catch (error) {
+      console.error('Failed to delete reminder', error);
+      toast.error(error instanceof Error ? error.message : 'Could not delete reminder.');
     }
   };
 
@@ -803,26 +950,30 @@ const Index = () => {
         endDate: payload.dueDate,
         parentTaskId: parent.id,
       });
-      setTasks((prev) => [
-        {
-          id: data.id,
-          list_id: data.list_id,
-          title: data.title,
-          description: data.description ?? undefined,
-          status: data.status,
-          priority: data.priority,
-          start_date: data.start_date ?? undefined,
-          due_date: data.due_date ?? undefined,
-          assignee_ids: data.assignee_ids ?? [],
-          created_by: data.created_by,
-          created_at: data.created_at,
-          updated_at: data.updated_at,
-          parent_task_id: data.parent_task_id ?? null,
-          checklist: data.checklist ?? [],
-          related_task_ids: data.related_task_ids ?? [],
-        },
-        ...prev,
-      ]);
+      setTasks((prev) => {
+        // Realtime `task:created` may have already added this subtask (socket race).
+        if (prev.some((t) => t.id === data.id)) return prev;
+        return [
+          {
+            id: data.id,
+            list_id: data.list_id,
+            title: data.title,
+            description: data.description ?? undefined,
+            status: data.status,
+            priority: data.priority,
+            start_date: data.start_date ?? undefined,
+            due_date: data.due_date ?? undefined,
+            assignee_ids: data.assignee_ids ?? [],
+            created_by: data.created_by,
+            created_at: data.created_at,
+            updated_at: data.updated_at,
+            parent_task_id: data.parent_task_id ?? null,
+            checklist: data.checklist ?? [],
+            related_task_ids: data.related_task_ids ?? [],
+          },
+          ...prev,
+        ];
+      });
       toast.success(`Subtask "${data.title}" added.`);
     } catch (error) {
       console.error('Failed to create subtask', error);
@@ -989,6 +1140,14 @@ const Index = () => {
           return r === 'admin' || r === 'manager' || r === 'team_lead';
         }}
       />
+      <ReminderDetailDialog
+        open={Boolean(activeReminder)}
+        reminder={activeReminder}
+        memberLabelById={memberLabelById}
+        onClose={() => setActiveReminder(null)}
+        onMarkDone={markReminderDone}
+        onDelete={deleteReminder}
+      />
       <ExportReportDialog
         key={exportReportWorkspaceId ?? 'closed'}
         open={Boolean(exportReportWorkspaceId)}
@@ -1010,7 +1169,29 @@ const Index = () => {
         singleDepartmentOnly={exportDepartmentSpaces.length === 1}
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        <div className="z-40 flex h-12 shrink-0 items-center justify-end border-b border-border/70 bg-background/95 px-4 backdrop-blur">
+        <div className="z-40 flex h-12 shrink-0 items-center gap-3 border-b border-border/70 bg-background/95 px-4 backdrop-blur">
+          <div className="flex flex-1 justify-center">
+            <GlobalSearch
+              workspaceId={activeWorkspaceId}
+              spaces={spaces}
+              lists={lists}
+              docs={workspaceDocs}
+              members={memberOptions}
+              onOpenTask={(taskId) =>
+                handleOpenNotificationTask(taskId).catch((err) =>
+                  console.error('Failed to open task from search', err)
+                )
+              }
+              onOpenList={handleSelectList}
+              onOpenSpace={(spaceId, spaceName) =>
+                handleOpenSpaceView(spaceId, spaceName).catch((err) =>
+                  console.error('Failed to open space from search', err)
+                )
+              }
+              onOpenDocs={() => handleNavigate('docs')}
+              onOpenTeamMembers={() => handleNavigate('team-members')}
+            />
+          </div>
           <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-background px-2 py-1 shadow-sm">
             <div className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1">
             <Building2 className="h-3 w-3 text-muted-foreground" />
@@ -1041,8 +1222,13 @@ const Index = () => {
               tasks={homeTasks}
               loading={homeLoading}
               currentUserId={user?.id ?? null}
-              onRefresh={() => fetchHomeTasks().catch((error) => console.error('Failed to refresh home', error))}
+              onRefresh={() => {
+                fetchHomeTasks().catch((error) => console.error('Failed to refresh home', error));
+                fetchReminders().catch((error) => console.error('Failed to refresh reminders', error));
+              }}
               onOpenTask={openTaskFromHome}
+              reminders={reminders}
+              onOpenReminder={(r) => setActiveReminder(r)}
             />
           ) : pageView === 'dashboard' ? (
             <ModernDashboard analytics={dashboardData} loading={dashboardLoading} />

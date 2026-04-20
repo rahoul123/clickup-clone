@@ -5,6 +5,9 @@ import { componentTagger } from "lovable-tagger";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
+  // Packaged Electron builds load the UI via the bundled Express backend,
+  // so absolute paths from the root work just like in the web build.
+  base: "/",
   server: {
     host: "::",
     port: 8080,

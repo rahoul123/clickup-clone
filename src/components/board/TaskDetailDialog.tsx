@@ -62,6 +62,7 @@ interface TaskDetailDialogProps {
     description?: string;
     dueDate: string;
     notifyUserIds?: string[];
+    attachments?: File[];
   }) => Promise<void> | void;
   currentUserId?: string;
   /** Subtasks (already loaded) whose `parent_task_id` equals this task's id. */

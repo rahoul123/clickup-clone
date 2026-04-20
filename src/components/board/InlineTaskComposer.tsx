@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   Ban,
+  X,
 } from 'lucide-react';
 import { format, addDays, nextMonday } from 'date-fns';
 import type { TaskPriority } from '@/types';
@@ -51,29 +52,35 @@ const PRIORITY_FLAG_CLASS: Record<TaskPriority, string> = {
 
 export function InlineTaskComposer({ memberOptions, onSave, onCancel }: InlineTaskComposerProps) {
   const rootRef = useRef<HTMLDivElement>(null);
-  const onCancelRef = useRef(onCancel);
-  onCancelRef.current = onCancel;
-
-  useEffect(() => {
-    const onPointerDown = (e: PointerEvent) => {
-      const el = e.target;
-      if (!(el instanceof Node)) return;
-      if (rootRef.current?.contains(el)) return;
-      if (el instanceof Element && el.closest('[data-add-task-column]')) return;
-      onCancelRef.current();
-    };
-    document.addEventListener('pointerdown', onPointerDown, true);
-    return () => document.removeEventListener('pointerdown', onPointerDown, true);
-  }, []);
 
   const [title, setTitle] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('normal');
   const [assigneeIds, setAssigneeIds] = useState<string[]>([]);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+
+  // Only the per-section popovers (assignee / dates / priority) should close on
+  // an outside click. The composer itself stays open until the user explicitly
+  // hits Save, the × button, or Escape — never lose work on a stray click.
   const [openSection, setOpenSection] = useState<'assignee' | 'dates' | 'priority' | null>(null);
   const [assigneeSearch, setAssigneeSearch] = useState('');
   const [activeDateField, setActiveDateField] = useState<'start' | 'due'>('due');
+
+  useEffect(() => {
+    if (!openSection) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const el = e.target;
+      if (!(el instanceof Node)) return;
+      const root = rootRef.current;
+      if (!root) return;
+      // Click on the section trigger rows / open popover stays within rootRef;
+      // only collapse when clicking truly outside the composer card.
+      if (root.contains(el)) return;
+      setOpenSection(null);
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () => document.removeEventListener('pointerdown', onPointerDown, true);
+  }, [openSection]);
 
   const today = useMemo(() => startOfDaySafe(new Date()), []);
 
@@ -184,6 +191,15 @@ export function InlineTaskComposer({ memberOptions, onSave, onCancel }: InlineTa
         >
           Save
           <CornerDownLeft className="h-3.5 w-3.5 opacity-95" />
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted/60 hover:text-foreground"
+          aria-label="Close"
+          title="Close (Esc)"
+        >
+          <X className="h-4 w-4" />
         </button>
       </div>
 
@@ -349,6 +365,14 @@ export function InlineTaskComposer({ memberOptions, onSave, onCancel }: InlineTa
                       const ymd = formatYmd(d);
                       if (activeDateField === 'start') setStartDate(ymd);
                       else setEndDate(ymd);
+                    }}
+                    onDayDoubleClick={(d) => {
+                      if (!d) return;
+                      const ymd = formatYmd(d);
+                      setStartDate(ymd);
+                      setEndDate(ymd);
+                      setActiveDateField('due');
+                      setOpenSection(null);
                     }}
                     className="w-full p-1"
                   />

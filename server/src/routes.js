@@ -575,26 +575,54 @@ async function loadAggregatedNavigation(userId) {
   };
 }
 
-async function createNotifications({ userIds, workspaceId, taskId, type, message }) {
+async function createNotifications({ userIds, workspaceId, taskId, type, message, realtime }) {
   if (!Array.isArray(userIds) || userIds.length === 0) return;
   const uniqueUserIds = [...new Set(userIds)].filter(Boolean);
-  await Notification.insertMany(
-    uniqueUserIds.map((userId) => ({
-      _id: randomUUID(),
-      userId,
-      workspaceId,
-      taskId,
-      type,
-      message,
-      read: false,
-    })),
-    { ordered: false }
-  ).catch(() => {});
+  const docs = uniqueUserIds.map((userId) => ({
+    _id: randomUUID(),
+    userId,
+    workspaceId,
+    taskId,
+    type,
+    message,
+    read: false,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  }));
+  await Notification.insertMany(docs, { ordered: false }).catch(() => {});
+
+  // Push each recipient their fresh bell notification so unread counts +
+  // toasts appear in real time instead of only on the next poll. The shape
+  // mirrors the GET /notifications REST DTO so client handlers can reuse
+  // the existing `Notification` type without branching.
+  if (realtime?.toUser) {
+    for (const doc of docs) {
+      realtime.toUser(doc.userId, 'notification:new', {
+        id: doc._id,
+        taskId: doc.taskId ?? null,
+        workspaceId: doc.workspaceId,
+        type: doc.type,
+        message: doc.message,
+        read: false,
+        createdAt: doc.createdAt.toISOString(),
+      });
+    }
+  }
 }
 
-export function buildRoutes() {
+export function buildRoutes({ realtime } = {}) {
   const router = Router();
   router.use(attachUser);
+
+  // ────────────────────────────────────────────────────────────────────
+  // Realtime broadcast helpers. Guarded so routes don't crash if the
+  // realtime layer isn't wired up (e.g. tests that don't need websockets).
+  // ────────────────────────────────────────────────────────────────────
+  const rt = {
+    broadcast: (event, payload) => realtime?.broadcast?.(event, payload),
+    toUser: (userId, event, payload) => realtime?.toUser?.(userId, event, payload),
+    toUsers: (userIds, event, payload) => realtime?.toUsers?.(userIds, event, payload),
+  };
 
   router.get('/health', (_req, res) => res.json({ ok: true }));
 
@@ -1714,6 +1742,7 @@ export function buildRoutes() {
         taskId: task._id,
         type: 'task_created',
         message: `New task created: ${task.title}`,
+        realtime: rt,
       });
 
       // Email assignees (exclude the creator so they don't email themselves).
@@ -1751,10 +1780,13 @@ export function buildRoutes() {
         taskId: task._id,
         type: 'task_created',
         message: `You were notified about this task: ${task.title}`,
+        realtime: rt,
       });
     }
 
-    res.json({ task: taskToDTO(task.toObject(), assignedUserIds) });
+    const dto = taskToDTO(task.toObject(), assignedUserIds);
+    rt.broadcast('task:created', { task: dto, list_id: listId });
+    res.json({ task: dto });
   });
 
   router.patch('/tasks/:taskId/status', requireAuth, async (req, res) => {
@@ -1796,6 +1828,7 @@ export function buildRoutes() {
       taskId,
       type: 'task_status_changed',
       message: `Task status updated to ${status}: ${task.title}`,
+      realtime: rt,
     });
 
     // Email on transition to "complete" only — skip duplicates / other updates.
@@ -1828,6 +1861,11 @@ export function buildRoutes() {
       }
     }
 
+    rt.broadcast('task:updated', {
+      task_id: taskId,
+      list_id: task.listId,
+      patch: { status },
+    });
     res.json({ ok: true });
   });
 
@@ -1988,7 +2026,13 @@ export function buildRoutes() {
         console.error('Failed to send task-completed emails (patch)', err);
       }
     }
-    res.json({ task: taskToDTO(refreshed, assignees.map((a) => a.userId)) });
+    const patchDto = taskToDTO(refreshed, assignees.map((a) => a.userId));
+    rt.broadcast('task:updated', {
+      task_id: taskId,
+      list_id: refreshed.listId,
+      task: patchDto,
+    });
+    res.json({ task: patchDto });
   });
 
   router.delete('/tasks/:taskId', requireAuth, async (req, res) => {
@@ -2030,6 +2074,7 @@ export function buildRoutes() {
     await Notification.deleteMany({ taskId });
     await Task.deleteOne({ _id: taskId });
 
+    rt.broadcast('task:deleted', { task_id: taskId, list_id: task.listId });
     res.json({ ok: true });
   });
 
@@ -2154,7 +2199,9 @@ export function buildRoutes() {
       ? { [author._id]: author.displayName || author.email || 'Unknown user' }
       : {};
 
-    res.json({ comment: serializeComment(comment.toObject(), userMap) });
+    const dto = serializeComment(comment.toObject(), userMap);
+    rt.broadcast('comment:created', { task_id: taskId, comment: dto });
+    res.json({ comment: dto });
   });
 
   /**
@@ -2200,7 +2247,9 @@ export function buildRoutes() {
     const userMap = Object.fromEntries(
       users.map((u) => [u._id, u.displayName || u.email || 'Unknown user']),
     );
-    res.json({ comment: serializeComment(doc.toObject(), userMap) });
+    const dto = serializeComment(doc.toObject(), userMap);
+    rt.broadcast('comment:updated', { task_id: taskId, comment: dto });
+    res.json({ comment: dto });
   });
 
   /** Record that the current user has seen these comments (read receipts). Skips the viewer's own messages. */
@@ -2380,17 +2429,17 @@ export function buildRoutes() {
     });
 
     const author = await User.findById(req.session.userId).lean();
-    res.json({
-      message: {
-        id: message._id,
-        space_id: message.spaceId,
-        user_id: message.userId,
-        content: message.content,
-        attachments: message.attachments || [],
-        created_at: message.createdAt.toISOString(),
-        author_name: author?.displayName || author?.email || 'Unknown user',
-      },
-    });
+    const messageDto = {
+      id: message._id,
+      space_id: message.spaceId,
+      user_id: message.userId,
+      content: message.content,
+      attachments: message.attachments || [],
+      created_at: message.createdAt.toISOString(),
+      author_name: author?.displayName || author?.email || 'Unknown user',
+    };
+    rt.broadcast('discussion:message', { space_id: spaceId, message: messageDto });
+    res.json({ message: messageDto });
   });
 
   router.delete('/spaces/:spaceId/discussion/:messageId', requireAuth, async (req, res) => {
@@ -2414,6 +2463,7 @@ export function buildRoutes() {
     }
 
     await SpaceDiscussionMessage.deleteOne({ _id: messageId });
+    rt.broadcast('discussion:message-deleted', { space_id: spaceId, message_id: messageId });
     res.json({ ok: true });
   });
 
@@ -2429,6 +2479,7 @@ export function buildRoutes() {
       status: r.status,
       createdBy: r.createdBy,
       notifyUserIds: Array.isArray(r.notifyUserIds) ? r.notifyUserIds : [],
+      attachments: Array.isArray(r.attachments) ? r.attachments : [],
       preDayNotifiedAt: r.preDayNotifiedAt ? new Date(r.preDayNotifiedAt).toISOString() : null,
       dueDayNotifiedAt: r.dueDayNotifiedAt ? new Date(r.dueDayNotifiedAt).toISOString() : null,
       createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : null,
@@ -2449,7 +2500,7 @@ export function buildRoutes() {
 
   router.post('/reminders', requireAuth, async (req, res) => {
     const userId = req.session.userId;
-    const { workspaceId, title, description, dueDate, notifyUserIds } = req.body ?? {};
+    const { workspaceId, title, description, dueDate, notifyUserIds, attachments } = req.body ?? {};
 
     const safeTitle = String(title || '').trim();
     if (!safeTitle) return res.status(400).json({ message: 'Reminder title is required' });
@@ -2484,6 +2535,28 @@ export function buildRoutes() {
     const notifyUserIdsClean = Array.from(targetSet).filter((id) => memberIds.has(id));
     if (notifyUserIdsClean.length === 0) notifyUserIdsClean.push(userId);
 
+    // Validate + normalize attachments (same contract as comment / discussion attachments).
+    const rawAttachments = Array.isArray(attachments) ? attachments : [];
+    if (rawAttachments.length > 10) {
+      return res.status(400).json({ message: 'Too many attachments (max 10)' });
+    }
+    const MAX_REMINDER_ATTACHMENT_BYTES = 4 * 1024 * 1024;
+    const cleanAttachments = [];
+    for (const att of rawAttachments) {
+      const filename = String(att?.filename || '').trim();
+      const mimeType = String(att?.mimeType || 'application/octet-stream');
+      const dataUrl = String(att?.dataUrl || '');
+      if (!filename || !dataUrl.startsWith('data:')) {
+        return res.status(400).json({ message: 'Invalid attachment payload' });
+      }
+      const base64 = dataUrl.split(',')[1] || '';
+      const approxBytes = Math.floor((base64.length * 3) / 4);
+      if (approxBytes > MAX_REMINDER_ATTACHMENT_BYTES) {
+        return res.status(400).json({ message: `Attachment "${filename}" exceeds 4 MB` });
+      }
+      cleanAttachments.push({ filename, mimeType, dataUrl });
+    }
+
     const reminder = await Reminder.create({
       _id: randomUUID(),
       workspaceId: String(workspaceId),
@@ -2493,6 +2566,7 @@ export function buildRoutes() {
       description: typeof description === 'string' ? description.slice(0, 2000) : '',
       dueDate: parsedDue,
       status: 'pending',
+      attachments: cleanAttachments,
     });
 
     res.json({ reminder: serializeReminder(reminder.toObject()) });

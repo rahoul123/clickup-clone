@@ -184,6 +184,8 @@ export const api = {
       dueDate: string;
       /** User ids that should get notified; creator is always included. */
       notifyUserIds?: string[];
+      /** Optional file attachments (base64 data URLs). */
+      attachments?: Array<{ filename: string; mimeType: string; dataUrl: string }>;
     }) => request('/reminders', { method: 'POST', body: JSON.stringify(payload) }),
     updateReminder: (
       id: string,

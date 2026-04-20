@@ -20,6 +20,7 @@ import { TaskDetailDialog } from './TaskDetailDialog';
 import { DiscussionPanel } from './DiscussionPanel';
 import { api } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
+import { useRealtimeEvent } from '@/contexts/RealtimeContext';
 import {
   Dialog,
   DialogContent,
@@ -132,6 +133,7 @@ interface KanbanBoardProps {
     description?: string;
     dueDate: string;
     notifyUserIds?: string[];
+    attachments?: File[];
   }) => Promise<void> | void;
   /** Create a subtask under an existing task (parentTaskId is injected by the dialog). */
   onCreateSubtask?: (
@@ -228,6 +230,62 @@ export function KanbanBoard({
   const [newColumnColor, setNewColumnColor] = useState<string>('#A855F7');
   const [collapsedColumnKeys, setCollapsedColumnKeys] = useState<string[]>([]);
 
+  // ── Search & Filter ─────────────────────────────────────────────────
+  // The top-right Filter / Search controls are wired through `filteredTasks`
+  // below. Everything downstream (tasksByStatus, board columns, list view)
+  // naturally respects the active query/filter without extra plumbing.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [filterPriorities, setFilterPriorities] = useState<TaskPriority[]>([]);
+  const [filterAssignees, setFilterAssignees] = useState<string[]>([]);
+  const [filterDueBucket, setFilterDueBucket] = useState<
+    'any' | 'overdue' | 'today' | 'week' | 'none'
+  >('any');
+  const filterRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!filterOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (filterRef.current && !filterRef.current.contains(t)) setFilterOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [filterOpen]);
+
+  useEffect(() => {
+    if (searchOpen) {
+      // Defer so the input exists in the DOM before we focus it.
+      const id = window.setTimeout(() => searchInputRef.current?.focus(), 0);
+      return () => window.clearTimeout(id);
+    }
+  }, [searchOpen]);
+
+  const togglePriorityFilter = (p: TaskPriority) => {
+    setFilterPriorities((prev) =>
+      prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]
+    );
+  };
+  const toggleAssigneeFilter = (id: string) => {
+    setFilterAssignees((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+  const clearAllFilters = () => {
+    setSearchQuery('');
+    setFilterPriorities([]);
+    setFilterAssignees([]);
+    setFilterDueBucket('any');
+  };
+
+  const activeFilterCount =
+    (searchQuery.trim() ? 1 : 0) +
+    filterPriorities.length +
+    filterAssignees.length +
+    (filterDueBucket !== 'any' ? 1 : 0);
+
   const columnOrder = useMemo(
     () => resolveColumnOrder(kanbanColumnOrder, kanbanCustomColumns),
     [kanbanColumnOrder, kanbanCustomColumns]
@@ -246,6 +304,28 @@ export function KanbanBoard({
   useEffect(() => {
     setCollapsedColumnKeys((prev) => prev.filter((k) => columnOrder.includes(k)));
   }, [columnOrder]);
+
+  // ────────────────────────────────────────────────────────────────────
+  // Realtime: keep the currently-open task's comment thread in sync when
+  // someone else posts a reply or reacts. We only patch state if the event
+  // concerns the task the user has open; other tasks re-fetch on open.
+  // ────────────────────────────────────────────────────────────────────
+  type CommentDTO = (typeof taskComments)[number];
+  useRealtimeEvent<{ task_id: string; comment: CommentDTO }>(
+    'comment:created',
+    ({ task_id, comment }) => {
+      if (!selectedTask || selectedTask.id !== task_id || !comment?.id) return;
+      setTaskComments((prev) => (prev.some((c) => c.id === comment.id) ? prev : [...prev, comment]));
+    },
+  );
+
+  useRealtimeEvent<{ task_id: string; comment: CommentDTO }>(
+    'comment:updated',
+    ({ task_id, comment }) => {
+      if (!selectedTask || selectedTask.id !== task_id || !comment?.id) return;
+      setTaskComments((prev) => prev.map((c) => (c.id === comment.id ? { ...c, ...comment } : c)));
+    },
+  );
 
   const toggleColumnCollapsed = (columnKey: string) => {
     setCollapsedColumnKeys((prev) =>
@@ -396,14 +476,87 @@ export function KanbanBoard({
     }
   };
 
+  // Apply active search + filter chips before grouping into columns.
+  const filteredTasks = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const prioritySet = new Set(filterPriorities);
+    const assigneeSet = new Set(filterAssignees);
+
+    // Date-bucket boundaries (local calendar days).
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const endOfToday = new Date(startOfToday.getTime() + 24 * 60 * 60 * 1000);
+    const endOfWeek = new Date(startOfToday.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+    return tasks.filter((t) => {
+      // Text query: match against title + description + assignee display names.
+      if (q) {
+        const hay = [
+          t.title || '',
+          t.description || '',
+          ...(t.assignee_ids || []).map((id) => assigneeNameById[id] || ''),
+        ]
+          .join(' ')
+          .toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+
+      if (prioritySet.size > 0 && !prioritySet.has(t.priority)) return false;
+
+      if (assigneeSet.size > 0) {
+        const ids = t.assignee_ids || [];
+        const hit = ids.some((id) => assigneeSet.has(id));
+        if (!hit) return false;
+      }
+
+      if (filterDueBucket !== 'any') {
+        const due = t.due_date ? new Date(t.due_date) : null;
+        if (filterDueBucket === 'none' && due) return false;
+        if (filterDueBucket !== 'none' && !due) return false;
+        if (due) {
+          const dueTime = due.getTime();
+          if (filterDueBucket === 'overdue' && !(dueTime < startOfToday.getTime())) {
+            return false;
+          }
+          if (
+            filterDueBucket === 'today' &&
+            !(dueTime >= startOfToday.getTime() && dueTime < endOfToday.getTime())
+          ) {
+            return false;
+          }
+          if (
+            filterDueBucket === 'week' &&
+            !(dueTime >= startOfToday.getTime() && dueTime < endOfWeek.getTime())
+          ) {
+            return false;
+          }
+        }
+      }
+
+      return true;
+    });
+  }, [tasks, searchQuery, filterPriorities, filterAssignees, filterDueBucket, assigneeNameById]);
+
   const tasksByStatus = useMemo(() => {
     const acc: Record<string, Task[]> = {};
     // Exclude subtasks from the top-level board — they're rendered inside their parent's panel.
-    for (const t of tasks) {
+    for (const t of filteredTasks) {
       if (t.parent_task_id) continue;
       const k = t.status;
       if (!acc[k]) acc[k] = [];
       acc[k].push(t);
+    }
+    return acc;
+  }, [filteredTasks]);
+
+  // Subtasks are bucketed by their parent id so each parent card can render an
+  // expandable nested list of subtask mini-cards directly on the Kanban board.
+  const subtasksByParentId = useMemo(() => {
+    const acc: Record<string, Task[]> = {};
+    for (const t of tasks) {
+      if (!t.parent_task_id) continue;
+      if (!acc[t.parent_task_id]) acc[t.parent_task_id] = [];
+      acc[t.parent_task_id].push(t);
     }
     return acc;
   }, [tasks]);
@@ -513,15 +666,177 @@ export function KanbanBoard({
           </div>
 
           <div className="flex items-center gap-2">
-            <button className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground rounded-md hover:bg-secondary transition-colors">
-              <Filter className="w-4 h-4" />
-              Filter
-            </button>
+            {searchOpen && (
+              <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1">
+                <Search className="w-4 h-4 text-muted-foreground" />
+                <input
+                  ref={searchInputRef}
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search tasks…"
+                  className="w-48 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      setSearchQuery('');
+                      setSearchOpen(false);
+                    }
+                  }}
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    className="text-muted-foreground hover:text-foreground"
+                    aria-label="Clear search"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            )}
+            <div className="relative" ref={filterRef}>
+              <button
+                type="button"
+                onClick={() => setFilterOpen((v) => !v)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors ${
+                  filterOpen || activeFilterCount > 0
+                    ? 'bg-primary/10 text-primary'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-secondary'
+                }`}
+              >
+                <Filter className="w-4 h-4" />
+                Filter
+                {activeFilterCount > 0 && (
+                  <span className="ml-0.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-bold leading-none text-primary-foreground">
+                    {activeFilterCount}
+                  </span>
+                )}
+              </button>
+              {filterOpen && (
+                <div className="absolute right-0 top-full z-40 mt-2 w-[300px] overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-xl">
+                  <div className="flex items-center justify-between border-b border-border/60 px-3 py-2">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Filters
+                    </span>
+                    <button
+                      type="button"
+                      onClick={clearAllFilters}
+                      disabled={activeFilterCount === 0}
+                      className="text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Clear all
+                    </button>
+                  </div>
+
+                  <div className="max-h-[60vh] overflow-y-auto px-3 py-3 space-y-4">
+                    <div>
+                      <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                        Priority
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {(Object.keys(PRIORITY_CONFIG) as TaskPriority[]).map((p) => {
+                          const active = filterPriorities.includes(p);
+                          return (
+                            <button
+                              key={p}
+                              type="button"
+                              onClick={() => togglePriorityFilter(p)}
+                              className={`rounded-full border px-2.5 py-1 text-[12px] transition-colors ${
+                                active
+                                  ? 'border-primary/40 bg-primary/10 text-primary'
+                                  : 'border-border bg-background text-foreground hover:bg-secondary'
+                              }`}
+                            >
+                              {PRIORITY_CONFIG[p].label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                        Due date
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {[
+                          { key: 'any' as const, label: 'Any' },
+                          { key: 'overdue' as const, label: 'Overdue' },
+                          { key: 'today' as const, label: 'Today' },
+                          { key: 'week' as const, label: 'This week' },
+                          { key: 'none' as const, label: 'No date' },
+                        ].map((opt) => {
+                          const active = filterDueBucket === opt.key;
+                          return (
+                            <button
+                              key={opt.key}
+                              type="button"
+                              onClick={() => setFilterDueBucket(opt.key)}
+                              className={`rounded-full border px-2.5 py-1 text-[12px] transition-colors ${
+                                active
+                                  ? 'border-primary/40 bg-primary/10 text-primary'
+                                  : 'border-border bg-background text-foreground hover:bg-secondary'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                        Assignee
+                      </div>
+                      {memberOptions.length === 0 ? (
+                        <div className="text-[12px] text-muted-foreground">No members yet.</div>
+                      ) : (
+                        <div className="max-h-40 space-y-1 overflow-y-auto pr-1">
+                          {memberOptions.map((m) => {
+                            const checked = filterAssignees.includes(m.id);
+                            return (
+                              <label
+                                key={m.id}
+                                className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 hover:bg-secondary"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => toggleAssigneeFilter(m.id)}
+                                  className="h-3.5 w-3.5 rounded border-border"
+                                />
+                                <span className="text-[12px] text-foreground">{m.label}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
             <button className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground rounded-md hover:bg-secondary transition-colors">
               <Users className="w-4 h-4" />
               Group
             </button>
-            <button className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground rounded-md hover:bg-secondary transition-colors">
+            <button
+              type="button"
+              onClick={() => {
+                setSearchOpen((v) => {
+                  const next = !v;
+                  if (!next) setSearchQuery('');
+                  return next;
+                });
+              }}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors ${
+                searchOpen || searchQuery
+                  ? 'bg-primary/10 text-primary'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-secondary'
+              }`}
+              aria-label="Search tasks"
+            >
               <Search className="w-4 h-4" />
             </button>
             <button
@@ -535,6 +850,77 @@ export function KanbanBoard({
             </button>
           </div>
         </div>
+
+        {activeFilterCount > 0 && (
+          <div className="flex items-center gap-1.5 overflow-x-auto pt-2 text-xs">
+            <span className="text-muted-foreground">Filters:</span>
+            {searchQuery.trim() && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-primary">
+                “{searchQuery.trim()}”
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="opacity-70 hover:opacity-100"
+                  aria-label="Clear search"
+                >
+                  ×
+                </button>
+              </span>
+            )}
+            {filterPriorities.map((p) => (
+              <span
+                key={`pri-${p}`}
+                className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-primary"
+              >
+                {PRIORITY_CONFIG[p].label}
+                <button
+                  type="button"
+                  onClick={() => togglePriorityFilter(p)}
+                  className="opacity-70 hover:opacity-100"
+                  aria-label="Remove priority filter"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            {filterAssignees.map((id) => (
+              <span
+                key={`asg-${id}`}
+                className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-primary"
+              >
+                {assigneeNameById[id] || 'Member'}
+                <button
+                  type="button"
+                  onClick={() => toggleAssigneeFilter(id)}
+                  className="opacity-70 hover:opacity-100"
+                  aria-label="Remove assignee filter"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            {filterDueBucket !== 'any' && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-primary">
+                Due: {filterDueBucket === 'none' ? 'No date' : filterDueBucket}
+                <button
+                  type="button"
+                  onClick={() => setFilterDueBucket('any')}
+                  className="opacity-70 hover:opacity-100"
+                  aria-label="Remove due filter"
+                >
+                  ×
+                </button>
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={clearAllFilters}
+              className="ml-1 rounded-md border border-border px-2 py-0.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
+            >
+              Clear all
+            </button>
+          </div>
+        )}
 
         <div className="flex items-center gap-2 overflow-x-auto pt-2">
           {listTabs.map((tab) => (
@@ -590,6 +976,7 @@ export function KanbanBoard({
                   onDropTask={onMoveTask}
                   onDeleteTask={handleDeleteTask}
                   assigneeNameById={assigneeNameById}
+                  subtasksByParentId={subtasksByParentId}
                   canCreateTask={canCreateTask}
                   canManageKanban={canManageKanban}
                   onRenameColumn={() => openRenameForStatus(columnKey)}

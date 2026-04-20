@@ -8,7 +8,7 @@ import {
   Plus,
   ChevronRight,
   ChevronDown,
-  Hash,
+  ListChecks,
   MessageSquare,
   Settings,
   Users,
@@ -264,7 +264,9 @@ export function AppSidebar({
               {item.name[0]}
             </span>
           )}
-          {item.type === 'list' && <Hash className="w-4 h-4 flex-shrink-0 text-sidebar-muted" />}
+          {item.type === 'list' && (
+            <ListChecks className="w-4 h-4 flex-shrink-0 text-sidebar-muted" />
+          )}
           {item.type === 'discussion' && (
             <MessageSquare className="w-4 h-4 flex-shrink-0 text-sidebar-muted" />
           )}

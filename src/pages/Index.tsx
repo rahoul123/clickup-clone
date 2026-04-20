@@ -43,8 +43,9 @@ const Index = () => {
   const [activeList, setActiveList] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [pageView, setPageView] = useState<
-    'home' | 'board' | 'dashboard' | 'notifications' | 'team-members' | 'docs' | 'timesheets'
+    'home' | 'board' | 'dashboard' | 'notifications' | 'team-members' | 'docs' | 'timesheets' | 'space'
   >('board');
+  const [activeSpaceView, setActiveSpaceView] = useState<{ spaceId: string; spaceName: string } | null>(null);
   const [homeTasks, setHomeTasks] = useState<HomeTask[]>([]);
   const [homeLoading, setHomeLoading] = useState(false);
   const [dashboardData, setDashboardData] = useState<DashboardAnalytics | null>(null);
@@ -96,13 +97,18 @@ const Index = () => {
               name: master.name,
               color: master.color,
               isMasterFolder: true as const,
-              children: departments.map((space) => ({
-                id: space.id,
-                name: space.name,
-                color: space.color,
-                noExpand: !isAdmin && Boolean(myDept) && !isMyDepartmentSpace(space),
-                lists: lists.filter((l) => l.space_id === space.id).map((l) => ({ id: l.id, name: l.name })),
-              })),
+              children: departments.map((space) => {
+                const canDiscuss = isAdmin || (Boolean(myDept) && isMyDepartmentSpace(space));
+                return {
+                  id: space.id,
+                  name: space.name,
+                  color: space.color,
+                  noExpand: !isAdmin && Boolean(myDept) && !isMyDepartmentSpace(space),
+                  showDiscussion: canDiscuss,
+                  spaceForView: canDiscuss,
+                  lists: lists.filter((l) => l.space_id === space.id).map((l) => ({ id: l.id, name: l.name })),
+                };
+              }),
             },
           ],
         };
@@ -355,6 +361,21 @@ const Index = () => {
     }
   }, [user]);
 
+  useEffect(() => {
+    if (!user || loading) return;
+    const params = new URLSearchParams(window.location.search);
+    const deepTaskId = params.get('task');
+    if (!deepTaskId) return;
+    handleOpenNotificationTask(deepTaskId).catch((err) =>
+      console.error('Failed to open task from shared link', err),
+    );
+    params.delete('task');
+    const nextQuery = params.toString();
+    const cleanUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`;
+    window.history.replaceState(null, '', cleanUrl);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, loading]);
+
   const handleSelectList = (listId: string) => {
     const list = lists.find((l) => l.id === listId);
     const space = list ? spaces.find((s) => s.id === list.space_id) : null;
@@ -437,6 +458,21 @@ const Index = () => {
       setNotificationUnreadCount((prev) => (prev > 0 ? prev - 1 : 0));
     } catch (error) {
       console.error('Failed to mark notification read', error);
+    }
+  };
+
+  const handleOpenSpaceView = async (spaceId: string, spaceName: string) => {
+    const space = spaces.find((s) => s.id === spaceId);
+    if (space) setActiveWorkspaceId(space.workspace_id);
+    setActiveSpaceView({ spaceId, spaceName });
+    setActiveList(null);
+    setPageView('space');
+    try {
+      const data = await api.app.listSpaceTasks(spaceId);
+      setTasks((data.tasks ?? []) as Task[]);
+    } catch (error) {
+      console.error('Failed to load space tasks', error);
+      setTasks([]);
     }
   };
 
@@ -722,6 +758,12 @@ const Index = () => {
         workspaceName={activeWorkspace?.name ?? 'Team Workspace'}
         workspaceSections={workspaceSections}
         activeWorkspaceId={activeWorkspaceId}
+        activeSpaceViewId={pageView === 'space' ? activeSpaceView?.spaceId ?? null : null}
+        onOpenSpace={(spaceId, spaceName) =>
+          handleOpenSpaceView(spaceId, spaceName).catch((error) =>
+            console.error('Failed to open space view', error)
+          )
+        }
         activeNav={
           pageView === 'home'
             ? 'home'
@@ -861,6 +903,50 @@ const Index = () => {
             />
           ) : pageView === 'timesheets' ? (
             <TimesheetsPage tasks={tasks} />
+          ) : pageView === 'space' && activeSpaceView ? (
+            (() => {
+              const spaceLists = lists.filter((l) => l.space_id === activeSpaceView.spaceId);
+              const firstListId = spaceLists[0]?.id ?? null;
+              return (
+                <KanbanBoard
+                  workspaceName={activeWorkspace?.name ?? 'Team Workspace'}
+                  spaceName={activeSpaceView.spaceName}
+                  listName={activeSpaceView.spaceName}
+                  listTabs={spaceLists.map((l) => ({ id: l.id, name: l.name }))}
+                  addTaskListOptions={spaceLists.map((l) => ({ id: l.id, name: l.name }))}
+                  activeListId={firstListId}
+                  onSelectList={handleSelectList}
+                  tasks={tasks}
+                  memberOptions={memberOptions}
+                  onCreateTask={(payload) => createTask(payload).catch((error) => console.error('Failed to create task', error))}
+                  onMoveTask={(taskId, status) =>
+                    moveTask(taskId, status).catch((error) => console.error('Failed to move task', error))
+                  }
+                  onUpdateTask={(taskId, payload) =>
+                    updateTaskDetails(taskId, payload).catch((error) => {
+                      console.error('Failed to update task', error);
+                      return undefined;
+                    })
+                  }
+                  onDeleteTask={(taskId) =>
+                    deleteTaskDetails(taskId).catch((error) => {
+                      console.error('Failed to delete task', error);
+                      toast.error('Task delete failed.');
+                    })
+                  }
+                  canCreateTask={canCreateTasks && Boolean(firstListId)}
+                  taskToOpenId={taskToOpenId}
+                  onConsumedTaskOpen={() => setTaskToOpenId(null)}
+                  kanbanColumnOrder={null}
+                  kanbanColumnLabels={undefined}
+                  kanbanCustomColumns={[]}
+                  canManageKanban={false}
+                  spaceDiscussionId={activeSpaceView.spaceId}
+                  spaceDiscussionName={activeSpaceView.spaceName}
+                  onUpdateKanban={undefined}
+                />
+              );
+            })()
           ) : (
             <KanbanBoard
               workspaceName={activeWorkspace?.name ?? 'Team Workspace'}

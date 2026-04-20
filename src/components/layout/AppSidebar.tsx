@@ -9,6 +9,7 @@ import {
   ChevronRight,
   ChevronDown,
   Hash,
+  MessageSquare,
   Settings,
   Users,
   LogOut,
@@ -33,9 +34,15 @@ interface SidebarItem {
   children?: SidebarItem[];
   /** If provided, clicking this space opens board using this list id. */
   openListId?: string;
+  /** If true, clicking this space opens the unified Space View (Board + Discussion tabs). */
+  spaceForView?: boolean;
+  /** If set, clicking opens the space-level discussion channel. */
+  discussionSpaceId?: string;
+  /** Display name for the discussion panel header (department space name). */
+  discussionSpaceName?: string;
   /** Render as space that should not expand children in sidebar. */
   noExpand?: boolean;
-  type: 'space' | 'list' | 'nav';
+  type: 'space' | 'list' | 'nav' | 'discussion';
   color?: string;
   /** Master "Team Space" folder — + creates a department space, not a list */
   isMasterFolder?: boolean;
@@ -69,12 +76,20 @@ interface AppSidebarProps {
         name: string;
         color?: string;
         noExpand?: boolean;
+        /** If true, render a '# <name> Discussion' channel entry first under this department. */
+        showDiscussion?: boolean;
+        /** If true, clicking the space name opens the unified Space View. */
+        spaceForView?: boolean;
         lists: Array<{ id: string; name: string }>;
       }>;
     }>;
   }>;
   activeWorkspaceId?: string | null;
-  activeNav?: 'home' | 'board' | 'dashboard' | 'notifications' | 'team-members' | 'docs' | 'timesheets';
+  activeDiscussionSpaceId?: string | null;
+  activeSpaceViewId?: string | null;
+  onOpenDiscussion?: (spaceId: string, spaceName: string) => void;
+  onOpenSpace?: (spaceId: string, spaceName: string) => void;
+  activeNav?: 'home' | 'board' | 'dashboard' | 'notifications' | 'team-members' | 'docs' | 'timesheets' | 'discussion';
   onNavigate?: (view: 'home' | 'board' | 'dashboard' | 'notifications' | 'team-members' | 'docs' | 'timesheets') => void;
   onCreateWorkspace: (name: string) => Promise<void> | void;
   onCreateSpace: (name: string) => Promise<void> | void;
@@ -104,6 +119,10 @@ export function AppSidebar({
   workspaceName,
   workspaceSections,
   activeWorkspaceId = null,
+  activeDiscussionSpaceId = null,
+  activeSpaceViewId = null,
+  onOpenDiscussion,
+  onOpenSpace,
   activeNav = 'board',
   onNavigate,
   onCreateWorkspace,
@@ -159,7 +178,12 @@ export function AppSidebar({
   const renderItem = (item: SidebarItem, depth = 0) => {
     const isExpanded = expandedItems.has(item.id);
     const hasChildren = !item.noExpand && item.children && item.children.length > 0;
-    const isActive = item.id === activeList;
+    const isActive =
+      item.type === 'discussion'
+        ? activeDiscussionSpaceId === item.discussionSpaceId
+        : item.type === 'space' && item.spaceForView
+          ? activeSpaceViewId === item.id
+          : item.id === activeList;
 
     return (
       <div key={item.id}>
@@ -170,9 +194,14 @@ export function AppSidebar({
               onNavigate?.('board');
               onSelectList(item.id);
             }
-            if (item.type === 'space' && item.openListId) {
+            if (item.type === 'space' && item.spaceForView) {
+              onOpenSpace?.(item.id, item.name);
+            } else if (item.type === 'space' && item.openListId) {
               onNavigate?.('board');
               onSelectList(item.openListId);
+            }
+            if (item.type === 'discussion' && item.discussionSpaceId) {
+              onOpenDiscussion?.(item.discussionSpaceId, item.discussionSpaceName ?? item.name);
             }
           }}
           className={cn(
@@ -202,6 +231,9 @@ export function AppSidebar({
             </span>
           )}
           {item.type === 'list' && <Hash className="w-4 h-4 flex-shrink-0 text-sidebar-muted" />}
+          {item.type === 'discussion' && (
+            <MessageSquare className="w-4 h-4 flex-shrink-0 text-sidebar-muted" />
+          )}
 
           <span className="min-w-0 flex-1 truncate text-left">{item.name}</span>
 
@@ -399,7 +431,8 @@ export function AppSidebar({
                     id: child.id,
                     name: child.name,
                     color: child.color,
-                    openListId: child.lists[0]?.id,
+                    openListId: child.spaceForView ? undefined : child.lists[0]?.id,
+                    spaceForView: child.spaceForView,
                     noExpand: child.noExpand,
                     type: 'space' as const,
                     children: child.lists.map((list) => ({

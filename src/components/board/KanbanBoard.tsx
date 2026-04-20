@@ -7,7 +7,6 @@ import {
   LayoutGrid,
   List,
   Star,
-  MessageSquare,
   ChevronDown,
   ChevronUp,
   ChevronsRight,
@@ -18,6 +17,7 @@ import { AddTaskDialog } from './AddTaskDialog';
 import { InlineTaskComposer } from './InlineTaskComposer';
 import { DEFAULT_KANBAN_COLUMN_ORDER, STATUS_CONFIG, PRIORITY_CONFIG, isBuiltinTaskStatus } from '@/types';
 import { TaskDetailDialog } from './TaskDetailDialog';
+import { DiscussionPanel } from './DiscussionPanel';
 import { api } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import {
@@ -109,6 +109,9 @@ interface KanbanBoardProps {
   kanbanColumnLabels?: Partial<Record<string, string>>;
   kanbanCustomColumns?: Array<{ id: string; label: string; color?: string }>;
   canManageKanban?: boolean;
+  /** If set, renders a "# <name> Discussion" tab next to Board/List (space-level view only). */
+  spaceDiscussionId?: string;
+  spaceDiscussionName?: string;
   onUpdateKanban?: (payload: {
     kanbanColumnOrder?: string[];
     kanbanColumnLabels?: Partial<Record<string, string>>;
@@ -151,6 +154,8 @@ export function KanbanBoard({
   kanbanColumnLabels: kanbanLabelsProp,
   kanbanCustomColumns = [],
   canManageKanban = false,
+  spaceDiscussionId,
+  spaceDiscussionName,
   onUpdateKanban,
 }: KanbanBoardProps) {
   const { user } = useAuth();
@@ -240,6 +245,7 @@ export function KanbanBoard({
     }
   ) => {
     onCreateTask({
+      listId: activeListId ?? undefined,
       status,
       title: payload.title,
       priority: payload.priority,
@@ -431,15 +437,18 @@ export function KanbanBoard({
               <List className="w-4 h-4" />
               List
             </button>
-            <button
-              onClick={() => setActiveView('discussion')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors ${
-                activeView === 'discussion' ? 'bg-secondary text-foreground font-medium' : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              <MessageSquare className="w-4 h-4" />
-              Discussion
-            </button>
+            {spaceDiscussionId && (
+              <button
+                onClick={() => setActiveView('discussion')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors ${
+                  activeView === 'discussion'
+                    ? 'bg-secondary text-foreground font-medium'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                # {spaceDiscussionName ?? spaceName} Discussion
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
@@ -606,10 +615,11 @@ export function KanbanBoard({
         </div>
       )}
 
-      {activeView === 'discussion' && (
-        <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-          Discussion panel coming next. Abhi board/list fully functional hai.
-        </div>
+      {activeView === 'discussion' && spaceDiscussionId && (
+        <DiscussionPanel
+          spaceId={spaceDiscussionId}
+          spaceName={spaceDiscussionName ?? spaceName}
+        />
       )}
 
       {/* Add task dialog */}

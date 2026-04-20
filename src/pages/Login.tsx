@@ -34,7 +34,7 @@ const Login = () => {
             <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-violet-600 shadow-lg shadow-violet-500/30">
               <span className="text-xl font-bold text-white">C</span>
             </div>
-            <p className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-violet-700">Clickip Workspace</p>
+            <p className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-violet-700">DigitechIO Workspace</p>
             <h1 className="text-2xl font-bold text-slate-900 sm:text-3xl">Welcome back</h1>
             <p className="mt-2 text-sm text-slate-500">Sign in to continue managing your team work</p>
           </div>

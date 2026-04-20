@@ -191,6 +191,16 @@ const workspaceInviteSchema = new Schema(
 );
 workspaceInviteSchema.index({ workspaceId: 1, email: 1 }, { unique: true });
 
+const spaceDiscussionMessageSchema = new Schema(
+  {
+    _id: { type: String, required: true },
+    spaceId: { type: String, required: true, index: true },
+    userId: { type: String, required: true },
+    content: { type: String, default: '' },
+  },
+  { timestamps: true }
+);
+
 const workspaceDocSchema = new Schema(
   {
     _id: { type: String, required: true },
@@ -223,3 +233,4 @@ export const TaskComment = model('TaskComment', taskCommentSchema);
 export const Notification = model('Notification', notificationSchema);
 export const WorkspaceInvite = model('WorkspaceInvite', workspaceInviteSchema);
 export const WorkspaceDoc = model('WorkspaceDoc', workspaceDocSchema);
+export const SpaceDiscussionMessage = model('SpaceDiscussionMessage', spaceDiscussionMessageSchema);

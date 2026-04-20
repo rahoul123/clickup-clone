@@ -75,9 +75,15 @@ export function TaskDetailDialog({
   const [activePopup, setActivePopup] = useState<string | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [attachments, setAttachments] = useState<File[]>([]);
+  const [showMentionPicker, setShowMentionPicker] = useState(false);
+  const [mentionSearch, setMentionSearch] = useState('');
+  const [inlineMention, setInlineMention] = useState<{ start: number; query: string } | null>(null);
+  const [inlineMentionIndex, setInlineMentionIndex] = useState(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const assigneeDropdownRef = useRef<HTMLDivElement | null>(null);
+  const mentionPickerRef = useRef<HTMLDivElement | null>(null);
 
   const filteredMembers = useMemo(() => {
     const q = assigneeSearch.trim().toLowerCase();
@@ -205,6 +211,86 @@ export function TaskDetailDialog({
     fileInputRef.current?.click();
   };
 
+  const handleImageAttachmentClick = () => {
+    imageInputRef.current?.click();
+  };
+
+  const insertMention = (member: { id: string; label: string }) => {
+    const displayName = member.label.replace(/\s*\(.*?\)\s*$/, '').trim() || member.label;
+    const mentionToken = `@${displayName.replace(/\s+/g, '_')}`;
+    setCommentText((prev) => {
+      const needsSpace = prev && !prev.endsWith(' ') && !prev.endsWith('\n');
+      return `${prev}${needsSpace ? ' ' : ''}${mentionToken} `;
+    });
+    setShowMentionPicker(false);
+    setMentionSearch('');
+    window.setTimeout(() => textareaRef.current?.focus(), 0);
+  };
+
+  const filteredMentionMembers = useMemo(() => {
+    const q = mentionSearch.trim().toLowerCase();
+    if (!q) return memberOptions;
+    return memberOptions.filter((m) => m.label.toLowerCase().includes(q));
+  }, [mentionSearch, memberOptions]);
+
+  const inlineMentionMatches = useMemo(() => {
+    if (!inlineMention) return [] as typeof memberOptions;
+    const q = inlineMention.query.trim().toLowerCase();
+    if (!q) return memberOptions.slice(0, 8);
+    return memberOptions
+      .filter((m) => m.label.toLowerCase().includes(q))
+      .slice(0, 8);
+  }, [inlineMention, memberOptions]);
+
+  const handleCommentInput = (value: string, caret: number) => {
+    setCommentText(value);
+    // Scan backwards from caret for a @ that starts a mention token.
+    let i = caret - 1;
+    let foundAt = -1;
+    while (i >= 0) {
+      const ch = value[i];
+      if (ch === '@') {
+        const prev = i === 0 ? ' ' : value[i - 1];
+        if (/[\s\n]/.test(prev) || i === 0) {
+          foundAt = i;
+        }
+        break;
+      }
+      if (/\s/.test(ch)) break;
+      i -= 1;
+    }
+    if (foundAt >= 0) {
+      const query = value.slice(foundAt + 1, caret);
+      if (/^[\w.\-]*$/.test(query)) {
+        setInlineMention({ start: foundAt, query });
+        setInlineMentionIndex(0);
+        return;
+      }
+    }
+    setInlineMention(null);
+  };
+
+  const applyInlineMention = (member: { id: string; label: string }) => {
+    if (!inlineMention) return;
+    const displayName = member.label.replace(/\s*\(.*?\)\s*$/, '').trim() || member.label;
+    const token = `@${displayName.replace(/\s+/g, '_')} `;
+    const before = commentText.slice(0, inlineMention.start);
+    const afterStart = inlineMention.start + 1 + inlineMention.query.length;
+    const after = commentText.slice(afterStart);
+    const next = `${before}${token}${after}`;
+    setCommentText(next);
+    setInlineMention(null);
+    setInlineMentionIndex(0);
+    window.setTimeout(() => {
+      const pos = (before + token).length;
+      const el = textareaRef.current;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(pos, pos);
+      }
+    }, 0);
+  };
+
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.currentTarget.files;
     if (files) {
@@ -272,6 +358,18 @@ export function TaskDetailDialog({
     document.addEventListener('mousedown', handleOutsideClick);
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, [assigneeDropdownOpen]);
+
+  useEffect(() => {
+    if (!showMentionPicker) return;
+    const handleOutsideClick = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (!mentionPickerRef.current?.contains(target)) {
+        setShowMentionPicker(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [showMentionPicker]);
 
   return (
     <div className="fixed inset-0 z-50 bg-black/20 flex items-center justify-center p-4" onClick={onClose}>
@@ -596,12 +694,64 @@ export function TaskDetailDialog({
                   <textarea
                     ref={textareaRef}
                     value={commentText}
-                    onChange={(e) => setCommentText(e.target.value)}
+                    onChange={(e) => {
+                      const el = e.currentTarget;
+                      handleCommentInput(el.value, el.selectionStart ?? el.value.length);
+                    }}
+                    onKeyDown={(e) => {
+                      if (!inlineMention || inlineMentionMatches.length === 0) return;
+                      if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        setInlineMentionIndex((i) => (i + 1) % inlineMentionMatches.length);
+                      } else if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        setInlineMentionIndex((i) =>
+                          (i - 1 + inlineMentionMatches.length) % inlineMentionMatches.length,
+                        );
+                      } else if (e.key === 'Enter' || e.key === 'Tab') {
+                        e.preventDefault();
+                        applyInlineMention(inlineMentionMatches[inlineMentionIndex]);
+                      } else if (e.key === 'Escape') {
+                        setInlineMention(null);
+                      }
+                    }}
+                    onBlur={() => {
+                      // Delay so mousedown on suggestion can register first.
+                      window.setTimeout(() => setInlineMention(null), 120);
+                    }}
                     onPaste={handlePaste}
                     className="w-full px-4 py-3 text-sm border border-gray-200 rounded-xl focus:outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-100 resize-none placeholder-gray-400 transition-all"
                     placeholder="Share your thoughts... ✨"
                     rows={2}
                   />
+                  {inlineMention && inlineMentionMatches.length > 0 && (
+                    <div className="absolute bottom-full left-0 right-0 mb-2 max-h-64 overflow-y-auto bg-white border border-gray-200 rounded-xl shadow-2xl z-50 py-1">
+                      <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 border-b border-gray-100">
+                        Mention a member
+                      </div>
+                      {inlineMentionMatches.map((member, idx) => (
+                        <button
+                          key={member.id}
+                          type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            applyInlineMention(member);
+                          }}
+                          onMouseEnter={() => setInlineMentionIndex(idx)}
+                          className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm ${
+                            idx === inlineMentionIndex
+                              ? 'bg-purple-50 text-purple-700'
+                              : 'text-gray-700 hover:bg-purple-50'
+                          }`}
+                        >
+                          <span className="w-7 h-7 rounded-full bg-purple-500 text-white flex items-center justify-center text-xs font-semibold">
+                            {member.label[0]?.toUpperCase() ?? '?'}
+                          </span>
+                          <span className="truncate">{member.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
 
                   {attachments.length > 0 && (
                     <div className="mt-2 rounded-xl border border-gray-200 bg-gray-50/70 p-2">
@@ -681,15 +831,56 @@ export function TaskDetailDialog({
                         </div>
                       )}
                     </button>
+                    <div ref={mentionPickerRef} className="relative">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowMentionPicker((v) => !v);
+                          setMentionSearch('');
+                        }}
+                        className="p-2 hover:bg-purple-50 rounded-lg text-gray-500 hover:text-purple-600 transition-all"
+                        title="Mention someone"
+                      >
+                        <AtSign size={18} />
+                      </button>
+                      {showMentionPicker && (
+                        <div className="absolute bottom-full left-0 mb-2 w-72 bg-white border border-gray-200 rounded-xl shadow-2xl z-50">
+                          <div className="p-2 border-b border-gray-100">
+                            <input
+                              type="text"
+                              autoFocus
+                              value={mentionSearch}
+                              onChange={(e) => setMentionSearch(e.target.value)}
+                              placeholder="Search member..."
+                              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-400"
+                            />
+                          </div>
+                          <div className="max-h-64 overflow-y-auto py-1">
+                            {filteredMentionMembers.length === 0 && (
+                              <div className="px-3 py-4 text-center text-xs text-gray-400">
+                                No member found
+                              </div>
+                            )}
+                            {filteredMentionMembers.map((member) => (
+                              <button
+                                key={member.id}
+                                type="button"
+                                onClick={() => insertMention(member)}
+                                className="w-full flex items-center gap-2 px-3 py-2 hover:bg-purple-50 text-left text-sm text-gray-700"
+                              >
+                                <span className="w-7 h-7 rounded-full bg-purple-500 text-white flex items-center justify-center text-xs font-semibold">
+                                  {member.label[0]?.toUpperCase() ?? '?'}
+                                </span>
+                                <span className="truncate">{member.label}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
                     <button
                       type="button"
-                      className="p-2 hover:bg-purple-50 rounded-lg text-gray-500 hover:text-purple-600 transition-all"
-                      title="Mention"
-                    >
-                      <AtSign size={18} />
-                    </button>
-                    <button
-                      type="button"
+                      onClick={handleImageAttachmentClick}
                       className="p-2 hover:bg-purple-50 rounded-lg text-gray-500 hover:text-purple-600 transition-all"
                       title="Add image"
                     >
@@ -708,6 +899,13 @@ export function TaskDetailDialog({
               </div>
               <input
                 ref={fileInputRef}
+                type="file"
+                multiple
+                onChange={handleFileSelect}
+                className="hidden"
+              />
+              <input
+                ref={imageInputRef}
                 type="file"
                 multiple
                 accept="image/*"
@@ -733,7 +931,32 @@ export function TaskDetailDialog({
           </div>
         )}
       </div>
-      {activePopup === 'share' && <ShareModal onClose={() => setActivePopup(null)} />}
+      {activePopup === 'share' && (
+        <ShareModal
+          onClose={() => setActivePopup(null)}
+          task={task}
+          memberOptions={memberOptions}
+          assigneeIds={assigneeIds}
+          onInvite={async (memberId) => {
+            if (assigneeIds.includes(memberId)) {
+              toast({ title: 'Already shared', description: 'This member is already on the task.' });
+              return;
+            }
+            const next = [...assigneeIds, memberId];
+            setAssigneeIds(next);
+            try {
+              await onUpdateTask({ assigneeIds: next });
+              toast({ title: 'Invited', description: 'Task shared successfully.' });
+            } catch (err) {
+              setAssigneeIds(assigneeIds);
+              toast({
+                title: 'Invite failed',
+                description: err instanceof Error ? err.message : 'Could not share task.',
+              });
+            }
+          }}
+        />
+      )}
       {activePopup === 'time' && <TimeTrackPopup onClose={() => setActivePopup(null)} />}
     </div>
   );
@@ -764,36 +987,168 @@ const ActionButton = ({ icon, text }: { icon: React.ReactNode; text: string }) =
   </button>
 );
 
-const ShareModal = ({ onClose }: { onClose: () => void }) => (
-  <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-[60]">
-    <div className="bg-white rounded-xl shadow-2xl w-[500px] overflow-hidden">
-      <div className="p-4 flex justify-between items-center border-b">
-        <h3 className="font-bold">Share this task</h3>
-        <X size={18} className="cursor-pointer" onClick={onClose} />
-      </div>
-      <div className="p-5 space-y-4">
-        <div className="text-xs text-gray-500">Sharing task</div>
-        <div className="flex gap-2">
-          <input className="flex-1 border rounded px-3 py-1.5 text-sm outline-purple-500" placeholder="Invite by name or email" />
-          <button className="bg-purple-600 text-white px-4 py-1.5 rounded text-sm font-medium">Invite</button>
+interface ShareModalProps {
+  onClose: () => void;
+  task: Task;
+  memberOptions: { id: string; label: string }[];
+  assigneeIds: string[];
+  onInvite: (memberId: string) => Promise<void>;
+}
+
+const ShareModal = ({ onClose, task, memberOptions, assigneeIds, onInvite }: ShareModalProps) => {
+  const [query, setQuery] = useState('');
+  const [focused, setFocused] = useState(false);
+  const [selectedMember, setSelectedMember] = useState<{ id: string; label: string } | null>(null);
+  const [inviting, setInviting] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const taskUrl = typeof window !== 'undefined'
+    ? `${window.location.origin}${window.location.pathname}?task=${encodeURIComponent(task.id)}`
+    : `/?task=${encodeURIComponent(task.id)}`;
+
+  const filtered = useMemo(() => {
+    const raw = query.trim().toLowerCase();
+    const q = raw.replace(/[^a-z0-9@.]/g, '');
+    const pool = memberOptions.map((m) => ({
+      ...m,
+      alreadyShared: assigneeIds.includes(m.id),
+    }));
+    const matching = q
+      ? pool.filter((m) => {
+          const label = m.label.toLowerCase();
+          const compact = label.replace(/[^a-z0-9@.]/g, '');
+          return label.includes(raw) || compact.includes(q);
+        })
+      : pool;
+    return matching
+      .sort((a, b) => Number(a.alreadyShared) - Number(b.alreadyShared))
+      .slice(0, 8);
+  }, [query, memberOptions, assigneeIds]);
+
+  const handleInvite = async () => {
+    if (!selectedMember) {
+      toast({ title: 'Select a member', description: 'Pick a member from the list to invite.' });
+      return;
+    }
+    setInviting(true);
+    try {
+      await onInvite(selectedMember.id);
+      setSelectedMember(null);
+      setQuery('');
+    } finally {
+      setInviting(false);
+    }
+  };
+
+  const handleCopyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(taskUrl);
+      setCopied(true);
+      toast({ title: 'Link copied', description: 'Task link copied to clipboard.' });
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast({ title: 'Copy failed', description: 'Unable to copy link.' });
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-[60]" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-2xl w-[500px]" onClick={(e) => e.stopPropagation()}>
+        <div className="p-4 flex justify-between items-center border-b">
+          <h3 className="font-bold">Share this task</h3>
+          <X size={18} className="cursor-pointer" onClick={onClose} />
         </div>
-        <div className="space-y-3 text-sm">
-          <div className="flex justify-between items-center">
-            <span className="flex items-center gap-2"><Link size={16} /> Private link</span>
-            <button className="border px-3 py-1 rounded text-xs hover:bg-gray-50 flex items-center gap-1"><Copy size={12} /> Copy link</button>
+        <div className="p-5 space-y-4">
+          <div className="text-xs text-gray-500">Sharing task</div>
+          <div className="flex gap-2">
+            <div className="flex-1 relative">
+              <input
+                value={selectedMember ? selectedMember.label : query}
+                onChange={(e) => {
+                  let next = e.target.value;
+                  if (next.startsWith('@')) next = next.slice(1);
+                  setQuery(next);
+                  if (selectedMember) setSelectedMember(null);
+                  setFocused(true);
+                }}
+                onFocus={() => setFocused(true)}
+                onClick={() => setFocused(true)}
+                onBlur={() => window.setTimeout(() => setFocused(false), 200)}
+                className="w-full border rounded px-3 py-1.5 text-sm outline-purple-500"
+                placeholder="Invite by name or email (type @ to see members)"
+              />
+              {focused && !selectedMember && (
+                <div className="absolute top-full left-0 right-0 mt-1 max-h-60 overflow-y-auto bg-white border border-gray-200 rounded-lg shadow-xl z-[70]">
+                  {filtered.length === 0 && (
+                    <div className="px-3 py-3 text-xs text-gray-400 text-center">
+                      {memberOptions.length === 0 ? 'No members loaded yet' : 'No matching member'}
+                    </div>
+                  )}
+                  {filtered.map((member) => (
+                    <button
+                      key={member.id}
+                      type="button"
+                      disabled={member.alreadyShared}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        if (member.alreadyShared) return;
+                        setSelectedMember({ id: member.id, label: member.label });
+                        setQuery('');
+                      }}
+                      className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm ${
+                        member.alreadyShared
+                          ? 'text-gray-400 cursor-not-allowed bg-gray-50'
+                          : 'text-gray-700 hover:bg-purple-50'
+                      }`}
+                    >
+                      <span className={`w-7 h-7 rounded-full text-white flex items-center justify-center text-xs font-semibold ${
+                        member.alreadyShared ? 'bg-gray-300' : 'bg-purple-500'
+                      }`}>
+                        {member.label[0]?.toUpperCase() ?? '?'}
+                      </span>
+                      <span className="truncate flex-1">{member.label}</span>
+                      {member.alreadyShared && (
+                        <span className="text-[10px] font-medium text-gray-400 whitespace-nowrap">
+                          already shared
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={handleInvite}
+              disabled={!selectedMember || inviting}
+              className="bg-purple-600 text-white px-4 py-1.5 rounded text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {inviting ? 'Inviting…' : 'Invite'}
+            </button>
           </div>
-          <div className="flex justify-between items-center">
-            <span className="flex items-center gap-2"><User size={16} /> Default permission</span>
-            <select className="text-xs font-semibold bg-gray-50 border p-1 rounded"><option>Full edit</option></select>
+          <div className="space-y-3 text-sm">
+            <div className="flex justify-between items-center">
+              <span className="flex items-center gap-2"><Link size={16} /> Private link</span>
+              <button
+                type="button"
+                onClick={handleCopyLink}
+                className="border px-3 py-1 rounded text-xs hover:bg-gray-50 flex items-center gap-1"
+              >
+                {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? 'Copied' : 'Copy link'}
+              </button>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="flex items-center gap-2"><User size={16} /> Default permission</span>
+              <select className="text-xs font-semibold bg-gray-50 border p-1 rounded"><option>Full edit</option></select>
+            </div>
           </div>
+          <button className="w-full mt-4 flex items-center justify-center gap-2 border py-2 rounded text-sm font-semibold hover:bg-gray-50">
+            <Lock size={14} /> Make Private
+          </button>
         </div>
-        <button className="w-full mt-4 flex items-center justify-center gap-2 border py-2 rounded text-sm font-semibold hover:bg-gray-50">
-          <Lock size={14} /> Make Private
-        </button>
       </div>
     </div>
-  </div>
-);
+  );
+};
 
 const TimeTrackPopup = ({ onClose }: { onClose: () => void }) => (
   <div className="fixed inset-0 z-[60] pointer-events-none">

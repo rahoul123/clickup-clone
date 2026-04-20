@@ -134,5 +134,12 @@ export const api = {
     ) => request(`/workspaces/${workspaceId}/docs`, { method: 'POST', body: JSON.stringify(payload) }),
     deleteWorkspaceDoc: (workspaceId: string, docId: string) =>
       request(`/workspaces/${workspaceId}/docs/${docId}`, { method: 'DELETE' }),
+    listSpaceTasks: (spaceId: string) => request(`/spaces/${spaceId}/tasks`),
+    listSpaceDiscussion: (spaceId: string) => request(`/spaces/${spaceId}/discussion`),
+    postSpaceDiscussion: (spaceId: string, payload: { content: string }) =>
+      request(`/spaces/${spaceId}/discussion`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
   },
 };

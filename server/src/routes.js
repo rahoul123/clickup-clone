@@ -1,11 +1,12 @@
 import { Router } from 'express';
 import { randomUUID } from 'crypto';
 import { attachUser, loginUser, registerUser, requireAuth, toSafeUser } from './auth.js';
-import { sendInviteEmail } from './mailer.js';
+import { sendInviteEmail, sendTaskAssignedEmail, sendTaskCompletedEmail } from './mailer.js';
 import {
   List,
   Notification,
   Space,
+  SpaceDiscussionMessage,
   Task,
   TaskAssignee,
   TaskComment,
@@ -750,17 +751,40 @@ export function buildRoutes() {
     const workspaceRoleRows = await UserRole.find({ workspaceId: activeWorkspace._id }).lean();
     const roleByUserId = Object.fromEntries(workspaceRoleRows.map((row) => [row.userId, row.role]));
     const users = await User.find({ _id: { $in: workspaceMemberRows.map((m) => m.userId) } }).lean();
-    const visibleUsers = users.filter((u) => {
+
+    // Team Members page (role/department governance) — respects dept scoping.
+    const teamMembersVisibleUsers = users.filter((u) => {
       if (role === 'admin') return true;
       const memberRole = roleByUserId[u._id] ?? 'employee';
-      if (role === 'manager') return memberRole === 'manager' || memberRole === 'team_lead' || memberRole === 'employee';
+      if (role === 'manager') {
+        if (!isSameDepartment(u.department, req.currentUser?.department)) return u._id === userId;
+        return memberRole === 'manager' || memberRole === 'team_lead' || memberRole === 'employee';
+      }
       if (role === 'team_lead') {
         if (!isSameDepartment(u.department, req.currentUser?.department)) return u._id === userId;
         return memberRole === 'team_lead' || memberRole === 'employee';
       }
       return u._id === userId || memberRole === 'employee';
     });
-    const displayNameCount = visibleUsers.reduce((acc, u) => {
+
+    // Task assignee picker — every workspace member is assignable regardless
+    // of role, with the viewer's own department members listed first.
+    const selfDeptNorm = normalizeDepartment(req.currentUser?.department ?? null);
+    const isOwnDept = (u) => {
+      if (!selfDeptNorm) return false;
+      const memberDept = normalizeDepartment(u.department);
+      return Boolean(memberDept && isDepartmentMatch(selfDeptNorm, memberDept));
+    };
+    const assigneeCandidates = [...users].sort((a, b) => {
+      const aOwn = isOwnDept(a) ? 0 : 1;
+      const bOwn = isOwnDept(b) ? 0 : 1;
+      if (aOwn !== bOwn) return aOwn - bOwn;
+      const aLabel = String(a.displayName || a.email || '').toLowerCase();
+      const bLabel = String(b.displayName || b.email || '').toLowerCase();
+      return aLabel.localeCompare(bLabel);
+    });
+
+    const displayNameCount = users.reduce((acc, u) => {
       const key = String(u.displayName || '').trim().toLowerCase();
       if (!key) return acc;
       acc[key] = (acc[key] || 0) + 1;
@@ -772,11 +796,11 @@ export function buildRoutes() {
       if (!nameKey || (displayNameCount[nameKey] || 0) < 2) return baseLabel;
       return `${baseLabel} (${u.email})`;
     };
-    const memberOptions = visibleUsers.map((u) => ({
+    const memberOptions = assigneeCandidates.map((u) => ({
       id: u._id,
       label: formatMemberLabel(u),
     }));
-    const teamMembers = visibleUsers.map((u) => ({
+    const teamMembers = teamMembersVisibleUsers.map((u) => ({
       id: u._id,
       label: formatMemberLabel(u),
       role: roleByUserId[u._id] ?? 'employee',
@@ -1580,6 +1604,33 @@ export function buildRoutes() {
         type: 'task_created',
         message: `New task created: ${task.title}`,
       });
+
+      // Email assignees (exclude the creator so they don't email themselves).
+      const emailRecipients = assignedUserIds.filter((id) => id !== req.session.userId);
+      if (emailRecipients.length > 0) {
+        try {
+          const recipients = await User.find({ _id: { $in: emailRecipients } }).lean();
+          const assignedByName = currentUser?.displayName || currentUser?.email || 'A teammate';
+          const dueDateStr = task.dueDate ? task.dueDate.toLocaleDateString('en-GB') : null;
+          await Promise.allSettled(
+            recipients
+              .filter((u) => u.email)
+              .map((u) =>
+                sendTaskAssignedEmail({
+                  to: u.email,
+                  taskTitle: task.title,
+                  taskId: task._id,
+                  priority: task.priority,
+                  dueDate: dueDateStr,
+                  assignedByName,
+                  workspaceName: workspace?.name,
+                })
+              )
+          );
+        } catch (err) {
+          console.error('Failed to send task-assigned emails', err);
+        }
+      }
     }
 
     if (notifyOnlyFiltered.length > 0) {
@@ -1640,6 +1691,7 @@ export function buildRoutes() {
     }
     // Employees can shuffle task status inside their own team space.
 
+    const previousStatus = task.status;
     await Task.updateOne({ _id: taskId }, { $set: { status } });
     const assignees = await TaskAssignee.find({ taskId }).lean();
     await createNotifications({
@@ -1649,6 +1701,37 @@ export function buildRoutes() {
       type: 'task_status_changed',
       message: `Task status updated to ${status}: ${task.title}`,
     });
+
+    // Email on transition to "complete" only — skip duplicates / other updates.
+    if (status === 'complete' && previousStatus !== 'complete') {
+      try {
+        const assigneeIds = assignees.map((a) => a.userId);
+        const creatorId = task.createdBy;
+        const recipientIds = [...new Set([...assigneeIds, creatorId].filter(Boolean))].filter(
+          (id) => id !== req.session.userId
+        );
+        if (recipientIds.length > 0) {
+          const recipients = await User.find({ _id: { $in: recipientIds } }).lean();
+          const completedByName = currentUser?.displayName || currentUser?.email || 'Someone';
+          await Promise.allSettled(
+            recipients
+              .filter((u) => u.email)
+              .map((u) =>
+                sendTaskCompletedEmail({
+                  to: u.email,
+                  taskTitle: task.title,
+                  taskId,
+                  completedByName,
+                  workspaceName: workspace?.name,
+                })
+              )
+          );
+        }
+      } catch (err) {
+        console.error('Failed to send task-completed emails', err);
+      }
+    }
+
     res.json({ ok: true });
   });
 
@@ -1713,6 +1796,35 @@ export function buildRoutes() {
 
     const refreshed = await Task.findById(taskId).lean();
     const assignees = await TaskAssignee.find({ taskId }).lean();
+
+    // Email on transition to "complete" from the full-edit dialog too.
+    if (typeof status === 'string' && status === 'complete' && task.status !== 'complete') {
+      try {
+        const assigneeIdsFinal = assignees.map((a) => a.userId);
+        const recipientIds = [...new Set([...assigneeIdsFinal, refreshed.createdBy].filter(Boolean))].filter(
+          (id) => id !== req.session.userId
+        );
+        if (recipientIds.length > 0) {
+          const recipients = await User.find({ _id: { $in: recipientIds } }).lean();
+          const completedByName = currentUser?.displayName || currentUser?.email || 'Someone';
+          await Promise.allSettled(
+            recipients
+              .filter((u) => u.email)
+              .map((u) =>
+                sendTaskCompletedEmail({
+                  to: u.email,
+                  taskTitle: refreshed.title,
+                  taskId,
+                  completedByName,
+                  workspaceName: workspace?.name,
+                })
+              )
+          );
+        }
+      } catch (err) {
+        console.error('Failed to send task-completed emails (patch)', err);
+      }
+    }
     res.json({
       task: {
         id: refreshed._id,
@@ -1951,6 +2063,133 @@ export function buildRoutes() {
     }
 
     res.json({ ok: true });
+  });
+
+  /**
+   * Space-level discussion channel.
+   * Strictly department-scoped: admin OR user whose department matches
+   * the space's department (or the space's own name, if it's the master
+   * folder). Other users (cross-department) can't read or post.
+   */
+  async function canAccessSpaceDiscussion(space, userId) {
+    if (!space) return false;
+    const role = await getRole(space.workspaceId, userId);
+    if (!role) return false;
+    if (role === 'admin') return true;
+    const workspace = await Workspace.findById(space.workspaceId).lean();
+    const user = await User.findById(userId).lean();
+    const isMain = await isDepartmentMainSpace(space);
+    return canAccessSpaceByDepartment({
+      role,
+      userDepartment: user?.department ?? null,
+      workspaceDepartment: workspace?.department ?? null,
+      spaceDepartment: space.department,
+      spaceName: space.name,
+      isDepartmentMain: isMain,
+    });
+  }
+
+  /**
+   * Aggregated tasks across every list in a space — powers the ClickUp-style
+   * space-level Board view. Respects the same department access rules and
+   * excludes lists the viewer can't see (e.g. private sub-lists outside their
+   * own department, though shared main lists remain visible).
+   */
+  router.get('/spaces/:spaceId/tasks', requireAuth, async (req, res) => {
+    const { spaceId } = req.params;
+    const space = await Space.findById(spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+
+    const role = await getRole(space.workspaceId, req.session.userId);
+    if (!role) return res.status(403).json({ message: 'No permission' });
+    const currentUser = await User.findById(req.session.userId).lean();
+    const workspace = await Workspace.findById(space.workspaceId).lean();
+    const isDepartmentMain = await isDepartmentMainSpace(space);
+
+    if (!canViewWorkspaceByDepartment(currentUser?.department ?? null, workspace?.department ?? null, role)) {
+      return res.status(403).json({ message: 'Department access blocked' });
+    }
+
+    const allLists = await List.find({ spaceId }).lean();
+    const visibleLists = allLists.filter((list) =>
+      canAccessListForTasks({
+        list,
+        role,
+        userDepartment: currentUser?.department ?? null,
+        workspaceDepartment: workspace?.department ?? null,
+        spaceDepartment: space.department,
+        spaceName: space.name,
+        isDepartmentMain,
+      })
+    );
+
+    const tasks = await hydrateTasksForListIds(visibleLists.map((l) => l._id));
+    res.json({
+      tasks,
+      lists: visibleLists.map((l) => ({ id: l._id, name: l.name })),
+    });
+  });
+
+  router.get('/spaces/:spaceId/discussion', requireAuth, async (req, res) => {
+    const { spaceId } = req.params;
+    const space = await Space.findById(spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+
+    const allowed = await canAccessSpaceDiscussion(space, req.session.userId);
+    if (!allowed) return res.status(403).json({ message: 'No permission to view this discussion' });
+
+    const messages = await SpaceDiscussionMessage.find({ spaceId })
+      .sort({ createdAt: 1 })
+      .limit(500)
+      .lean();
+    const userIds = [...new Set(messages.map((m) => m.userId))];
+    const users = await User.find({ _id: { $in: userIds } }).lean();
+    const userMap = Object.fromEntries(
+      users.map((u) => [u._id, u.displayName || u.email || 'Unknown user'])
+    );
+
+    res.json({
+      messages: messages.map((m) => ({
+        id: m._id,
+        space_id: m.spaceId,
+        user_id: m.userId,
+        content: m.content,
+        created_at: m.createdAt.toISOString(),
+        author_name: userMap[m.userId] ?? 'Unknown user',
+      })),
+    });
+  });
+
+  router.post('/spaces/:spaceId/discussion', requireAuth, async (req, res) => {
+    const { spaceId } = req.params;
+    const text = String(req.body?.content || '').trim();
+    if (!text) return res.status(400).json({ message: 'Message content required' });
+    if (text.length > 4000) return res.status(400).json({ message: 'Message too long' });
+
+    const space = await Space.findById(spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+
+    const allowed = await canAccessSpaceDiscussion(space, req.session.userId);
+    if (!allowed) return res.status(403).json({ message: 'No permission to post in this discussion' });
+
+    const message = await SpaceDiscussionMessage.create({
+      _id: randomUUID(),
+      spaceId,
+      userId: req.session.userId,
+      content: text,
+    });
+
+    const author = await User.findById(req.session.userId).lean();
+    res.json({
+      message: {
+        id: message._id,
+        space_id: message.spaceId,
+        user_id: message.userId,
+        content: message.content,
+        created_at: message.createdAt.toISOString(),
+        author_name: author?.displayName || author?.email || 'Unknown user',
+      },
+    });
   });
 
   return router;

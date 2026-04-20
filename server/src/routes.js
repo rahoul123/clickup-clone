@@ -2154,6 +2154,7 @@ export function buildRoutes() {
         space_id: m.spaceId,
         user_id: m.userId,
         content: m.content,
+        attachments: Array.isArray(m.attachments) ? m.attachments : [],
         created_at: m.createdAt.toISOString(),
         author_name: userMap[m.userId] ?? 'Unknown user',
       })),
@@ -2163,8 +2164,32 @@ export function buildRoutes() {
   router.post('/spaces/:spaceId/discussion', requireAuth, async (req, res) => {
     const { spaceId } = req.params;
     const text = String(req.body?.content || '').trim();
-    if (!text) return res.status(400).json({ message: 'Message content required' });
+    const rawAttachments = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
+    if (!text && rawAttachments.length === 0) {
+      return res.status(400).json({ message: 'Message content or attachment required' });
+    }
     if (text.length > 4000) return res.status(400).json({ message: 'Message too long' });
+    if (rawAttachments.length > 10) {
+      return res.status(400).json({ message: 'Too many attachments (max 10)' });
+    }
+
+    const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
+    const attachments = [];
+    for (const att of rawAttachments) {
+      const filename = String(att?.filename || '').trim();
+      const mimeType = String(att?.mimeType || 'application/octet-stream');
+      const dataUrl = String(att?.dataUrl || '');
+      if (!filename || !dataUrl.startsWith('data:')) {
+        return res.status(400).json({ message: 'Invalid attachment payload' });
+      }
+      // Rough size check based on base64 length.
+      const base64 = dataUrl.split(',')[1] || '';
+      const approxBytes = Math.floor((base64.length * 3) / 4);
+      if (approxBytes > MAX_ATTACHMENT_BYTES) {
+        return res.status(400).json({ message: `Attachment "${filename}" exceeds 4 MB` });
+      }
+      attachments.push({ filename, mimeType, dataUrl });
+    }
 
     const space = await Space.findById(spaceId).lean();
     if (!space) return res.status(404).json({ message: 'Space not found' });
@@ -2177,6 +2202,7 @@ export function buildRoutes() {
       spaceId,
       userId: req.session.userId,
       content: text,
+      attachments,
     });
 
     const author = await User.findById(req.session.userId).lean();
@@ -2186,10 +2212,35 @@ export function buildRoutes() {
         space_id: message.spaceId,
         user_id: message.userId,
         content: message.content,
+        attachments: message.attachments || [],
         created_at: message.createdAt.toISOString(),
         author_name: author?.displayName || author?.email || 'Unknown user',
       },
     });
+  });
+
+  router.delete('/spaces/:spaceId/discussion/:messageId', requireAuth, async (req, res) => {
+    const { spaceId, messageId } = req.params;
+    const space = await Space.findById(spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+
+    const allowed = await canAccessSpaceDiscussion(space, req.session.userId);
+    if (!allowed) return res.status(403).json({ message: 'No permission for this discussion' });
+
+    const message = await SpaceDiscussionMessage.findById(messageId).lean();
+    if (!message || message.spaceId !== spaceId) {
+      return res.status(404).json({ message: 'Message not found' });
+    }
+
+    const role = await getRole(space.workspaceId, req.session.userId);
+    const isOwner = message.userId === req.session.userId;
+    const isAdmin = role === 'admin';
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ message: 'Only the author or an admin can delete this message' });
+    }
+
+    await SpaceDiscussionMessage.deleteOne({ _id: messageId });
+    res.json({ ok: true });
   });
 
   return router;

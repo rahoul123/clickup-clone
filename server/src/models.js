@@ -197,6 +197,17 @@ const spaceDiscussionMessageSchema = new Schema(
     spaceId: { type: String, required: true, index: true },
     userId: { type: String, required: true },
     content: { type: String, default: '' },
+    attachments: {
+      type: [
+        {
+          _id: false,
+          filename: { type: String, required: true },
+          mimeType: { type: String, required: true },
+          dataUrl: { type: String, required: true },
+        },
+      ],
+      default: [],
+    },
   },
   { timestamps: true }
 );

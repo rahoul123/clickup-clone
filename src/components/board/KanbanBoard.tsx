@@ -86,6 +86,7 @@ interface KanbanBoardProps {
     startDate?: string;
     endDate?: string;
     description?: string;
+    attachments?: File[];
   }) => Promise<void> | void;
   onMoveTask: (taskId: string, status: string) => Promise<void> | void;
   onUpdateTask: (
@@ -271,6 +272,7 @@ export function KanbanBoard({
     startDate?: string;
     endDate?: string;
     description?: string;
+    attachments?: File[];
   }) => {
     onCreateTask(payload);
     setAddTaskStatus(null);
@@ -619,6 +621,7 @@ export function KanbanBoard({
         <DiscussionPanel
           spaceId={spaceDiscussionId}
           spaceName={spaceDiscussionName ?? spaceName}
+          memberOptions={memberOptions}
         />
       )}
 

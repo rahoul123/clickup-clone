@@ -19,9 +19,13 @@ import {
   HardDrive,
   Box,
   FileText,
+  Image as ImageIcon,
 } from 'lucide-react';
 import type { TaskStatus, TaskPriority } from '@/types';
 import { STATUS_CONFIG, PRIORITY_CONFIG } from '@/types';
+import { toast } from '@/hooks/use-toast';
+
+const MAX_ATTACHMENT_SIZE_BYTES = 4 * 1024 * 1024;
 
 interface AddTaskDialogProps {
   status: string;
@@ -45,6 +49,8 @@ interface AddTaskDialogProps {
     startDate?: string;
     endDate?: string;
     description?: string;
+    /** Optional files picked via the Upload button; caller can persist them. */
+    attachments?: File[];
   }) => void;
 }
 
@@ -79,9 +85,52 @@ export function AddTaskDialog({
   const [notifyDropdownOpen, setNotifyDropdownOpen] = useState(false);
   const [bellMemberDropdownOpen, setBellMemberDropdownOpen] = useState(false);
   const [assigneeSearch, setAssigneeSearch] = useState('');
+  const [attachments, setAttachments] = useState<File[]>([]);
   const assigneeRef = useRef<HTMLDivElement | null>(null);
   const attachRef = useRef<HTMLDivElement | null>(null);
   const bellRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.currentTarget.files;
+    if (files) {
+      const nextFiles = Array.from(files);
+      const oversize = nextFiles.find((file) => file.size > MAX_ATTACHMENT_SIZE_BYTES);
+      if (oversize) {
+        toast({
+          title: 'File too large',
+          description: `${oversize.name} is larger than 4 MB.`,
+        });
+        e.currentTarget.value = '';
+        return;
+      }
+      setAttachments((prev) => [...prev, ...nextFiles]);
+    }
+    e.currentTarget.value = '';
+  };
+
+  const removeAttachment = (index: number) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const triggerFilePicker = () => {
+    setActiveDropdown(null);
+    fileInputRef.current?.click();
+  };
+
+  const triggerImagePicker = () => {
+    setActiveDropdown(null);
+    imageInputRef.current?.click();
+  };
+
+  const notifyIntegrationPending = (service: string) => {
+    setActiveDropdown(null);
+    toast({
+      title: `${service} integration coming soon`,
+      description: 'For now please use "Upload file" to attach files from your device.',
+    });
+  };
 
   const filteredMembers = useMemo(() => {
     const q = assigneeSearch.trim().toLowerCase();
@@ -134,6 +183,7 @@ export function AddTaskDialog({
       startDate: startDate || undefined,
       endDate: endDate || undefined,
       description: description.trim() || undefined,
+      attachments: attachments.length > 0 ? attachments : undefined,
     });
   };
 
@@ -190,19 +240,19 @@ export function AddTaskDialog({
 
   const assigneePickerContent = (
     <>
-      <div className="p-3 border-b border-gray-50 flex items-center gap-2">
-        <Search size={14} className="text-gray-400 shrink-0" />
+      <div className="p-3 border-b border-gray-50 dark:border-slate-800 flex items-center gap-2">
+        <Search size={14} className="text-gray-400 dark:text-slate-500 shrink-0" />
         <input
           type="text"
           value={assigneeSearch}
           onChange={(e) => setAssigneeSearch(e.target.value)}
           placeholder="Search or enter email..."
-          className="w-full text-[12px] outline-none placeholder:text-gray-400"
+          className="w-full text-[12px] outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500"
         />
       </div>
       <div className="max-h-64 overflow-y-auto py-1">
         {visibleMembers.length === 0 && (
-          <div className="px-3 py-2 text-[12px] text-gray-400">No users available</div>
+          <div className="px-3 py-2 text-[12px] text-gray-400 dark:text-slate-500">No users available</div>
         )}
         {visibleMembers.map((member, idx) => {
           const selected = assigneeIds.includes(member.id);
@@ -212,7 +262,7 @@ export function AddTaskDialog({
               key={member.id}
               onClick={() => toggleAssigneeId(member.id)}
               className={`w-full flex items-center justify-between px-3 py-2 text-left transition-colors ${
-                selected ? 'bg-gray-100' : 'hover:bg-gray-50'
+                selected ? 'bg-gray-100 dark:bg-slate-800' : 'hover:bg-gray-50 dark:hover:bg-slate-800'
               }`}
             >
               <span className="flex items-center gap-2 min-w-0">
@@ -223,11 +273,11 @@ export function AddTaskDialog({
                 >
                   {member.label.trim().charAt(0).toUpperCase() || 'U'}
                 </span>
-                <span className="text-[12px] text-gray-700 truncate">{member.label}</span>
+                <span className="text-[12px] text-gray-700 dark:text-slate-300 truncate">{member.label}</span>
               </span>
               <span className="flex items-center gap-1.5 shrink-0">
                 <span className="h-2 w-2 rounded-full bg-emerald-500" title="Online" />
-                {selected && <Check size={14} className="text-purple-600" />}
+                {selected && <Check size={14} className="text-purple-600 dark:text-purple-400" />}
               </span>
             </button>
           );
@@ -238,25 +288,25 @@ export function AddTaskDialog({
 
   const bellPickerContent = (
     <>
-      <div className="border-b border-gray-50 bg-blue-50/50 px-3 py-2">
+      <div className="border-b border-gray-50 dark:border-slate-800 bg-blue-50/50 dark:bg-blue-950/30 px-3 py-2">
         <p className="text-[11px] font-medium text-blue-900">Notify only</p>
         <p className="text-[10px] leading-snug text-blue-800/80">
           Selected people get a notification — they are not assigned unless you also pick them under Assignee.
         </p>
       </div>
-      <div className="p-3 border-b border-gray-50 flex items-center gap-2">
-        <Search size={14} className="text-gray-400 shrink-0" />
+      <div className="p-3 border-b border-gray-50 dark:border-slate-800 flex items-center gap-2">
+        <Search size={14} className="text-gray-400 dark:text-slate-500 shrink-0" />
         <input
           type="text"
           value={assigneeSearch}
           onChange={(e) => setAssigneeSearch(e.target.value)}
           placeholder="Search or enter email..."
-          className="w-full text-[12px] outline-none placeholder:text-gray-400"
+          className="w-full text-[12px] outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500"
         />
       </div>
       <div className="max-h-64 overflow-y-auto py-1">
         {visibleMembers.length === 0 && (
-          <div className="px-3 py-2 text-[12px] text-gray-400">No users available</div>
+          <div className="px-3 py-2 text-[12px] text-gray-400 dark:text-slate-500">No users available</div>
         )}
         {visibleMembers.map((member, idx) => {
           const selected = notifyOnlyUserIds.includes(member.id);
@@ -266,7 +316,7 @@ export function AddTaskDialog({
               key={member.id}
               onClick={() => toggleNotifyOnly(member.id)}
               className={`w-full flex items-center justify-between px-3 py-2 text-left transition-colors ${
-                selected ? 'bg-blue-50' : 'hover:bg-gray-50'
+                selected ? 'bg-blue-50' : 'hover:bg-gray-50 dark:hover:bg-slate-800'
               }`}
             >
               <span className="flex items-center gap-2 min-w-0">
@@ -277,7 +327,7 @@ export function AddTaskDialog({
                 >
                   {member.label.trim().charAt(0).toUpperCase() || 'U'}
                 </span>
-                <span className="text-[12px] text-gray-700 truncate">{member.label}</span>
+                <span className="text-[12px] text-gray-700 dark:text-slate-300 truncate">{member.label}</span>
               </span>
               <span className="flex items-center gap-1.5 shrink-0">
                 <span className="h-2 w-2 rounded-full bg-emerald-500" title="Online" />
@@ -291,19 +341,19 @@ export function AddTaskDialog({
   );
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4 font-sans antialiased" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/50 dark:bg-black/70 backdrop-blur-[2px] flex items-center justify-center z-50 p-4 font-sans antialiased" onClick={onClose}>
       <div
-        className="bg-white w-full max-w-[680px] rounded-xl shadow-2xl flex flex-col relative overflow-visible"
+        className="bg-white dark:bg-slate-900 w-full max-w-[680px] rounded-xl shadow-2xl dark:shadow-black/60 ring-1 ring-black/5 dark:ring-white/10 flex flex-col relative overflow-visible"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-4 border-b border-gray-100">
+        <div className="flex items-center justify-between px-4 border-b border-gray-100 dark:border-slate-800/80">
           <div className="flex gap-6">
             {(['Task', 'Doc', 'Reminder', 'Whiteboard', 'Dashboard'] as const).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
                 className={`py-3.5 text-[13px] font-medium transition-all relative ${
-                  activeTab === tab ? 'text-purple-600' : 'text-gray-500 hover:text-gray-800'
+                  activeTab === tab ? 'text-purple-600 dark:text-purple-400' : 'text-gray-500 dark:text-slate-400 hover:text-gray-800'
                 }`}
               >
                 {tab}
@@ -311,9 +361,9 @@ export function AddTaskDialog({
               </button>
             ))}
           </div>
-          <div className="flex items-center gap-3 text-gray-400">
-            <Minimize2 size={15} className="cursor-pointer hover:text-gray-600 rotate-90" />
-            <X size={18} className="cursor-pointer hover:text-gray-600" onClick={onClose} />
+          <div className="flex items-center gap-3 text-gray-400 dark:text-slate-500">
+            <Minimize2 size={15} className="cursor-pointer hover:text-gray-600 dark:hover:text-slate-300 rotate-90" />
+            <X size={18} className="cursor-pointer hover:text-gray-600 dark:hover:text-slate-300" onClick={onClose} />
           </div>
         </div>
 
@@ -321,7 +371,7 @@ export function AddTaskDialog({
           <>
             <div className="p-6 pb-4">
               <div className="flex items-center gap-2 mb-6">
-                <div className="flex items-center gap-1.5 px-2 py-1 bg-white border border-gray-200 rounded text-[12px] text-gray-600">
+                <div className="flex items-center gap-1.5 px-2 py-1 bg-white dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700 rounded text-[12px] text-gray-600 dark:text-slate-300">
                   <ListTree size={14} className="text-purple-500" />
                   <select
                     value={selectedListId}
@@ -338,10 +388,10 @@ export function AddTaskDialog({
                       </option>
                     ))}
                   </select>
-                  <ChevronDown size={14} className="text-gray-400" />
+                  <ChevronDown size={14} className="text-gray-400 dark:text-slate-500" />
                 </div>
-                <div className="flex items-center gap-1.5 px-2 py-1 bg-white border border-gray-200 rounded text-[12px] text-gray-600">
-                  <div className="w-2.5 h-2.5 rounded-full border-2 border-gray-400" />
+                <div className="flex items-center gap-1.5 px-2 py-1 bg-white dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700 rounded text-[12px] text-gray-600 dark:text-slate-300">
+                  <div className="w-2.5 h-2.5 rounded-full border-2 border-gray-400 dark:border-slate-500" />
                   <select
                     value={activeTab}
                     onChange={(e) =>
@@ -355,29 +405,29 @@ export function AddTaskDialog({
                     <option value="Whiteboard">Whiteboard</option>
                     <option value="Dashboard">Dashboard</option>
                   </select>
-                  <ChevronDown size={14} className="text-gray-400" />
+                  <ChevronDown size={14} className="text-gray-400 dark:text-slate-500" />
                 </div>
               </div>
 
-              <div className="space-y-4 mb-8">
+              <div className="space-y-3 mb-8">
                 <input
                   type="text"
                   autoFocus
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
                   placeholder="Task Name"
-                  className="w-full text-2xl font-semibold text-gray-800 outline-none placeholder:text-gray-300 border-none p-0 focus:ring-0"
+                  className="w-full bg-transparent text-2xl font-semibold text-gray-900 dark:text-slate-100 outline-none placeholder:text-gray-300 dark:placeholder:text-slate-600 border-none p-0 focus:ring-0 caret-purple-500"
                 />
                 <input
                   type="text"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   placeholder="Add description, or write with AI"
-                  className="w-full text-[14px] text-gray-500 outline-none border-none p-0 focus:ring-0"
+                  className="w-full bg-transparent text-[14px] text-gray-700 dark:text-slate-300 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500 border-none p-0 focus:ring-0"
                 />
-                <div className="flex items-center gap-1 text-[14px] text-gray-400">
+                <div className="flex items-center gap-1 text-[13px] text-gray-400 dark:text-slate-500">
                   <span>Write with</span>
-                  <BrainCircuit size={16} className="text-gray-400" />
+                  <BrainCircuit size={16} className="text-gray-400 dark:text-slate-500" />
                   <span>AI</span>
                 </div>
               </div>
@@ -386,7 +436,7 @@ export function AddTaskDialog({
                 <select
                   value={taskStatus}
                   onChange={(e) => setTaskStatus(e.target.value)}
-                  className="px-2.5 py-1.5 border border-gray-200 rounded text-[11px] font-bold text-gray-600 hover:bg-gray-50"
+                  className="px-2.5 py-1.5 bg-white dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700 rounded text-[11px] font-bold text-gray-600 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
                 >
                   {statusSelectOptions.map((opt) => (
                     <option key={opt.value} value={opt.value}>
@@ -411,21 +461,21 @@ export function AddTaskDialog({
                       }
                     }}
                     className={`flex items-center gap-1.5 px-3 py-1.5 border border-dashed rounded text-[12px] transition-all cursor-pointer ${
-                      notifyDropdownOpen ? 'bg-gray-50 border-gray-400 text-gray-700' : 'text-gray-400 hover:bg-gray-50'
+                      notifyDropdownOpen ? 'bg-gray-50 dark:bg-slate-800/70 border-gray-400 dark:border-slate-500 text-gray-700 dark:text-slate-200' : 'border-gray-300 dark:border-slate-600 text-gray-500 dark:text-slate-400 hover:bg-gray-50 dark:hover:bg-slate-800/70'
                     }`}
                   >
                     <User size={14} />
                     <span>Assignee</span>
-                    <ChevronDown size={12} className="text-gray-400" />
+                    <ChevronDown size={12} className="text-gray-400 dark:text-slate-500" />
                     {assigneeIds.length > 0 && (
-                      <span className="inline-flex items-center justify-center min-w-4 h-4 px-1 rounded-full bg-purple-100 text-purple-700 text-[10px] font-bold">
+                      <span className="inline-flex items-center justify-center min-w-4 h-4 px-1 rounded-full bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300 text-[10px] font-bold">
                         {assigneeIds.length}
                       </span>
                     )}
                   </div>
 
                   {notifyDropdownOpen && (
-                    <div className="absolute top-10 left-0 w-64 bg-white shadow-2xl border border-gray-100 rounded-xl z-[70]">
+                    <div className="absolute top-10 left-0 w-64 bg-white dark:bg-slate-900 shadow-2xl border border-gray-100 dark:border-slate-800 rounded-xl z-[70]">
                       {assigneePickerContent}
                     </div>
                   )}
@@ -436,14 +486,14 @@ export function AddTaskDialog({
                     type="button"
                     onClick={() => toggleDropdown('dueDate')}
                     className={`flex items-center gap-1.5 px-2.5 py-1.5 border border-dashed rounded text-[12px] ${
-                      activeDropdown === 'dueDate' ? 'bg-gray-50 border-gray-400 text-gray-700' : 'text-gray-400 hover:bg-gray-50'
+                      activeDropdown === 'dueDate' ? 'bg-gray-50 dark:bg-slate-800/70 border-gray-400 dark:border-slate-500 text-gray-700 dark:text-slate-200' : 'border-gray-300 dark:border-slate-600 text-gray-500 dark:text-slate-400 hover:bg-gray-50 dark:hover:bg-slate-800/70'
                     }`}
                   >
                     <Calendar size={14} /> {endDate ? new Date(endDate).toLocaleDateString() : 'Due date'}
                   </button>
                   {activeDropdown === 'dueDate' && (
-                    <div className="absolute top-10 left-0 z-[70] w-56 rounded-xl border border-gray-100 bg-white shadow-2xl p-3">
-                      <div className="text-[11px] font-semibold text-gray-600 mb-2">Select due date</div>
+                    <div className="absolute top-10 left-0 z-[70] w-56 rounded-xl border border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl p-3">
+                      <div className="text-[11px] font-semibold text-gray-600 dark:text-slate-400 mb-2">Select due date</div>
                       <input
                         type="date"
                         value={endDate}
@@ -451,7 +501,7 @@ export function AddTaskDialog({
                           setEndDate(e.target.value);
                           setActiveDropdown(null);
                         }}
-                        className="w-full h-9 rounded-md border border-gray-200 px-2 text-xs"
+                        className="w-full h-9 rounded-md border border-gray-200 dark:border-slate-700 px-2 text-xs"
                       />
                       <button
                         type="button"
@@ -459,7 +509,7 @@ export function AddTaskDialog({
                           setEndDate('');
                           setActiveDropdown(null);
                         }}
-                        className="mt-2 text-[11px] text-gray-500 hover:text-gray-700"
+                        className="mt-2 text-[11px] text-gray-500 dark:text-slate-400 hover:text-gray-700"
                       >
                         Clear date
                       </button>
@@ -470,7 +520,7 @@ export function AddTaskDialog({
                 <select
                   value={priority}
                   onChange={(e) => setPriority(e.target.value as TaskPriority)}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 border border-dashed text-gray-500 rounded text-[12px] hover:bg-gray-50"
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 border border-dashed border-gray-300 dark:border-slate-600 text-gray-500 dark:text-slate-400 rounded text-[12px] hover:bg-gray-50 dark:hover:bg-slate-800/70"
                 >
                   {(Object.keys(PRIORITY_CONFIG) as TaskPriority[]).map((p) => (
                     <option key={p} value={p}>
@@ -479,47 +529,98 @@ export function AddTaskDialog({
                   ))}
                 </select>
 
-                <button type="button" className="p-1.5 border border-dashed text-gray-400 rounded hover:bg-gray-50">
+                <button type="button" className="p-1.5 border border-dashed border-gray-300 dark:border-slate-600 text-gray-500 dark:text-slate-400 rounded hover:bg-gray-50 dark:hover:bg-slate-800/70">
                   <MoreHorizontal size={14} />
                 </button>
               </div>
             </div>
 
-            <div className="mt-4 p-4 border-t border-gray-100 bg-gray-50/30 flex items-center justify-between rounded-b-xl">
-              <button type="button" className="flex items-center gap-2 px-3 py-1.5 border border-gray-200 bg-white rounded text-[12px] font-semibold text-gray-600 hover:shadow-sm">
+            {attachments.length > 0 && (
+              <div className="px-6 pb-3 -mt-1 flex flex-wrap gap-2">
+                {attachments.map((file, idx) => (
+                  <div
+                    key={`${file.name}-${idx}`}
+                    className="group inline-flex items-center gap-1.5 max-w-[220px] rounded-md border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800/70 px-2 py-1 text-[11px] text-gray-700 dark:text-slate-200"
+                    title={`${file.name} — ${(file.size / 1024).toFixed(1)} KB`}
+                  >
+                    {file.type.startsWith('image/') ? (
+                      <ImageIcon size={12} className="text-purple-500 shrink-0" />
+                    ) : (
+                      <FileText size={12} className="text-blue-500 shrink-0" />
+                    )}
+                    <span className="truncate">{file.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(idx)}
+                      className="shrink-0 rounded p-0.5 text-gray-400 dark:text-slate-500 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10"
+                      aria-label={`Remove ${file.name}`}
+                    >
+                      <X size={11} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="mt-4 p-4 border-t border-gray-100 dark:border-slate-800/80 bg-gray-50/50 dark:bg-slate-950/40 flex items-center justify-between rounded-b-xl">
+              <button type="button" className="flex items-center gap-2 px-3 py-1.5 border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 rounded text-[12px] font-semibold text-gray-600 dark:text-slate-400 hover:shadow-sm dark:hover:shadow-black/40">
                 <LayoutGrid size={14} className="text-purple-500" />
                 Templates
               </button>
 
               <div className="flex items-center gap-5">
-                <div className="flex items-center gap-3.5 text-gray-400 relative">
+                <div className="flex items-center gap-3.5 text-gray-400 dark:text-slate-500 relative">
                   <div className="relative" ref={attachRef}>
-                    <Paperclip
-                      size={18}
-                      className={`cursor-pointer hover:text-gray-600 ${activeDropdown === 'attach' ? 'text-purple-600' : ''}`}
+                    <button
+                      type="button"
                       onClick={() => toggleDropdown('attach')}
-                    />
+                      className={`relative flex items-center hover:text-gray-600 dark:hover:text-slate-300 ${activeDropdown === 'attach' || attachments.length > 0 ? 'text-purple-600 dark:text-purple-400' : ''}`}
+                      aria-label="Attach files"
+                    >
+                      <Paperclip size={18} />
+                      {attachments.length > 0 && (
+                        <span className="absolute -top-1.5 -right-2 min-w-[16px] h-4 px-1 rounded-full bg-purple-600 text-white text-[10px] font-bold flex items-center justify-center">
+                          {attachments.length}
+                        </span>
+                      )}
+                    </button>
                     {activeDropdown === 'attach' && (
-                      <div className="absolute bottom-full mb-3 left-[-150px] w-52 bg-white shadow-2xl border border-gray-100 rounded-xl z-[70] py-1">
-                        {[
-                          { name: 'Upload file', icon: <Upload size={14} /> },
-                          { name: 'Dropbox', icon: <Cloud size={14} className="text-blue-500" /> },
-                          { name: 'OneDrive/SharePoint', icon: <Cloud size={14} className="text-blue-600" /> },
-                          { name: 'Box', icon: <Box size={14} className="text-blue-400" /> },
-                          { name: 'Google Drive', icon: <HardDrive size={14} className="text-green-600" /> },
-                          { name: 'New Google Doc', icon: <FileText size={14} className="text-blue-500" /> },
-                        ].map((opt) => (
+                      <div className="absolute bottom-full mb-3 left-[-150px] w-52 bg-white dark:bg-slate-900 shadow-2xl border border-gray-100 dark:border-slate-800 rounded-xl z-[70] py-1">
+                        {([
+                          { name: 'Upload file', icon: <Upload size={14} />, onClick: triggerFilePicker },
+                          { name: 'Upload image', icon: <ImageIcon size={14} className="text-purple-500" />, onClick: triggerImagePicker },
+                          { name: 'Dropbox', icon: <Cloud size={14} className="text-blue-500" />, onClick: () => notifyIntegrationPending('Dropbox') },
+                          { name: 'OneDrive/SharePoint', icon: <Cloud size={14} className="text-blue-600" />, onClick: () => notifyIntegrationPending('OneDrive/SharePoint') },
+                          { name: 'Box', icon: <Box size={14} className="text-blue-400" />, onClick: () => notifyIntegrationPending('Box') },
+                          { name: 'Google Drive', icon: <HardDrive size={14} className="text-green-600" />, onClick: () => notifyIntegrationPending('Google Drive') },
+                          { name: 'New Google Doc', icon: <FileText size={14} className="text-blue-500" />, onClick: () => notifyIntegrationPending('Google Docs') },
+                        ] as const).map((opt) => (
                           <button
                             key={opt.name}
                             type="button"
-                            className="w-full flex items-center gap-3 px-4 py-2 hover:bg-gray-50 text-[12px] text-gray-700 transition text-left"
-                            onClick={() => setActiveDropdown(null)}
+                            className="w-full flex items-center gap-3 px-4 py-2 hover:bg-gray-50 dark:hover:bg-slate-800 text-[12px] text-gray-700 dark:text-slate-300 transition text-left"
+                            onClick={opt.onClick}
                           >
                             {opt.icon} <span>{opt.name}</span>
                           </button>
                         ))}
                       </div>
                     )}
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      className="hidden"
+                      onChange={handleFileSelect}
+                    />
+                    <input
+                      ref={imageInputRef}
+                      type="file"
+                      multiple
+                      accept="image/*"
+                      className="hidden"
+                      onChange={handleFileSelect}
+                    />
                   </div>
                   <div className="relative" ref={bellRef}>
                     <button
@@ -531,8 +632,8 @@ export function AddTaskDialog({
                       }}
                       className={`flex items-center gap-1.5 rounded px-2 py-0.5 transition-colors ${
                         bellMemberDropdownOpen
-                          ? 'bg-blue-50 text-blue-700 ring-1 ring-blue-200'
-                          : 'cursor-pointer bg-gray-100/80 text-gray-600 hover:bg-gray-100 hover:text-gray-800'
+                          ? 'bg-blue-50 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 ring-1 ring-blue-200 dark:ring-blue-500/40'
+                          : 'cursor-pointer bg-gray-100 dark:bg-slate-800/80 text-gray-600 dark:text-slate-300 hover:bg-gray-200 dark:hover:bg-slate-800 hover:text-gray-800 dark:hover:text-slate-100'
                       }`}
                       title="Notify only (voucher) — not assignee"
                     >
@@ -542,7 +643,7 @@ export function AddTaskDialog({
                       </span>
                     </button>
                     {bellMemberDropdownOpen && (
-                      <div className="absolute bottom-full right-0 z-[70] mb-2 w-[min(calc(100vw-2rem),18rem)] overflow-hidden rounded-xl border border-gray-100 bg-white shadow-2xl">
+                      <div className="absolute bottom-full right-0 z-[70] mb-2 w-[min(calc(100vw-2rem),18rem)] overflow-hidden rounded-xl border border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl">
                         {bellPickerContent}
                       </div>
                     )}
@@ -569,8 +670,8 @@ export function AddTaskDialog({
           <div className="flex min-h-[420px] flex-col">
             <div className="flex-1 p-6">
               {(activeTab === 'Doc' || activeTab === 'Whiteboard' || activeTab === 'Dashboard') && (
-                <div className="mb-4 inline-flex items-center gap-1.5 rounded border border-gray-200 bg-white px-2 py-1 text-[12px] text-gray-600">
-                  <ListTree size={14} className="text-gray-500" />
+                <div className="mb-4 inline-flex items-center gap-1.5 rounded border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-[12px] text-gray-600 dark:text-slate-400">
+                  <ListTree size={14} className="text-gray-500 dark:text-slate-400" />
                   <span>
                     {activeTab === 'Doc'
                       ? 'Add to location'
@@ -578,7 +679,7 @@ export function AddTaskDialog({
                         ? 'My Whiteboards'
                         : 'My Dashboards'}
                   </span>
-                  <ChevronDown size={14} className="text-gray-400" />
+                  <ChevronDown size={14} className="text-gray-400 dark:text-slate-500" />
                 </div>
               )}
 
@@ -589,21 +690,21 @@ export function AddTaskDialog({
                     value={docTitle}
                     onChange={(e) => setDocTitle(e.target.value)}
                     placeholder="Name this Doc..."
-                    className="w-full text-3xl font-semibold text-gray-700 outline-none placeholder:text-gray-400"
+                    className="w-full bg-transparent text-3xl font-semibold text-gray-900 dark:text-slate-100 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500 caret-purple-500"
                   />
                   <input
                     type="text"
                     value={docBody}
                     onChange={(e) => setDocBody(e.target.value)}
                     placeholder="Start writing"
-                    className="w-full text-lg text-gray-600 outline-none placeholder:text-gray-400"
+                    className="w-full bg-transparent text-lg text-gray-700 dark:text-slate-300 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500"
                   />
-                  <button type="button" className="text-[14px] text-gray-500 hover:text-gray-700">
+                  <button type="button" className="text-[14px] text-gray-500 dark:text-slate-400 hover:text-gray-700">
                     Write with AI
                   </button>
                   <div className="pt-2">
-                    <p className="mb-2 text-[14px] text-gray-500">Add new</p>
-                    <div className="space-y-2 text-[15px] text-gray-600">
+                    <p className="mb-2 text-[14px] text-gray-500 dark:text-slate-400">Add new</p>
+                    <div className="space-y-2 text-[15px] text-gray-600 dark:text-slate-400">
                       <div className="flex items-center gap-2"><LayoutGrid size={15} /> Table</div>
                       <div className="flex items-center gap-2"><ListTree size={15} /> Column</div>
                       <div className="flex items-center gap-2"><ListTree size={15} /> ClickUp List</div>
@@ -619,34 +720,34 @@ export function AddTaskDialog({
                     value={reminderTitle}
                     onChange={(e) => setReminderTitle(e.target.value)}
                     placeholder="Reminder name or type '/' for commands"
-                    className="w-full text-3xl font-semibold text-gray-700 outline-none placeholder:text-gray-400"
+                    className="w-full bg-transparent text-3xl font-semibold text-gray-900 dark:text-slate-100 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500 caret-purple-500"
                   />
                   <input
                     type="text"
                     value={reminderBody}
                     onChange={(e) => setReminderBody(e.target.value)}
                     placeholder="Add description"
-                    className="w-full text-lg text-gray-600 outline-none placeholder:text-gray-400"
+                    className="w-full bg-transparent text-lg text-gray-700 dark:text-slate-300 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500"
                   />
                   <div className="flex items-center gap-2 pt-2">
                     <button
                       type="button"
                       onClick={() => setEndDate(new Date().toISOString().slice(0, 10))}
-                      className="rounded border border-gray-200 px-2.5 py-1.5 text-[12px] text-gray-700 hover:bg-gray-50"
+                      className="rounded border border-gray-200 dark:border-slate-700 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
                     >
                       Today
                     </button>
                     <button
                       type="button"
                       onClick={() => setAssigneeIds(memberOptions[0]?.id ? [memberOptions[0].id] : [])}
-                      className="rounded border border-gray-200 px-2.5 py-1.5 text-[12px] text-gray-700 hover:bg-gray-50"
+                      className="rounded border border-gray-200 dark:border-slate-700 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
                     >
                       For me
                     </button>
                     <button
                       type="button"
                       onClick={() => setNotifyOnlyUserIds(memberOptions[0]?.id ? [memberOptions[0].id] : [])}
-                      className="rounded border border-gray-200 px-2.5 py-1.5 text-[12px] text-gray-700 hover:bg-gray-50"
+                      className="rounded border border-gray-200 dark:border-slate-700 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
                     >
                       Notify me
                     </button>
@@ -661,7 +762,7 @@ export function AddTaskDialog({
                     value={whiteboardTitle}
                     onChange={(e) => setWhiteboardTitle(e.target.value)}
                     placeholder="Name this Whiteboard..."
-                    className="w-full text-3xl font-semibold text-gray-700 outline-none placeholder:text-gray-400"
+                    className="w-full bg-transparent text-3xl font-semibold text-gray-900 dark:text-slate-100 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500 caret-purple-500"
                   />
                 </div>
               )}
@@ -673,14 +774,14 @@ export function AddTaskDialog({
                     value={dashboardTitle}
                     onChange={(e) => setDashboardTitle(e.target.value)}
                     placeholder="Name this Dashboard..."
-                    className="w-full text-3xl font-semibold text-gray-700 outline-none placeholder:text-gray-400"
+                    className="w-full bg-transparent text-3xl font-semibold text-gray-900 dark:text-slate-100 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500 caret-purple-500"
                   />
                 </div>
               )}
             </div>
 
-            <div className="flex items-center justify-between border-t border-gray-100 bg-gray-50/30 px-6 py-4 rounded-b-xl">
-              <label className="inline-flex items-center gap-2 text-[13px] text-gray-600">
+            <div className="flex items-center justify-between border-t border-gray-100 dark:border-slate-800/80 bg-gray-50/50 dark:bg-slate-950/40 px-6 py-4 rounded-b-xl">
+              <label className="inline-flex items-center gap-2 text-[13px] text-gray-600 dark:text-slate-400">
                 <input
                   type="checkbox"
                   checked={isPrivateAsset}
@@ -689,7 +790,7 @@ export function AddTaskDialog({
                 Private
               </label>
               <div className="flex items-center gap-4">
-                {activeTab === 'Reminder' && <Paperclip size={16} className="text-gray-400" />}
+                {activeTab === 'Reminder' && <Paperclip size={16} className="text-gray-400 dark:text-slate-500" />}
                 <button
                   type="button"
                   onClick={submitFromNonTaskTab}

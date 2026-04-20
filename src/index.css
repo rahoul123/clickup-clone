@@ -140,3 +140,35 @@
     border-radius: 3px;
   }
 }
+
+/* ---------- Dark-mode theming for native form controls ---------- */
+@layer base {
+  .dark select option,
+  .dark select optgroup {
+    background-color: rgb(30 41 59); /* slate-800 */
+    color: rgb(226 232 240);          /* slate-200 */
+  }
+
+  /* Calendar picker icon on date/time inputs in dark mode */
+  .dark input[type="date"]::-webkit-calendar-picker-indicator,
+  .dark input[type="datetime-local"]::-webkit-calendar-picker-indicator,
+  .dark input[type="time"]::-webkit-calendar-picker-indicator,
+  .dark input[type="month"]::-webkit-calendar-picker-indicator,
+  .dark input[type="week"]::-webkit-calendar-picker-indicator {
+    filter: invert(0.85);
+    opacity: 0.8;
+    cursor: pointer;
+  }
+
+  /* Remove white Chrome autofill in dark mode */
+  .dark input:-webkit-autofill,
+  .dark input:-webkit-autofill:hover,
+  .dark input:-webkit-autofill:focus,
+  .dark textarea:-webkit-autofill,
+  .dark select:-webkit-autofill {
+    -webkit-text-fill-color: rgb(226 232 240) !important;
+    -webkit-box-shadow: 0 0 0px 1000px rgb(15 23 42) inset !important;
+    caret-color: rgb(226 232 240);
+    transition: background-color 9999s ease-in-out 0s;
+  }
+}

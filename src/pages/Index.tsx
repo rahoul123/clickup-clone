@@ -603,6 +603,7 @@ const Index = () => {
     startDate?: string;
     endDate?: string;
     description?: string;
+    attachments?: File[];
   }) => {
     const targetListId = payload.listId || activeList;
     if (!user || !targetListId) return;
@@ -639,6 +640,33 @@ const Index = () => {
       ...prev,
     ]);
     toast.success(`Task "${data.title}" created.`);
+
+    // Persist any files picked via the "Upload file" flow as the first comment attachment.
+    if (payload.attachments && payload.attachments.length > 0) {
+      try {
+        const fileToDataUrl = (file: File) =>
+          new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = () => reject(new Error('Failed to read file'));
+            reader.readAsDataURL(file);
+          });
+        const attachmentPayloads = await Promise.all(
+          payload.attachments.map(async (file) => ({
+            filename: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            dataUrl: await fileToDataUrl(file),
+          })),
+        );
+        await api.app.addTaskComment(data.id, {
+          content: `📎 Attached ${attachmentPayloads.length} file${attachmentPayloads.length > 1 ? 's' : ''} on create`,
+          attachments: attachmentPayloads,
+        });
+      } catch (attachError) {
+        console.error('Failed to attach files to created task', attachError);
+        toast.error('Task created, but some files could not be attached.');
+      }
+    }
 
     hydrateTasks(targetListId).catch((refreshError) => console.error('Task refresh failed after create', refreshError));
   };

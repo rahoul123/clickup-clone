@@ -156,6 +156,39 @@ export function AppSidebar({
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<'employee' | 'team_lead' | 'manager' | 'admin'>('employee');
   const [inviteDepartment, setInviteDepartment] = useState('');
+
+  const [promptState, setPromptState] = useState<{
+    title: string;
+    label: string;
+    placeholder?: string;
+    submitText?: string;
+    onSubmit: (value: string) => void | Promise<void>;
+  } | null>(null);
+  const [promptValue, setPromptValue] = useState('');
+
+  const openPrompt = (config: {
+    title: string;
+    label: string;
+    placeholder?: string;
+    submitText?: string;
+    onSubmit: (value: string) => void | Promise<void>;
+  }) => {
+    setPromptValue('');
+    setPromptState(config);
+  };
+
+  const closePrompt = () => {
+    setPromptState(null);
+    setPromptValue('');
+  };
+
+  const submitPrompt = async () => {
+    if (!promptState) return;
+    const value = promptValue.trim();
+    if (!value) return;
+    await promptState.onSubmit(value);
+    closePrompt();
+  };
   const activeWorkspaceSection = workspaceSections.find((s) => s.id === activeWorkspaceId) ?? workspaceSections[0];
   const inviteDepartmentOptions = (activeWorkspaceSection?.spaces || [])
     .flatMap((space) => (space.isMasterFolder ? space.children ?? [] : []))
@@ -269,8 +302,13 @@ export function AppSidebar({
                 onClick={(e) => {
                   e.stopPropagation();
                   if (!canCreateSpaces) return;
-                  const spaceName = window.prompt('Department / team space name');
-                  if (spaceName?.trim()) onCreateSpace(spaceName.trim());
+                  openPrompt({
+                    title: 'New Department',
+                    label: 'Department / team space name',
+                    placeholder: 'e.g. Marketing',
+                    submitText: 'Create',
+                    onSubmit: (value) => onCreateSpace(value),
+                  });
                 }}
                 className="text-sidebar-muted hover:text-sidebar-foreground disabled:opacity-30 disabled:cursor-not-allowed"
                 title="Add department space"
@@ -287,8 +325,13 @@ export function AppSidebar({
                 onClick={(e) => {
                   e.stopPropagation();
                   if (!canManageLists) return;
-                  const listName = window.prompt('List name');
-                  if (listName?.trim()) onCreateList(item.id, listName.trim());
+                  openPrompt({
+                    title: 'New List',
+                    label: 'List name',
+                    placeholder: 'e.g. landing pages',
+                    submitText: 'Create',
+                    onSubmit: (value) => onCreateList(item.id, value),
+                  });
                 }}
                 className="text-sidebar-muted hover:text-sidebar-foreground disabled:opacity-30 disabled:cursor-not-allowed"
                 title="Add list"
@@ -355,8 +398,13 @@ export function AppSidebar({
             disabled={!canManageWorkspace}
             onClick={() => {
               if (!canManageWorkspace) return;
-              const nextName = window.prompt('Workspace name');
-              if (nextName?.trim()) onCreateWorkspace(nextName.trim());
+              openPrompt({
+                title: 'New Workspace',
+                label: 'Workspace name',
+                placeholder: 'e.g. Team Workspace',
+                submitText: 'Create',
+                onSubmit: (value) => onCreateWorkspace(value),
+              });
             }}
             className="flex flex-1 items-center justify-center gap-1 rounded-md border border-sidebar-border bg-sidebar-accent/40 px-2 py-1 text-[11px] text-sidebar-foreground transition-colors hover:bg-sidebar-accent disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -542,6 +590,69 @@ export function AppSidebar({
               Send Invite
             </button>
           </div>
+        </div>
+      </div>
+    )}
+    {promptState && (
+      <div
+        className="fixed inset-0 z-[90] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
+        onMouseDown={(e) => {
+          if (e.target === e.currentTarget) closePrompt();
+        }}
+      >
+        <div className="w-full max-w-md rounded-xl border border-border bg-background shadow-2xl">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h3 className="text-sm font-semibold text-foreground">{promptState.title}</h3>
+            <button
+              type="button"
+              onClick={closePrompt}
+              className="text-muted-foreground transition-colors hover:text-foreground"
+              aria-label="Close"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void submitPrompt();
+            }}
+          >
+            <div className="space-y-3 p-4">
+              <label className="block text-xs font-medium text-muted-foreground">
+                {promptState.label}
+              </label>
+              <input
+                autoFocus
+                value={promptValue}
+                onChange={(e) => setPromptValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    closePrompt();
+                  }
+                }}
+                placeholder={promptState.placeholder}
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+              <button
+                type="button"
+                onClick={closePrompt}
+                className="h-9 rounded-md border border-input px-3 text-sm text-foreground transition-colors hover:bg-accent"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!promptValue.trim()}
+                className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {promptState.submitText ?? 'Save'}
+              </button>
+            </div>
+          </form>
         </div>
       </div>
     )}

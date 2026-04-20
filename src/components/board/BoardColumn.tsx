@@ -26,6 +26,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { useTheme } from '@/contexts/ThemeContext';
 
 function hexToRgba(hex: string, alpha: number): string {
   const h = hex.replace('#', '');
@@ -94,6 +95,8 @@ export function BoardColumn({
   const [isOver, setIsOver] = useState(false);
   const isCustom = !isBuiltinTaskStatus(columnKey);
   const customColor = accentColor || '#A855F7';
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
 
   return (
     <div
@@ -106,8 +109,10 @@ export function BoardColumn({
       style={
         isCustom
           ? {
-              background: `linear-gradient(to bottom, ${hexToRgba(customColor, 0.12)}, ${hexToRgba(customColor, 0.06)})`,
-              borderColor: hexToRgba(customColor, 0.35),
+              background: isDark
+                ? `linear-gradient(to bottom, ${hexToRgba(customColor, 0.22)}, ${hexToRgba(customColor, 0.08)})`
+                : `linear-gradient(to bottom, ${hexToRgba(customColor, 0.12)}, ${hexToRgba(customColor, 0.06)})`,
+              borderColor: hexToRgba(customColor, isDark ? 0.5 : 0.35),
             }
           : undefined
       }
@@ -172,7 +177,7 @@ export function BoardColumn({
               type="button"
               className={cn(
                 theme.metaBtn,
-                'shrink-0 rounded-md bg-white/80 p-1.5 text-foreground shadow-sm transition-colors hover:bg-white hover:text-foreground'
+                'shrink-0 rounded-md bg-white/80 p-1.5 text-foreground shadow-sm transition-colors hover:bg-white hover:text-foreground dark:bg-slate-800/70 dark:text-slate-200 dark:hover:bg-slate-800'
               )}
               aria-label="Group options"
             >
@@ -209,7 +214,7 @@ export function BoardColumn({
           type="button"
           className={cn(
             theme.metaBtn,
-            'shrink-0 rounded-md bg-white/80 p-1.5 text-foreground shadow-sm transition-colors hover:bg-white hover:text-foreground'
+            'shrink-0 rounded-md bg-white/80 p-1.5 text-foreground shadow-sm transition-colors hover:bg-white hover:text-foreground dark:bg-slate-800/70 dark:text-slate-200 dark:hover:bg-slate-800'
           )}
           aria-label={isCollapsed ? 'Expand group' : 'Collapse group'}
           onClick={() => onToggleCollapse?.()}
@@ -221,7 +226,7 @@ export function BoardColumn({
           data-add-task-column
           className={cn(
             theme.metaBtn,
-            'shrink-0 rounded-md bg-white/80 p-1.5 text-foreground shadow-sm transition-colors hover:bg-white hover:text-foreground disabled:opacity-40'
+            'shrink-0 rounded-md bg-white/80 p-1.5 text-foreground shadow-sm transition-colors hover:bg-white hover:text-foreground disabled:opacity-40 dark:bg-slate-800/70 dark:text-slate-200 dark:hover:bg-slate-800'
           )}
           onClick={() => onAddTask(columnKey)}
           disabled={!canCreateTask}
@@ -258,9 +263,9 @@ export function BoardColumn({
           style={
             isCustom
               ? {
-                  color: customColor,
-                  border: `1px solid ${hexToRgba(customColor, 0.35)}`,
-                  backgroundColor: '#FFFFFF',
+                  color: isDark ? hexToRgba(customColor, 0.95) : customColor,
+                  border: `1px solid ${hexToRgba(customColor, isDark ? 0.55 : 0.35)}`,
+                  backgroundColor: isDark ? 'rgba(30, 41, 59, 0.8)' : '#FFFFFF',
                 }
               : undefined
           }

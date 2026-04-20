@@ -25,6 +25,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { ThemeToggle } from '@/components/ThemeToggle';
 
 interface SidebarItem {
   id: string;
@@ -460,14 +461,18 @@ export function AppSidebar({
       </div>
 
       {/* Footer */}
-      <div className="relative border-t border-sidebar-border/70 p-2">
+      <div className="relative flex items-center gap-1 border-t border-sidebar-border/70 p-2">
         <button
           onClick={() => onLogout()}
-          className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] text-sidebar-muted transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+          className="flex flex-1 items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] text-sidebar-muted transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
         >
           <LogOut className="w-4 h-4" />
           <span>Logout</span>
         </button>
+        <ThemeToggle
+          variant="menu"
+          className="flex-shrink-0 text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
+        />
       </div>
       </div>
     </aside>

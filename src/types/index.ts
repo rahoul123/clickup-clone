@@ -216,69 +216,76 @@ export type KanbanColumnTheme = {
 
 export const KANBAN_COLUMN_THEME: Record<TaskStatus, KanbanColumnTheme> = {
   todo: {
-    surface: 'bg-gradient-to-b from-slate-100/95 via-slate-50/90 to-slate-100/50',
-    surfaceBorder: 'border-slate-200/80',
-    headerPill: 'bg-slate-300/95 text-slate-900 shadow-sm',
-    iconCircle: 'bg-white text-slate-700 ring-1 ring-slate-200/80',
-    iconClass: 'text-slate-700',
-    titleClass: 'text-slate-900',
-    countClass: 'bg-white/50 text-slate-800',
-    metaBtn: 'text-slate-600 hover:bg-white/60 rounded-md',
+    surface:
+      'bg-gradient-to-b from-slate-100/95 via-slate-50/90 to-slate-100/50 dark:from-slate-800/70 dark:via-slate-800/50 dark:to-slate-900/40',
+    surfaceBorder: 'border-slate-200/80 dark:border-slate-700/60',
+    headerPill: 'bg-slate-300/95 text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100',
+    iconCircle:
+      'bg-white text-slate-700 ring-1 ring-slate-200/80 dark:bg-slate-800 dark:text-slate-200 dark:ring-slate-600/60',
+    iconClass: 'text-slate-700 dark:text-slate-200',
+    titleClass: 'text-slate-900 dark:text-slate-100',
+    countClass: 'bg-white/50 text-slate-800 dark:bg-slate-900/60 dark:text-slate-100',
+    metaBtn:
+      'text-slate-600 hover:bg-white/60 dark:text-slate-300 dark:hover:bg-slate-700/60 rounded-md',
     addTask:
-      'bg-white/95 text-slate-800 border border-slate-200/90 shadow-sm hover:bg-white hover:shadow-md hover:border-slate-300/90',
-    dragOver: 'ring-2 ring-slate-400/50 ring-offset-2 ring-offset-slate-50',
+      'bg-white/95 text-slate-800 border border-slate-200/90 shadow-sm hover:bg-white hover:shadow-md hover:border-slate-300/90 dark:bg-slate-800/80 dark:text-slate-100 dark:border-slate-700/70 dark:hover:bg-slate-800',
+    dragOver: 'ring-2 ring-slate-400/50 ring-offset-2 ring-offset-slate-50 dark:ring-slate-500/60 dark:ring-offset-slate-900',
   },
   in_progress: {
-    surface: 'bg-gradient-to-b from-sky-100/95 via-blue-50/85 to-sky-50/40',
-    surfaceBorder: 'border-sky-200/70',
-    headerPill: 'bg-blue-500 text-white shadow-md shadow-blue-500/25',
+    surface:
+      'bg-gradient-to-b from-sky-100/95 via-blue-50/85 to-sky-50/40 dark:from-sky-900/40 dark:via-blue-950/35 dark:to-slate-900/40',
+    surfaceBorder: 'border-sky-200/70 dark:border-sky-800/50',
+    headerPill: 'bg-blue-500 text-white shadow-md shadow-blue-500/25 dark:bg-blue-600 dark:shadow-blue-900/40',
     iconCircle: 'bg-white/25 text-white ring-1 ring-white/30',
     iconClass: 'text-white',
     titleClass: 'text-white',
     countClass: 'bg-white/20 text-white',
     metaBtn: 'text-white/95 hover:bg-white/20 rounded-md',
     addTask:
-      'bg-white text-blue-600 border border-blue-200/90 shadow-sm hover:bg-blue-50 hover:shadow-md',
-    dragOver: 'ring-2 ring-blue-400/60 ring-offset-2 ring-offset-blue-50/80',
+      'bg-white text-blue-600 border border-blue-200/90 shadow-sm hover:bg-blue-50 hover:shadow-md dark:bg-slate-800/80 dark:text-blue-300 dark:border-blue-800/60 dark:hover:bg-slate-800',
+    dragOver: 'ring-2 ring-blue-400/60 ring-offset-2 ring-offset-blue-50/80 dark:ring-blue-500/60 dark:ring-offset-slate-900',
   },
   hold: {
-    surface: 'bg-gradient-to-b from-rose-100/90 via-red-50/80 to-rose-50/35',
-    surfaceBorder: 'border-rose-200/70',
-    headerPill: 'bg-red-600 text-white shadow-md shadow-red-600/25',
+    surface:
+      'bg-gradient-to-b from-rose-100/90 via-red-50/80 to-rose-50/35 dark:from-rose-950/45 dark:via-red-950/35 dark:to-slate-900/40',
+    surfaceBorder: 'border-rose-200/70 dark:border-rose-900/50',
+    headerPill: 'bg-red-600 text-white shadow-md shadow-red-600/25 dark:bg-red-600 dark:shadow-red-950/50',
     iconCircle: 'bg-white/25 text-white ring-1 ring-white/30',
     iconClass: 'text-white',
     titleClass: 'text-white',
     countClass: 'bg-white/20 text-white',
     metaBtn: 'text-white/95 hover:bg-white/20 rounded-md',
     addTask:
-      'bg-white text-red-700 border border-red-200/90 shadow-sm hover:bg-red-50 hover:shadow-md',
-    dragOver: 'ring-2 ring-red-400/55 ring-offset-2 ring-offset-rose-50/80',
+      'bg-white text-red-700 border border-red-200/90 shadow-sm hover:bg-red-50 hover:shadow-md dark:bg-slate-800/80 dark:text-red-300 dark:border-red-900/60 dark:hover:bg-slate-800',
+    dragOver: 'ring-2 ring-red-400/55 ring-offset-2 ring-offset-rose-50/80 dark:ring-red-500/60 dark:ring-offset-slate-900',
   },
   revision: {
-    surface: 'bg-gradient-to-b from-fuchsia-100/90 via-pink-50/85 to-fuchsia-50/35',
-    surfaceBorder: 'border-fuchsia-200/65',
-    headerPill: 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/25',
+    surface:
+      'bg-gradient-to-b from-fuchsia-100/90 via-pink-50/85 to-fuchsia-50/35 dark:from-fuchsia-950/45 dark:via-pink-950/35 dark:to-slate-900/40',
+    surfaceBorder: 'border-fuchsia-200/65 dark:border-fuchsia-900/50',
+    headerPill: 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/25 dark:bg-fuchsia-600 dark:shadow-fuchsia-950/50',
     iconCircle: 'bg-white/25 text-white ring-1 ring-white/30',
     iconClass: 'text-white',
     titleClass: 'text-white',
     countClass: 'bg-white/20 text-white',
     metaBtn: 'text-white/95 hover:bg-white/20 rounded-md',
     addTask:
-      'bg-white text-fuchsia-700 border border-fuchsia-200/90 shadow-sm hover:bg-fuchsia-50 hover:shadow-md',
-    dragOver: 'ring-2 ring-fuchsia-400/55 ring-offset-2 ring-offset-fuchsia-50/80',
+      'bg-white text-fuchsia-700 border border-fuchsia-200/90 shadow-sm hover:bg-fuchsia-50 hover:shadow-md dark:bg-slate-800/80 dark:text-fuchsia-300 dark:border-fuchsia-900/60 dark:hover:bg-slate-800',
+    dragOver: 'ring-2 ring-fuchsia-400/55 ring-offset-2 ring-offset-fuchsia-50/80 dark:ring-fuchsia-500/60 dark:ring-offset-slate-900',
   },
   complete: {
-    surface: 'bg-gradient-to-b from-emerald-100/90 via-green-50/85 to-emerald-50/35',
-    surfaceBorder: 'border-emerald-200/70',
-    headerPill: 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25',
+    surface:
+      'bg-gradient-to-b from-emerald-100/90 via-green-50/85 to-emerald-50/35 dark:from-emerald-950/45 dark:via-green-950/35 dark:to-slate-900/40',
+    surfaceBorder: 'border-emerald-200/70 dark:border-emerald-900/50',
+    headerPill: 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25 dark:bg-emerald-600 dark:shadow-emerald-950/50',
     iconCircle: 'bg-white/25 text-white ring-1 ring-white/30',
     iconClass: 'text-white',
     titleClass: 'text-white',
     countClass: 'bg-white/20 text-white',
     metaBtn: 'text-white/95 hover:bg-white/20 rounded-md',
     addTask:
-      'bg-white text-emerald-700 border border-emerald-200/90 shadow-sm hover:bg-emerald-50 hover:shadow-md',
-    dragOver: 'ring-2 ring-emerald-400/55 ring-offset-2 ring-offset-emerald-50/80',
+      'bg-white text-emerald-700 border border-emerald-200/90 shadow-sm hover:bg-emerald-50 hover:shadow-md dark:bg-slate-800/80 dark:text-emerald-300 dark:border-emerald-900/60 dark:hover:bg-slate-800',
+    dragOver: 'ring-2 ring-emerald-400/55 ring-offset-2 ring-offset-emerald-50/80 dark:ring-emerald-500/60 dark:ring-offset-slate-900',
   },
 };
 

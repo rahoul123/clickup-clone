@@ -36,8 +36,12 @@ const Login = () => {
       <div className="relative mx-auto flex min-h-[calc(100vh-5rem)] w-full max-w-md items-center">
         <div className="w-full rounded-2xl border border-border bg-card p-7 shadow-xl sm:p-8">
           <div className="mb-8 text-center">
-            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-violet-600 shadow-lg shadow-violet-500/30">
-              <span className="text-xl font-bold text-white">C</span>
+            <div className="mx-auto mb-5 flex h-16 w-48 items-center justify-center rounded-xl bg-slate-900 px-4 shadow-lg shadow-slate-900/30 dark:bg-slate-950 dark:shadow-slate-950/50">
+              <img
+                src="/logo-digitechio.png"
+                alt="DigitechIO"
+                className="h-8 w-auto max-w-full object-contain"
+              />
             </div>
             <p className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-violet-600 dark:text-violet-400">DigitechIO Workspace</p>
             <h1 className="text-2xl font-bold text-foreground sm:text-3xl">Welcome back</h1>

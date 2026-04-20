@@ -48,8 +48,12 @@ const Signup = () => {
     <div className="flex min-h-full items-center justify-center overflow-y-auto bg-background px-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <div className="w-12 h-12 rounded-xl bg-primary mx-auto mb-4 flex items-center justify-center">
-            <span className="text-primary-foreground font-bold text-xl">C</span>
+          <div className="mx-auto mb-5 flex h-16 w-48 items-center justify-center rounded-xl bg-slate-900 px-4 shadow-lg shadow-slate-900/30 dark:bg-slate-950 dark:shadow-slate-950/50">
+            <img
+              src="/logo-digitechio.png"
+              alt="DigitechIO"
+              className="h-8 w-auto max-w-full object-contain"
+            />
           </div>
           <h1 className="text-2xl font-bold text-foreground">Create your account</h1>
           <p className="text-sm text-muted-foreground mt-1">Start managing your projects</p>

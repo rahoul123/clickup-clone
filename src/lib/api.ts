@@ -76,6 +76,39 @@ export const api = {
         body: JSON.stringify(payload),
       }),
     deleteList: (listId: string) => request(`/lists/${listId}`, { method: 'DELETE' }),
+    updateListDetails: (
+      listId: string,
+      payload: {
+        name?: string;
+        color?: string | null;
+        icon?: string | null;
+        description?: string | null;
+        defaultTaskType?:
+          | 'task'
+          | 'milestone'
+          | 'form_response'
+          | 'meeting_note'
+          | 'process'
+          | 'project';
+      }
+    ) => request(`/lists/${listId}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+    duplicateList: (listId: string) =>
+      request(`/lists/${listId}/duplicate`, { method: 'POST' }),
+    reorderLists: (spaceId: string, orderedListIds: string[]) =>
+      request('/lists/reorder', {
+        method: 'POST',
+        body: JSON.stringify({ spaceId, orderedListIds }),
+      }),
+    archiveList: (listId: string) =>
+      request(`/lists/${listId}/archive`, { method: 'POST' }),
+    unarchiveList: (listId: string) =>
+      request(`/lists/${listId}/unarchive`, { method: 'POST' }),
+    getArchivedLists: (spaceId: string) =>
+      request(`/spaces/${spaceId}/archived-lists`),
+    favoriteList: (listId: string) =>
+      request(`/lists/${listId}/favorite`, { method: 'POST' }),
+    unfavoriteList: (listId: string) =>
+      request(`/lists/${listId}/favorite`, { method: 'DELETE' }),
     updateListKanban: (
       listId: string,
       payload: {

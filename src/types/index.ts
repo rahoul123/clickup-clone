@@ -98,6 +98,14 @@ export interface Folder {
   created_at: string;
 }
 
+export type ListDefaultTaskType =
+  | 'task'
+  | 'milestone'
+  | 'form_response'
+  | 'meeting_note'
+  | 'process'
+  | 'project';
+
 export interface List {
   id: string;
   folder_id?: string | null;
@@ -111,6 +119,20 @@ export interface List {
   is_restricted?: boolean;
   /** User ids explicitly granted access when `is_restricted` is true. */
   allowed_user_ids?: string[];
+  /** Sort position within a space (server-assigned). Lower = earlier. */
+  position?: number;
+  /** ISO timestamp if this list is archived (hidden from sidebar). */
+  archived_at?: string | null;
+  /** Optional custom hex color for the sidebar icon. */
+  color?: string | null;
+  /** Optional lucide icon key — falls back to the default list glyph. */
+  icon?: string | null;
+  /** Short free-text description shown on "List Info". */
+  description?: string | null;
+  /** Default task type for this list. */
+  default_task_type?: ListDefaultTaskType;
+  /** Per-user favorite flag, hydrated on fetch. */
+  is_favorited?: boolean;
   /** Admin / TL / Manager: column order (built-in statuses + custom_* ids). */
   kanban_column_order?: string[] | null;
   /** Optional display label overrides per column key. */

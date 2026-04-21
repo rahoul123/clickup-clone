@@ -12,6 +12,7 @@ import {
   TaskAssignee,
   TaskComment,
   User,
+  UserListFavorite,
   UserRole,
   WorkspaceDoc,
   Workspace,
@@ -100,7 +101,7 @@ function isValidTaskStatusForList(list, status) {
   return (list.kanbanCustomColumns || []).some((c) => c.id === status);
 }
 
-function serializeList(l) {
+function serializeList(l, options = {}) {
   const labelsRaw = l.kanbanColumnLabels;
   const plainLabels =
     labelsRaw && typeof labelsRaw === 'object' && !Array.isArray(labelsRaw) ? { ...labelsRaw } : {};
@@ -112,6 +113,17 @@ function serializeList(l) {
     color: normalizeHexColor(c.color),
   }));
   const orderResolved = resolveKanbanOrder(l);
+  // `options.favoriteIds` (Set<string>) lets the aggregated-navigation query
+  // hydrate per-user favorite state in a single pass instead of one query
+  // per list.
+  const favoriteIds = options.favoriteIds instanceof Set ? options.favoriteIds : null;
+  // `position` used to be absent from the schema — fall back to createdAt
+  // millis so older rows render in stable creation order without a migration.
+  const position =
+    typeof l.position === 'number' && Number.isFinite(l.position) && l.position !== 0
+      ? l.position
+      : createdAt.getTime();
+  const archivedAt = l.archivedAt ? new Date(l.archivedAt) : null;
   return {
     id: l._id,
     folder_id: l.folderId ?? null,
@@ -122,10 +134,35 @@ function serializeList(l) {
     is_shared_main_list: Boolean(l.isSharedMainList),
     is_restricted: Boolean(l.isRestricted),
     allowed_user_ids: Array.isArray(l.allowedUserIds) ? [...l.allowedUserIds] : [],
+    position,
+    archived_at: archivedAt ? archivedAt.toISOString() : null,
+    color: l.color ?? null,
+    icon: l.icon ?? null,
+    description: l.description ?? null,
+    default_task_type: l.defaultTaskType ?? 'task',
+    is_favorited: favoriteIds ? favoriteIds.has(l._id) : false,
     kanban_column_order: orderResolved,
     kanban_column_labels: plainLabels,
     kanban_custom_columns,
   };
+}
+
+/**
+ * Batch-serialize a list of raw list docs with per-user favorite state.
+ * Does a single `UserListFavorite.find` for the whole batch so we avoid
+ * an N+1 round-trip.
+ */
+async function serializeListsForUser(lists, userId) {
+  if (!Array.isArray(lists) || lists.length === 0) return [];
+  const listIds = lists.map((l) => l._id);
+  const favorites = await UserListFavorite.find({
+    userId,
+    listId: { $in: listIds },
+  })
+    .select({ listId: 1, _id: 0 })
+    .lean();
+  const favoriteIds = new Set(favorites.map((row) => row.listId));
+  return lists.map((l) => serializeList(l, { favoriteIds }));
 }
 
 function serializeSpace(s) {
@@ -535,13 +572,23 @@ async function loadAggregatedNavigation(userId) {
 
     // Restricted lists remain visible in the sidebar (name + lock icon) so the
     // viewer knows they exist and can request access. Actual task read/write
-    // is still blocked via `canAccessListForTasks`.
-    const ownLists = await List.find({ spaceId: { $in: [...ownAccessSpaceIds] } }).sort({ createdAt: 1 }).lean();
+    // is still blocked via `canAccessListForTasks`. Archived lists are filtered
+    // out — they can still be restored from the "Archived lists" panel.
+    const activeListFilter = { archivedAt: null };
+    let ownLists = await List.find({
+      spaceId: { $in: [...ownAccessSpaceIds] },
+      ...activeListFilter,
+    })
+      .sort({ position: 1, createdAt: 1 })
+      .lean();
     const crossLists = crossDeptMainSpaces.length
       ? await List.find({
           spaceId: { $in: crossDeptMainSpaces.map((s) => s._id) },
           isSharedMainList: true,
-        }).sort({ createdAt: 1 }).lean()
+          ...activeListFilter,
+        })
+          .sort({ position: 1, createdAt: 1 })
+          .lean()
       : [];
 
     // Auto-create a default list if user's own department has no lists at all.
@@ -930,7 +977,7 @@ export function buildRoutes({ realtime } = {}) {
         created_at: w.createdAt.toISOString(),
       })),
       spaces: spaces.map((s) => serializeSpace(s)),
-      lists: lists.map((l) => serializeList(l)),
+      lists: await serializeListsForUser(lists, userId),
       tasks,
       memberOptions,
       teamMembers,
@@ -1341,6 +1388,14 @@ export function buildRoutes({ realtime } = {}) {
       }
     }
 
+    // Append new lists to the end of the space's visible order so the sidebar
+    // stays stable for existing users. "End" == last active-list position + 1.
+    const lastActive = await List.findOne({ spaceId, archivedAt: null })
+      .sort({ position: -1, createdAt: -1 })
+      .select({ position: 1 })
+      .lean();
+    const nextPosition = (lastActive?.position ?? 0) + 1;
+
     const list = await List.create({
       _id: randomUUID(),
       spaceId,
@@ -1348,6 +1403,7 @@ export function buildRoutes({ realtime } = {}) {
       createdBy: req.session.userId,
       isRestricted: wantsRestriction,
       allowedUserIds: safeAllowedUserIds,
+      position: nextPosition,
     });
     res.json({
       list: serializeList(list.toObject()),
@@ -1402,14 +1458,44 @@ export function buildRoutes({ realtime } = {}) {
 
   router.patch('/lists/:listId', requireAuth, async (req, res) => {
     const { listId } = req.params;
-    const { kanbanColumnOrder, kanbanColumnLabels, addKanbanColumn, updateKanbanCustomColumn, deleteKanbanCustomColumn, deleteKanbanColumn } = req.body ?? {};
+    const {
+      kanbanColumnOrder,
+      kanbanColumnLabels,
+      addKanbanColumn,
+      updateKanbanCustomColumn,
+      deleteKanbanCustomColumn,
+      deleteKanbanColumn,
+      name,
+      color,
+      icon,
+      description,
+      defaultTaskType,
+    } = req.body ?? {};
     const list = await List.findById(listId);
     if (!list) return res.status(404).json({ message: 'List not found' });
     const space = await Space.findById(list.spaceId).lean();
     if (!space) return res.status(404).json({ message: 'Space not found' });
 
     const role = await getRole(space.workspaceId, req.session.userId);
-    if (!canManageStructure(role)) {
+    const isAppearanceUpdate =
+      name !== undefined ||
+      color !== undefined ||
+      icon !== undefined ||
+      description !== undefined ||
+      defaultTaskType !== undefined;
+
+    // Basic metadata (name / color / icon / description / default task type)
+    // is editable by anyone who can manage lists (admin/manager/TL), PLUS
+    // the list creator themselves. Column / kanban changes still require
+    // `canManageStructure`.
+    const canEditAppearance =
+      canManageStructure(role) || list.createdBy === req.session.userId;
+    if (isAppearanceUpdate && !canEditAppearance) {
+      return res
+        .status(403)
+        .json({ message: 'Only the list creator, admin, manager, or team lead can rename or restyle this list.' });
+    }
+    if (!isAppearanceUpdate && !canManageStructure(role)) {
       return res.status(403).json({ message: 'Only admin, manager, or team lead can change board columns.' });
     }
 
@@ -1419,12 +1505,38 @@ export function buildRoutes({ realtime } = {}) {
       addKanbanColumn !== undefined ||
       updateKanbanCustomColumn !== undefined ||
       deleteKanbanCustomColumn !== undefined ||
-      deleteKanbanColumn !== undefined;
+      deleteKanbanColumn !== undefined ||
+      isAppearanceUpdate;
     if (!hasWork) {
       return res.status(400).json({ message: 'Nothing to update' });
     }
 
     const $set = {};
+
+    if (name !== undefined) {
+      const trimmed = String(name ?? '').trim().slice(0, 120);
+      if (!trimmed) return res.status(400).json({ message: 'List name cannot be empty.' });
+      $set.name = trimmed;
+    }
+    if (color !== undefined) {
+      const raw = color === null ? null : String(color ?? '').trim();
+      $set.color = raw ? normalizeHexColor(raw) : null;
+    }
+    if (icon !== undefined) {
+      const raw = icon === null ? null : String(icon ?? '').trim().slice(0, 40);
+      $set.icon = raw || null;
+    }
+    if (description !== undefined) {
+      const raw = description === null ? null : String(description ?? '').slice(0, 500);
+      $set.description = raw || null;
+    }
+    if (defaultTaskType !== undefined) {
+      const allowed = ['task', 'milestone', 'form_response', 'meeting_note', 'process', 'project'];
+      if (!allowed.includes(defaultTaskType)) {
+        return res.status(400).json({ message: 'Invalid default task type.' });
+      }
+      $set.defaultTaskType = defaultTaskType;
+    }
 
     if (addKanbanColumn !== undefined) {
       const label = String(addKanbanColumn.label ?? '')
@@ -1633,8 +1745,224 @@ export function buildRoutes({ realtime } = {}) {
     }
     await Task.deleteMany({ listId });
     await List.deleteOne({ _id: listId });
+    await UserListFavorite.deleteMany({ listId });
 
     res.json({ ok: true });
+  });
+
+  /**
+   * Duplicate a list (metadata + tasks) inside the same space. Task IDs get
+   * fresh UUIDs so the board can render both side-by-side without collisions.
+   * Assignees / comments are intentionally NOT copied — those feel like
+   * "thread" state the new list should start fresh with.
+   */
+  router.post('/lists/:listId/duplicate', requireAuth, async (req, res) => {
+    const { listId } = req.params;
+    const source = await List.findById(listId).lean();
+    if (!source) return res.status(404).json({ message: 'List not found' });
+    const space = await Space.findById(source.spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+
+    const role = await getRole(space.workspaceId, req.session.userId);
+    if (!canCreateList(role)) {
+      return res.status(403).json({ message: 'Only admin, manager, or team lead can duplicate lists.' });
+    }
+
+    const lastActive = await List.findOne({ spaceId: source.spaceId, archivedAt: null })
+      .sort({ position: -1, createdAt: -1 })
+      .select({ position: 1 })
+      .lean();
+    const nextPosition = (lastActive?.position ?? 0) + 1;
+
+    const newListId = randomUUID();
+    const copy = await List.create({
+      _id: newListId,
+      spaceId: source.spaceId,
+      folderId: source.folderId ?? null,
+      name: `${source.name} (copy)`.slice(0, 120),
+      createdBy: req.session.userId,
+      // Duplicate never inherits restrictions — the caller can re-restrict it
+      // from the access modal. Keeps the action predictable and safe.
+      isRestricted: false,
+      allowedUserIds: [],
+      position: nextPosition,
+      color: source.color ?? null,
+      icon: source.icon ?? null,
+      description: source.description ?? null,
+      defaultTaskType: source.defaultTaskType ?? 'task',
+      kanbanColumnOrder: source.kanbanColumnOrder ?? undefined,
+      kanbanColumnLabels: source.kanbanColumnLabels ?? undefined,
+      kanbanCustomColumns: source.kanbanCustomColumns ?? undefined,
+    });
+
+    const sourceTasks = await Task.find({ listId: source._id, parentTaskId: null }).lean();
+    if (sourceTasks.length) {
+      const cloned = sourceTasks.map((t) => ({
+        _id: randomUUID(),
+        listId: newListId,
+        title: t.title,
+        description: t.description ?? null,
+        status: t.status,
+        priority: t.priority,
+        startDate: t.startDate ?? null,
+        dueDate: t.dueDate ?? null,
+        createdBy: req.session.userId,
+        parentTaskId: null,
+        checklist: Array.isArray(t.checklist)
+          ? t.checklist.map((c) => ({ ...c, done: false, assigneeIds: [] }))
+          : [],
+        relatedTaskIds: [],
+        defaultPermission: t.defaultPermission ?? 'full_edit',
+        collaborators: [],
+        isPrivate: false,
+      }));
+      await Task.insertMany(cloned);
+    }
+
+    res.json({ list: serializeList(copy.toObject(), { favoriteIds: new Set() }) });
+  });
+
+  /**
+   * Reorder lists within a single space. The client sends the full ordered
+   * array of list ids (restricted to active, i.e. non-archived lists) and we
+   * assign tight monotonically-increasing positions. Skipped ids fall back to
+   * their previous position so partial payloads are safe.
+   */
+  router.post('/lists/reorder', requireAuth, async (req, res) => {
+    const { spaceId, orderedListIds } = req.body ?? {};
+    if (!spaceId || !Array.isArray(orderedListIds) || orderedListIds.length === 0) {
+      return res.status(400).json({ message: 'spaceId and orderedListIds[] are required.' });
+    }
+    const space = await Space.findById(spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+
+    const role = await getRole(space.workspaceId, req.session.userId);
+    if (!canManageStructure(role)) {
+      return res.status(403).json({ message: 'Only admin, manager, or team lead can reorder lists.' });
+    }
+
+    const rows = await List.find({ spaceId, archivedAt: null })
+      .select({ _id: 1 })
+      .lean();
+    const validIds = new Set(rows.map((r) => r._id));
+    const filtered = orderedListIds.filter((id) => typeof id === 'string' && validIds.has(id));
+    if (filtered.length === 0) {
+      return res.status(400).json({ message: 'No matching active lists in that space.' });
+    }
+
+    // Normalize: the ids the client sent get positions 1..N. Any active list
+    // NOT in the payload keeps its relative order at the tail (position > N).
+    const ops = [];
+    filtered.forEach((id, idx) => {
+      ops.push({
+        updateOne: { filter: { _id: id }, update: { $set: { position: idx + 1 } } },
+      });
+    });
+    if (ops.length) {
+      await List.bulkWrite(ops);
+    }
+
+    res.json({ ok: true });
+  });
+
+  /**
+   * Soft-archive a list so the sidebar + default navigation drop it. Tasks
+   * and associated state are preserved; users can restore from the "Archived
+   * lists" panel. Admins or the list creator may archive.
+   */
+  router.post('/lists/:listId/archive', requireAuth, async (req, res) => {
+    const { listId } = req.params;
+    const list = await List.findById(listId);
+    if (!list) return res.status(404).json({ message: 'List not found' });
+    const space = await Space.findById(list.spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+
+    const role = await getRole(space.workspaceId, req.session.userId);
+    const isAdmin = role === 'admin';
+    const isCreator = list.createdBy === req.session.userId;
+    if (!isAdmin && !isCreator && !canDeleteList(role)) {
+      return res.status(403).json({ message: 'Not allowed to archive this list.' });
+    }
+    if (list.isSharedMainList && !isAdmin) {
+      return res.status(403).json({ message: 'Only admin can archive the shared cross-team list.' });
+    }
+
+    if (!list.archivedAt) {
+      list.archivedAt = new Date();
+      await list.save();
+    }
+    res.json({ list: serializeList(list.toObject(), { favoriteIds: new Set() }) });
+  });
+
+  /** Restore an archived list back into the sidebar. */
+  router.post('/lists/:listId/unarchive', requireAuth, async (req, res) => {
+    const { listId } = req.params;
+    const list = await List.findById(listId);
+    if (!list) return res.status(404).json({ message: 'List not found' });
+    const space = await Space.findById(list.spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+
+    const role = await getRole(space.workspaceId, req.session.userId);
+    const isAdmin = role === 'admin';
+    const isCreator = list.createdBy === req.session.userId;
+    if (!isAdmin && !isCreator && !canDeleteList(role)) {
+      return res.status(403).json({ message: 'Not allowed to restore this list.' });
+    }
+
+    if (list.archivedAt) {
+      const lastActive = await List.findOne({ spaceId: list.spaceId, archivedAt: null })
+        .sort({ position: -1, createdAt: -1 })
+        .select({ position: 1 })
+        .lean();
+      list.archivedAt = null;
+      list.position = (lastActive?.position ?? 0) + 1;
+      await list.save();
+    }
+    res.json({ list: serializeList(list.toObject(), { favoriteIds: new Set() }) });
+  });
+
+  /**
+   * List the archived lists in a space so the "Archived" modal can render
+   * them. Respects the same department-scope rule as navigation so a random
+   * employee can't peek into other departments' archives.
+   */
+  router.get('/spaces/:spaceId/archived-lists', requireAuth, async (req, res) => {
+    const { spaceId } = req.params;
+    const space = await Space.findById(spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+    const role = await getRole(space.workspaceId, req.session.userId);
+    if (!canManageStructure(role)) {
+      return res.status(403).json({ message: 'Not allowed to view archived lists here.' });
+    }
+    const rows = await List.find({ spaceId, archivedAt: { $ne: null } })
+      .sort({ archivedAt: -1 })
+      .lean();
+    res.json({ lists: await serializeListsForUser(rows, req.session.userId) });
+  });
+
+  /** Toggle the current user's "favorite" flag on a list. */
+  router.post('/lists/:listId/favorite', requireAuth, async (req, res) => {
+    const { listId } = req.params;
+    const list = await List.findById(listId).lean();
+    if (!list) return res.status(404).json({ message: 'List not found' });
+    // Favorites are purely user-local: anyone who can see the list in the
+    // sidebar may also favorite it. We just make sure the viewer has some
+    // connection to the workspace via membership.
+    const member = await WorkspaceMember.findOne({ userId: req.session.userId }).lean();
+    if (!member) return res.status(403).json({ message: 'No workspace access.' });
+
+    await UserListFavorite.updateOne(
+      { userId: req.session.userId, listId },
+      { $setOnInsert: { userId: req.session.userId, listId } },
+      { upsert: true }
+    );
+    res.json({ ok: true, is_favorited: true });
+  });
+
+  router.delete('/lists/:listId/favorite', requireAuth, async (req, res) => {
+    const { listId } = req.params;
+    await UserListFavorite.deleteOne({ userId: req.session.userId, listId });
+    res.json({ ok: true, is_favorited: false });
   });
 
   router.post('/workspaces/:workspaceId/invite', requireAuth, async (req, res) => {

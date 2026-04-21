@@ -100,6 +100,26 @@ const listSchema = new Schema(
     isRestricted: { type: Boolean, default: false },
     /** Explicit allow-list of userIds that may access a restricted list. */
     allowedUserIds: { type: [String], default: [] },
+    /**
+     * Integer-ish sort position within a space. New lists get `Date.now()` by
+     * default so existing ones (without this field) still render in creation
+     * order. Explicit reordering overwrites with tight monotonic indices.
+     */
+    position: { type: Number, default: 0, index: true },
+    /** When non-null, the list is "archived": hidden from sidebar + default navigation. */
+    archivedAt: { type: Date, default: null, index: true },
+    /** Optional custom color shown in the sidebar list icon. Hex string. */
+    color: { type: String, default: null },
+    /** Optional icon key (lucide-react name). Defaults to the built-in ListChecks glyph. */
+    icon: { type: String, default: null },
+    /** Short free-text description shown in the "List info" modal. */
+    description: { type: String, default: null },
+    /** Default task type for new tasks in this list (maps to task.type in the future). */
+    defaultTaskType: {
+      type: String,
+      enum: ['task', 'milestone', 'form_response', 'meeting_note', 'process', 'project'],
+      default: 'task',
+    },
     /** Permutation of task status keys — board column order (admin). */
     kanbanColumnOrder: { type: [String], default: undefined },
     /** Custom header labels per status key (admin). */
@@ -182,6 +202,15 @@ const taskSchema = new Schema(
   },
   { timestamps: true }
 );
+
+const userListFavoriteSchema = new Schema(
+  {
+    userId: { type: String, required: true, index: true },
+    listId: { type: String, required: true, index: true },
+  },
+  { timestamps: true }
+);
+userListFavoriteSchema.index({ userId: 1, listId: 1 }, { unique: true });
 
 const taskAssigneeSchema = new Schema(
   {
@@ -362,6 +391,7 @@ export const UserRole = model('UserRole', userRoleSchema);
 export const Space = model('Space', spaceSchema);
 export const Folder = model('Folder', folderSchema);
 export const List = model('List', listSchema);
+export const UserListFavorite = model('UserListFavorite', userListFavoriteSchema);
 export const Task = model('Task', taskSchema);
 export const TaskAssignee = model('TaskAssignee', taskAssigneeSchema);
 export const TaskComment = model('TaskComment', taskCommentSchema);

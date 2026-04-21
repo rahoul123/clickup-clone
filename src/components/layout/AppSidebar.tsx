@@ -19,12 +19,24 @@ import {
   MoreHorizontal,
   Lock,
   Check,
+  Star,
+  Pencil,
+  Copy,
+  Link as LinkIcon,
+  Palette,
+  Info,
+  ArrowUp,
+  ArrowDown,
+  Archive,
+  ArchiveRestore,
+  Share2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { ThemeToggle } from '@/components/ThemeToggle';
@@ -57,6 +69,36 @@ interface SidebarItem {
   canEditAccess?: boolean;
   /** For `type: 'list'` — current allow-list snapshot, used to pre-fill the edit modal. */
   allowedUserIds?: string[];
+  /** For `type: 'list'` — per-user favorite flag; when true, show filled star. */
+  isFavorited?: boolean;
+  /** For `type: 'list'` — optional custom color applied to the list chip. */
+  listColor?: string | null;
+  /** For `type: 'list'` — creator user id (used for gating the edit modal). */
+  listCreatedBy?: string | null;
+  /** For `type: 'list'` — creation timestamp (for the info modal). */
+  listCreatedAt?: string;
+  /** For `type: 'list'` — description (for info modal). */
+  listDescription?: string | null;
+  /** For `type: 'list'` — parent space id, used for reorder payloads. */
+  listSpaceId?: string;
+  /** For `type: 'list'` — siblings (list ids within the same space, ordered) for move up/down. */
+  listSiblingIds?: string[];
+}
+
+/** Shape the parent passes down for each list row (flattened for easier reuse). */
+interface ListRowProps {
+  id: string;
+  name: string;
+  isRestricted?: boolean;
+  accessLocked?: boolean;
+  canEditAccess?: boolean;
+  allowedUserIds?: string[];
+  isFavorited?: boolean;
+  color?: string | null;
+  icon?: string | null;
+  createdBy?: string | null;
+  createdAt?: string;
+  description?: string | null;
 }
 
 const navItems = [
@@ -81,14 +123,7 @@ interface AppSidebarProps {
       name: string;
       color?: string;
       isMasterFolder?: boolean;
-      lists?: Array<{
-        id: string;
-        name: string;
-        isRestricted?: boolean;
-        accessLocked?: boolean;
-        canEditAccess?: boolean;
-        allowedUserIds?: string[];
-      }>;
+      lists?: Array<ListRowProps>;
       children?: Array<{
         id: string;
         name: string;
@@ -98,14 +133,7 @@ interface AppSidebarProps {
         showDiscussion?: boolean;
         /** If true, clicking the space name opens the unified Space View. */
         spaceForView?: boolean;
-        lists: Array<{
-          id: string;
-          name: string;
-          isRestricted?: boolean;
-          accessLocked?: boolean;
-          canEditAccess?: boolean;
-          allowedUserIds?: string[];
-        }>;
+        lists: Array<ListRowProps>;
       }>;
     }>;
   }>;
@@ -128,6 +156,34 @@ interface AppSidebarProps {
     listId: string,
     payload: { isRestricted: boolean; allowedUserIds: string[] }
   ) => Promise<void> | void;
+  /** Rename / recolor / re-icon / re-describe an existing list. */
+  onUpdateListDetails?: (
+    listId: string,
+    payload: {
+      name?: string;
+      color?: string | null;
+      icon?: string | null;
+      description?: string | null;
+    }
+  ) => Promise<void> | void;
+  /** Duplicate a list in place — copies metadata and tasks. */
+  onDuplicateList?: (listId: string) => Promise<void> | void;
+  /** Reorder lists within a single space (full ordered id array). */
+  onReorderLists?: (spaceId: string, orderedListIds: string[]) => Promise<void> | void;
+  /** Archive a list (soft-delete / hide from sidebar). */
+  onArchiveList?: (listId: string) => Promise<void> | void;
+  /** Restore a previously archived list. */
+  onUnarchiveList?: (listId: string) => Promise<void> | void;
+  /** Toggle the viewer's favorite flag on a list. */
+  onToggleFavoriteList?: (listId: string, nextFavorited: boolean) => Promise<void> | void;
+  /** Fetch the archived list rows for a space (on-demand; drives the "Archived lists" modal). */
+  onFetchArchivedLists?: (spaceId: string) => Promise<Array<{
+    id: string;
+    name: string;
+    archived_at?: string | null;
+    is_restricted?: boolean;
+    created_at?: string;
+  }>>;
   /** Workspace members used to populate the "who can access" picker when making a restricted list. */
   memberOptions?: Array<{ id: string; label: string }>;
   /** Current viewer — auto-included as an allowed user so the creator never locks themselves out. */
@@ -167,6 +223,13 @@ export function AppSidebar({
   onCreateSpace,
   onCreateList,
   onUpdateListAccess,
+  onUpdateListDetails,
+  onDuplicateList,
+  onReorderLists,
+  onArchiveList,
+  onUnarchiveList,
+  onToggleFavoriteList,
+  onFetchArchivedLists,
   onDeleteSpace,
   onDeleteList,
   onInvite,
@@ -349,6 +412,126 @@ export function AppSidebar({
     if (!query) return memberOptions;
     return memberOptions.filter((m) => m.label.toLowerCase().includes(query));
   }, [memberOptions, editAccessMemberQuery]);
+
+  // ---------- Rename / Color & Icon / Info / Archived modals ----------
+  const [renameState, setRenameState] = useState<{ listId: string; name: string } | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+
+  const openRenameModal = (list: { id: string; name: string }) => {
+    setRenameState({ listId: list.id, name: list.name });
+    setRenameValue(list.name);
+  };
+  const submitRename = async () => {
+    if (!renameState || !onUpdateListDetails) return;
+    const trimmed = renameValue.trim();
+    if (!trimmed || trimmed === renameState.name) {
+      setRenameState(null);
+      return;
+    }
+    await onUpdateListDetails(renameState.listId, { name: trimmed });
+    setRenameState(null);
+  };
+
+  const [appearanceState, setAppearanceState] = useState<{
+    listId: string;
+    name: string;
+    color: string | null;
+    icon: string | null;
+  } | null>(null);
+
+  const openAppearanceModal = (list: {
+    id: string;
+    name: string;
+    color?: string | null;
+    icon?: string | null;
+  }) => {
+    setAppearanceState({
+      listId: list.id,
+      name: list.name,
+      color: list.color ?? null,
+      icon: list.icon ?? null,
+    });
+  };
+  const submitAppearance = async () => {
+    if (!appearanceState || !onUpdateListDetails) return;
+    await onUpdateListDetails(appearanceState.listId, {
+      color: appearanceState.color,
+      icon: appearanceState.icon,
+    });
+    setAppearanceState(null);
+  };
+
+  const [infoState, setInfoState] = useState<{
+    listId: string;
+    name: string;
+    createdBy: string | null;
+    createdAt?: string;
+    description: string | null;
+    isRestricted: boolean;
+    allowedUserCount: number;
+  } | null>(null);
+
+  const [archivedState, setArchivedState] = useState<{
+    spaceId: string;
+    spaceName: string;
+    loading: boolean;
+    rows: Array<{ id: string; name: string; archived_at?: string | null; created_at?: string }>;
+  } | null>(null);
+
+  const openArchivedModal = async (spaceId: string, spaceName: string) => {
+    if (!onFetchArchivedLists) return;
+    setArchivedState({ spaceId, spaceName, loading: true, rows: [] });
+    try {
+      const rows = await onFetchArchivedLists(spaceId);
+      setArchivedState({ spaceId, spaceName, loading: false, rows });
+    } catch (err) {
+      console.error('Failed to load archived lists', err);
+      setArchivedState({ spaceId, spaceName, loading: false, rows: [] });
+    }
+  };
+
+  const handleRestoreArchived = async (listId: string) => {
+    if (!onUnarchiveList) return;
+    await onUnarchiveList(listId);
+    setArchivedState((prev) =>
+      prev ? { ...prev, rows: prev.rows.filter((r) => r.id !== listId) } : prev
+    );
+  };
+
+  const copyListLink = async (listId: string) => {
+    const link = `${window.location.origin}/?list=${listId}`;
+    try {
+      await navigator.clipboard.writeText(link);
+    } catch {
+      // Clipboard can fail in non-secure contexts (e.g. Electron file://) —
+      // fall back to a temporary textarea so the copy still lands.
+      const textarea = document.createElement('textarea');
+      textarea.value = link;
+      textarea.style.position = 'fixed';
+      textarea.style.top = '-1000px';
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand('copy');
+      } finally {
+        document.body.removeChild(textarea);
+      }
+    }
+  };
+
+  /** Compact palette of "safe" swatch colors for the list color picker. */
+  const LIST_COLOR_SWATCHES: Array<{ value: string | null; label: string; sample: string }> = [
+    { value: null, label: 'Default', sample: 'hsl(var(--sidebar-muted))' },
+    { value: '#F97316', label: 'Orange', sample: '#F97316' },
+    { value: '#F59E0B', label: 'Amber', sample: '#F59E0B' },
+    { value: '#10B981', label: 'Emerald', sample: '#10B981' },
+    { value: '#06B6D4', label: 'Cyan', sample: '#06B6D4' },
+    { value: '#3B82F6', label: 'Blue', sample: '#3B82F6' },
+    { value: '#6366F1', label: 'Indigo', sample: '#6366F1' },
+    { value: '#8B5CF6', label: 'Violet', sample: '#8B5CF6' },
+    { value: '#EC4899', label: 'Pink', sample: '#EC4899' },
+    { value: '#EF4444', label: 'Red', sample: '#EF4444' },
+  ];
   const activeWorkspaceSection = workspaceSections.find((s) => s.id === activeWorkspaceId) ?? workspaceSections[0];
   const inviteDepartmentOptions = (activeWorkspaceSection?.spaces || [])
     .flatMap((space) => (space.isMasterFolder ? space.children ?? [] : []))
@@ -367,6 +550,204 @@ export function AppSidebar({
       else next.add(id);
       return next;
     });
+  };
+
+  // Persistent favorite star + ⋯ context menu for list rows. Star is always
+  // visible if favorited, and also appears on hover; the ⋯ trigger is
+  // hover-only so inactive rows look clean.
+  const renderListRowActions = (item: SidebarItem) => {
+    if (item.type !== 'list') return null;
+    // Employees / guests see only read-safe actions (Favorite, Copy link,
+    // List info). Admin/Manager/TL see everything. A list's creator also
+    // sees the edit-their-own-list actions (rename / appearance / archive)
+    // so they can tidy up their own board.
+    const isOwnList = Boolean(
+      item.listCreatedBy && currentUserId && item.listCreatedBy === currentUserId
+    );
+    const canManageThisList = canManageLists || isOwnList;
+    const canEditAppearance = canManageLists || isOwnList;
+    const canDuplicate = Boolean(onDuplicateList) && canManageLists;
+    const canMove = Boolean(onReorderLists) && canManageLists && (item.listSiblingIds?.length ?? 0) > 1;
+    const canArchive = Boolean(onArchiveList) && canManageThisList;
+    const canDelete = canManageLists;
+    const siblings = item.listSiblingIds ?? [];
+    const myIndex = siblings.indexOf(item.id);
+    const canMoveUp = canMove && myIndex > 0;
+    const canMoveDown = canMove && myIndex >= 0 && myIndex < siblings.length - 1;
+    // "Admin-ish" section has any of these actions? If not, don't even
+    // render the separators/group — keeps the menu visually tight for
+    // employees who only see the top 3 items.
+    const showAppearanceGroup =
+      Boolean(onUpdateListDetails) && canEditAppearance;
+    const showStructureGroup =
+      canDuplicate || canMove || (item.canEditAccess && Boolean(onUpdateListAccess));
+    const showDangerGroup = canArchive || canDelete;
+    const moveWithin = (delta: -1 | 1) => {
+      if (!onReorderLists || !item.listSpaceId || myIndex < 0) return;
+      const nextIndex = myIndex + delta;
+      if (nextIndex < 0 || nextIndex >= siblings.length) return;
+      const next = siblings.slice();
+      const [moved] = next.splice(myIndex, 1);
+      next.splice(nextIndex, 0, moved);
+      onReorderLists(item.listSpaceId, next);
+    };
+
+    return (
+      <div className="flex items-center gap-0.5">
+        {/* Favorite star — stays visible whenever the list is favorited so users
+            can scan their pinned lists quickly; hover reveals it otherwise. */}
+        {onToggleFavoriteList && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleFavoriteList(item.id, !item.isFavorited);
+            }}
+            className={cn(
+              'rounded p-1 transition-colors',
+              item.isFavorited
+                ? 'text-amber-400 hover:text-amber-500'
+                : 'text-sidebar-muted opacity-0 group-hover:opacity-100 hover:text-amber-500'
+            )}
+            title={item.isFavorited ? 'Unfavorite list' : 'Add to favorites'}
+            aria-label={item.isFavorited ? 'Unfavorite list' : 'Favorite list'}
+          >
+            <Star
+              className={cn('h-3.5 w-3.5', item.isFavorited && 'fill-current')}
+            />
+          </button>
+        )}
+
+        <div className="opacity-0 transition-opacity group-hover:opacity-100">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                onClick={(e) => e.stopPropagation()}
+                className="rounded p-1 text-sidebar-muted transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                aria-label="List options"
+                title="More actions"
+              >
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              {onToggleFavoriteList && (
+                <DropdownMenuItem
+                  onSelect={() => onToggleFavoriteList(item.id, !item.isFavorited)}
+                >
+                  <Star
+                    className={cn('h-3.5 w-3.5 mr-2', item.isFavorited && 'fill-current text-amber-500')}
+                  />
+                  {item.isFavorited ? 'Remove from favorites' : 'Favorite'}
+                </DropdownMenuItem>
+              )}
+              {onUpdateListDetails && canEditAppearance && (
+                <DropdownMenuItem
+                  onSelect={() =>
+                    openRenameModal({ id: item.id, name: item.name })
+                  }
+                >
+                  <Pencil className="h-3.5 w-3.5 mr-2" /> Rename
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuItem onSelect={() => copyListLink(item.id)}>
+                <LinkIcon className="h-3.5 w-3.5 mr-2" /> Copy link
+              </DropdownMenuItem>
+
+              {showAppearanceGroup && <DropdownMenuSeparator />}
+
+              {showAppearanceGroup && (
+                <DropdownMenuItem
+                  onSelect={() =>
+                    openAppearanceModal({
+                      id: item.id,
+                      name: item.name,
+                      color: item.listColor ?? null,
+                    })
+                  }
+                >
+                  <Palette className="h-3.5 w-3.5 mr-2" /> Color & icon
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuItem
+                onSelect={() =>
+                  setInfoState({
+                    listId: item.id,
+                    name: item.name,
+                    createdBy: item.listCreatedBy ?? null,
+                    createdAt: item.listCreatedAt,
+                    description: item.listDescription ?? null,
+                    isRestricted: Boolean(item.isRestricted),
+                    allowedUserCount: (item.allowedUserIds ?? []).length,
+                  })
+                }
+              >
+                <Info className="h-3.5 w-3.5 mr-2" /> List info
+              </DropdownMenuItem>
+
+              {showStructureGroup && <DropdownMenuSeparator />}
+
+              {canDuplicate && (
+                <DropdownMenuItem onSelect={() => onDuplicateList?.(item.id)}>
+                  <Copy className="h-3.5 w-3.5 mr-2" /> Duplicate
+                </DropdownMenuItem>
+              )}
+              {canMove && (
+                <>
+                  <DropdownMenuItem
+                    disabled={!canMoveUp}
+                    onSelect={() => moveWithin(-1)}
+                  >
+                    <ArrowUp className="h-3.5 w-3.5 mr-2" /> Move up
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={!canMoveDown}
+                    onSelect={() => moveWithin(1)}
+                  >
+                    <ArrowDown className="h-3.5 w-3.5 mr-2" /> Move down
+                  </DropdownMenuItem>
+                </>
+              )}
+              {item.canEditAccess && onUpdateListAccess && (
+                <DropdownMenuItem
+                  onSelect={() =>
+                    openEditAccessModal({
+                      id: item.id,
+                      name: item.name,
+                      isRestricted: item.isRestricted,
+                      allowedUserIds: item.allowedUserIds,
+                    })
+                  }
+                >
+                  <Share2 className="h-3.5 w-3.5 mr-2" />
+                  Sharing &amp; Permissions
+                </DropdownMenuItem>
+              )}
+
+              {showDangerGroup && <DropdownMenuSeparator />}
+
+              {canArchive && (
+                <DropdownMenuItem
+                  onSelect={() => onArchiveList?.(item.id)}
+                  className="text-amber-600 focus:bg-amber-500/10 focus:text-amber-700"
+                >
+                  <Archive className="h-3.5 w-3.5 mr-2" /> Archive
+                </DropdownMenuItem>
+              )}
+              {canDelete && (
+                <DropdownMenuItem
+                  onSelect={() => onDeleteList(item.id, item.name)}
+                  className="text-destructive focus:bg-destructive/10 focus:text-destructive"
+                >
+                  <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+    );
   };
 
   const renderItem = (item: SidebarItem, depth = 0) => {
@@ -440,6 +821,14 @@ export function AppSidebar({
                 className="w-4 h-4 flex-shrink-0 text-amber-500"
                 aria-label="Restricted list"
               />
+            ) : item.listColor ? (
+              <span
+                className="inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-[4px]"
+                style={{ backgroundColor: item.listColor }}
+                aria-hidden
+              >
+                <ListChecks className="h-3 w-3 text-white/90" />
+              </span>
             ) : (
               <ListChecks className="w-4 h-4 flex-shrink-0 text-sidebar-muted" />
             )
@@ -511,6 +900,26 @@ export function AppSidebar({
               >
                 <Plus className="w-3.5 h-3.5" />
               </button>
+              {onFetchArchivedLists && canManageLists && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={(e) => e.stopPropagation()}
+                      className="rounded p-1 text-sidebar-muted transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                      aria-label="Space options"
+                      title="Space options"
+                    >
+                      <MoreHorizontal className="w-3.5 h-3.5" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-48">
+                    <DropdownMenuItem onSelect={() => openArchivedModal(item.id, item.name)}>
+                      <Archive className="h-3.5 w-3.5 mr-2" /> View archived lists
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
               <button
                 type="button"
                 disabled={!canDeleteSpaces}
@@ -526,42 +935,7 @@ export function AppSidebar({
               </button>
             </div>
           )}
-          {item.type === 'list' && (
-            <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-              {item.canEditAccess && onUpdateListAccess && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openEditAccessModal({
-                      id: item.id,
-                      name: item.name,
-                      isRestricted: item.isRestricted,
-                      allowedUserIds: item.allowedUserIds,
-                    });
-                  }}
-                  className="text-sidebar-muted transition-colors hover:text-amber-500"
-                  title={item.isRestricted ? 'Edit access' : 'Restrict list / manage access'}
-                  aria-label="Edit list access"
-                >
-                  <Lock className="w-3.5 h-3.5" />
-                </button>
-              )}
-              <button
-                type="button"
-                disabled={!canManageLists}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (!canManageLists) return;
-                  onDeleteList(item.id, item.name);
-                }}
-                className="text-sidebar-muted transition-colors hover:text-destructive disabled:cursor-not-allowed disabled:opacity-30"
-                title="Delete list"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
+          {item.type === 'list' && renderListRowActions(item)}
         </button>
 
         {hasChildren && isExpanded && (
@@ -670,26 +1044,37 @@ export function AppSidebar({
                   color: space.color,
                   type: 'space',
                   isMasterFolder: true,
-                  children: (space.children ?? []).map((child) => ({
-                    id: child.id,
-                    name: child.name,
-                    color: child.color,
-                    openListId: child.spaceForView ? undefined : child.lists[0]?.id,
-                    spaceForView: child.spaceForView,
-                    noExpand: child.noExpand,
-                    type: 'space' as const,
-                    children: child.lists.map((list) => ({
-                      id: list.id,
-                      name: list.name,
-                      type: 'list' as const,
-                      isRestricted: list.isRestricted,
-                      accessLocked: list.accessLocked,
-                      canEditAccess: list.canEditAccess,
-                      allowedUserIds: list.allowedUserIds,
-                    })),
-                  })),
+                  children: (space.children ?? []).map((child) => {
+                    const siblingIds = child.lists.map((l) => l.id);
+                    return {
+                      id: child.id,
+                      name: child.name,
+                      color: child.color,
+                      openListId: child.spaceForView ? undefined : child.lists[0]?.id,
+                      spaceForView: child.spaceForView,
+                      noExpand: child.noExpand,
+                      type: 'space' as const,
+                      children: child.lists.map((list) => ({
+                        id: list.id,
+                        name: list.name,
+                        type: 'list' as const,
+                        isRestricted: list.isRestricted,
+                        accessLocked: list.accessLocked,
+                        canEditAccess: list.canEditAccess,
+                        allowedUserIds: list.allowedUserIds,
+                        isFavorited: list.isFavorited,
+                        listColor: list.color ?? null,
+                        listCreatedBy: list.createdBy ?? null,
+                        listCreatedAt: list.createdAt,
+                        listDescription: list.description ?? null,
+                        listSpaceId: child.id,
+                        listSiblingIds: siblingIds,
+                      })),
+                    };
+                  }),
                 });
               }
+              const siblingIds = (space.lists ?? []).map((l) => l.id);
               return renderItem({
                 id: space.id,
                 name: space.name,
@@ -703,6 +1088,13 @@ export function AppSidebar({
                   accessLocked: list.accessLocked,
                   canEditAccess: list.canEditAccess,
                   allowedUserIds: list.allowedUserIds,
+                  isFavorited: list.isFavorited,
+                  listColor: list.color ?? null,
+                  listCreatedBy: list.createdBy ?? null,
+                  listCreatedAt: list.createdAt,
+                  listDescription: list.description ?? null,
+                  listSpaceId: space.id,
+                  listSiblingIds: siblingIds,
                 })),
               });
             })}
@@ -1148,6 +1540,274 @@ export function AppSidebar({
               </button>
             </div>
           </form>
+        </div>
+      </div>
+    )}
+
+    {/* Rename list modal ----------------------------------------------- */}
+    {renameState && (
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+        <div className="w-full max-w-sm rounded-xl border border-border bg-background shadow-2xl">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h3 className="text-sm font-semibold">Rename list</h3>
+            <button
+              type="button"
+              onClick={() => setRenameState(null)}
+              className="text-muted-foreground hover:text-foreground"
+              aria-label="Close rename"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              submitRename();
+            }}
+            className="p-4 space-y-3"
+          >
+            <label className="text-xs text-muted-foreground">List name</label>
+            <input
+              autoFocus
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setRenameState(null);
+              }}
+              className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+              maxLength={120}
+            />
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setRenameState(null)}
+                className="h-9 rounded-md border border-input px-3 text-sm transition-colors hover:bg-accent"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!renameValue.trim() || renameValue.trim() === renameState.name}
+                className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Save
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    )}
+
+    {/* Color & icon modal --------------------------------------------- */}
+    {appearanceState && (
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+        <div className="w-full max-w-sm rounded-xl border border-border bg-background shadow-2xl">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h3 className="text-sm font-semibold">
+              Appearance — {appearanceState.name}
+            </h3>
+            <button
+              type="button"
+              onClick={() => setAppearanceState(null)}
+              className="text-muted-foreground hover:text-foreground"
+              aria-label="Close appearance"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="p-4 space-y-4">
+            <div>
+              <label className="text-xs text-muted-foreground">Color</label>
+              <div className="mt-2 grid grid-cols-5 gap-2">
+                {LIST_COLOR_SWATCHES.map((swatch) => {
+                  const selected = appearanceState.color === swatch.value;
+                  return (
+                    <button
+                      key={swatch.label}
+                      type="button"
+                      onClick={() =>
+                        setAppearanceState((prev) =>
+                          prev ? { ...prev, color: swatch.value } : prev
+                        )
+                      }
+                      className={cn(
+                        'flex h-10 items-center justify-center rounded-md border text-[11px] font-medium transition-all',
+                        selected
+                          ? 'border-primary ring-2 ring-primary/40'
+                          : 'border-input hover:border-foreground/30'
+                      )}
+                      title={swatch.label}
+                    >
+                      <span
+                        className="h-5 w-5 rounded"
+                        style={{ backgroundColor: swatch.sample }}
+                      />
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-2 text-[11px] text-muted-foreground">
+                Choose a tint for the list chip in the sidebar.
+              </p>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+            <button
+              type="button"
+              onClick={() => setAppearanceState(null)}
+              className="h-9 rounded-md border border-input px-3 text-sm transition-colors hover:bg-accent"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={submitAppearance}
+              className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+            >
+              Save
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* List info modal ------------------------------------------------- */}
+    {infoState && (
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+        <div className="w-full max-w-sm rounded-xl border border-border bg-background shadow-2xl">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h3 className="text-sm font-semibold">List info</h3>
+            <button
+              type="button"
+              onClick={() => setInfoState(null)}
+              className="text-muted-foreground hover:text-foreground"
+              aria-label="Close info"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="p-4 space-y-3 text-sm">
+            <div>
+              <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Name</p>
+              <p className="font-medium">{infoState.name}</p>
+            </div>
+            {infoState.description && (
+              <div>
+                <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Description</p>
+                <p className="text-foreground/90">{infoState.description}</p>
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Created by</p>
+                <p className="font-medium">
+                  {(infoState.createdBy
+                    ? memberOptions.find((m) => m.id === infoState.createdBy)?.label
+                    : null) ?? '—'}
+                </p>
+              </div>
+              <div>
+                <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Created</p>
+                <p className="font-medium">
+                  {infoState.createdAt
+                    ? new Date(infoState.createdAt).toLocaleDateString(undefined, {
+                        year: 'numeric',
+                        month: 'short',
+                        day: '2-digit',
+                      })
+                    : '—'}
+                </p>
+              </div>
+            </div>
+            <div className="rounded-md border border-border bg-muted/30 p-3">
+              <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Access</p>
+              <p className="mt-1 font-medium">
+                {infoState.isRestricted ? (
+                  <>
+                    <Lock className="mr-1 inline h-3.5 w-3.5 text-amber-500" />
+                    Restricted — {infoState.allowedUserCount} user
+                    {infoState.allowedUserCount === 1 ? '' : 's'} allowed
+                  </>
+                ) : (
+                  'Open to everyone in the space'
+                )}
+              </p>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+            <button
+              type="button"
+              onClick={() => setInfoState(null)}
+              className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* Archived lists viewer ------------------------------------------ */}
+    {archivedState && (
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+        <div className="w-full max-w-md rounded-xl border border-border bg-background shadow-2xl">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h3 className="text-sm font-semibold">
+              Archived lists — {archivedState.spaceName}
+            </h3>
+            <button
+              type="button"
+              onClick={() => setArchivedState(null)}
+              className="text-muted-foreground hover:text-foreground"
+              aria-label="Close archived"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="max-h-[60vh] overflow-y-auto p-4">
+            {archivedState.loading ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>
+            ) : archivedState.rows.length === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                No archived lists here.
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {archivedState.rows.map((row) => (
+                  <li
+                    key={row.id}
+                    className="flex items-center justify-between gap-3 rounded-md border border-border bg-muted/20 px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium">{row.name}</p>
+                      <p className="text-[11px] text-muted-foreground">
+                        Archived{' '}
+                        {row.archived_at
+                          ? new Date(row.archived_at).toLocaleDateString()
+                          : '—'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleRestoreArchived(row.id)}
+                      className="inline-flex items-center gap-1 rounded-md border border-input bg-background px-2.5 py-1 text-xs font-medium transition-colors hover:bg-accent"
+                    >
+                      <ArchiveRestore className="h-3.5 w-3.5" /> Restore
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+            <button
+              type="button"
+              onClick={() => setArchivedState(null)}
+              className="h-9 rounded-md border border-input px-3 text-sm transition-colors hover:bg-accent"
+            >
+              Close
+            </button>
+          </div>
         </div>
       </div>
     )}

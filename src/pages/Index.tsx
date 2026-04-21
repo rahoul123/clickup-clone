@@ -106,6 +106,13 @@ const Index = () => {
       if (wsRole === 'admin') return true;
       return Boolean(myUserId && l.created_by === myUserId);
     };
+    // Fallback to createdAt so legacy rows (position === 0 / undefined) still
+    // show in the order they were created.
+    const sortByListPosition = (a: List, b: List) => {
+      const ap = typeof a.position === 'number' && a.position > 0 ? a.position : Date.parse(a.created_at) || 0;
+      const bp = typeof b.position === 'number' && b.position > 0 ? b.position : Date.parse(b.created_at) || 0;
+      return ap - bp;
+    };
     return workspaces.map((ws) => {
       const wsRole = rolesByWorkspaceId[ws.id] ?? 'employee';
       const isAdmin = wsRole === 'admin';
@@ -134,7 +141,9 @@ const Index = () => {
                   showDiscussion: canDiscuss,
                   spaceForView: canDiscuss,
                   lists: lists
-                    .filter((l) => l.space_id === space.id)
+                    .filter((l) => l.space_id === space.id && !l.archived_at)
+                    .slice()
+                    .sort(sortByListPosition)
                     .map((l) => ({
                       id: l.id,
                       name: l.name,
@@ -142,6 +151,12 @@ const Index = () => {
                       accessLocked: isAccessLocked(l, wsRole),
                       canEditAccess: canEditAccess(l, wsRole),
                       allowedUserIds: Array.isArray(l.allowed_user_ids) ? [...l.allowed_user_ids] : [],
+                      isFavorited: Boolean(l.is_favorited),
+                      color: l.color ?? null,
+                      icon: l.icon ?? null,
+                      createdBy: l.created_by ?? null,
+                      createdAt: l.created_at,
+                      description: l.description ?? null,
                     })),
                 };
               }),
@@ -157,7 +172,9 @@ const Index = () => {
           name: space.name,
           color: space.color,
           lists: lists
-            .filter((l) => l.space_id === space.id)
+            .filter((l) => l.space_id === space.id && !l.archived_at)
+            .slice()
+            .sort(sortByListPosition)
             .map((l) => ({
               id: l.id,
               name: l.name,
@@ -165,6 +182,12 @@ const Index = () => {
               accessLocked: isAccessLocked(l, wsRole),
               canEditAccess: canEditAccess(l, wsRole),
               allowedUserIds: Array.isArray(l.allowed_user_ids) ? [...l.allowed_user_ids] : [],
+              isFavorited: Boolean(l.is_favorited),
+              color: l.color ?? null,
+              icon: l.icon ?? null,
+              createdBy: l.created_by ?? null,
+              createdAt: l.created_at,
+              description: l.description ?? null,
             })),
         })),
       };
@@ -656,9 +679,88 @@ const Index = () => {
     payload: { isRestricted: boolean; allowedUserIds: string[] }
   ) => {
     const { list: updated } = await api.app.updateListAccess(listId, payload);
-    // Merge the fresh server copy into local state so the sidebar re-renders
-    // with the new lock / allow-list state without needing a full reload.
     setLists((prev) => prev.map((l) => (l.id === updated.id ? { ...l, ...updated } : l)));
+  };
+
+  const mergeListIntoState = (updated: List) => {
+    setLists((prev) => {
+      if (prev.some((l) => l.id === updated.id)) {
+        return prev.map((l) => (l.id === updated.id ? { ...l, ...updated } : l));
+      }
+      return [...prev, updated];
+    });
+  };
+
+  const updateListDetails = async (
+    listId: string,
+    payload: {
+      name?: string;
+      color?: string | null;
+      icon?: string | null;
+      description?: string | null;
+      defaultTaskType?: List['default_task_type'];
+    }
+  ) => {
+    const { list: updated } = await api.app.updateListDetails(listId, payload);
+    mergeListIntoState(updated as List);
+  };
+
+  const duplicateList = async (listId: string) => {
+    const { list: created } = await api.app.duplicateList(listId);
+    setLists((prev) => [...prev, created]);
+    // Jump to the new copy so the user sees the result immediately.
+    setActiveList(created.id);
+    setTasks([]);
+  };
+
+  const reorderLists = async (spaceId: string, orderedListIds: string[]) => {
+    // Optimistic reorder — rewrite local `position` to match payload so the
+    // sidebar snaps into place instantly; a failure just re-fetches by
+    // bootstrap on next sign-in.
+    setLists((prev) => {
+      const positionByListId = new Map<string, number>();
+      orderedListIds.forEach((id, idx) => positionByListId.set(id, idx + 1));
+      return prev.map((l) =>
+        positionByListId.has(l.id) ? { ...l, position: positionByListId.get(l.id) } : l
+      );
+    });
+    try {
+      await api.app.reorderLists(spaceId, orderedListIds);
+    } catch (err) {
+      console.error('Failed to reorder lists', err);
+    }
+  };
+
+  const archiveList = async (listId: string) => {
+    const { list: updated } = await api.app.archiveList(listId);
+    setLists((prev) => prev.map((l) => (l.id === updated.id ? { ...l, ...updated } : l)));
+    // If we just archived the active list, switch to any remaining active one.
+    if (activeList === listId) {
+      const fallback = (lists as List[]).find((l) => l.id !== listId && !l.archived_at);
+      setActiveList(fallback?.id ?? null);
+      setTasks([]);
+    }
+  };
+
+  const unarchiveList = async (listId: string) => {
+    const { list: updated } = await api.app.unarchiveList(listId);
+    setLists((prev) => prev.map((l) => (l.id === updated.id ? { ...l, ...updated } : l)));
+  };
+
+  const toggleFavoriteList = async (listId: string, nextFavorited: boolean) => {
+    setLists((prev) => prev.map((l) => (l.id === listId ? { ...l, is_favorited: nextFavorited } : l)));
+    try {
+      if (nextFavorited) await api.app.favoriteList(listId);
+      else await api.app.unfavoriteList(listId);
+    } catch (err) {
+      setLists((prev) => prev.map((l) => (l.id === listId ? { ...l, is_favorited: !nextFavorited } : l)));
+      console.error('Failed to toggle favorite', err);
+    }
+  };
+
+  const fetchArchivedLists = async (spaceId: string): Promise<List[]> => {
+    const { lists: archived } = await api.app.getArchivedLists(spaceId);
+    return archived as List[];
   };
 
   const deleteSpace = async (spaceId: string, spaceName: string) => {
@@ -1172,6 +1274,41 @@ const Index = () => {
             window.alert((error as Error)?.message || 'Access update failed.');
           })
         }
+        onUpdateListDetails={(listId, payload) =>
+          updateListDetails(listId, payload).catch((error) => {
+            console.error('Failed to update list', error);
+            window.alert((error as Error)?.message || 'Update failed.');
+          })
+        }
+        onDuplicateList={(listId) =>
+          duplicateList(listId).catch((error) => {
+            console.error('Failed to duplicate list', error);
+            window.alert((error as Error)?.message || 'Duplicate failed.');
+          })
+        }
+        onReorderLists={(spaceId, orderedListIds) =>
+          reorderLists(spaceId, orderedListIds).catch((error) => {
+            console.error('Failed to reorder lists', error);
+          })
+        }
+        onArchiveList={(listId) =>
+          archiveList(listId).catch((error) => {
+            console.error('Failed to archive list', error);
+            window.alert((error as Error)?.message || 'Archive failed.');
+          })
+        }
+        onUnarchiveList={(listId) =>
+          unarchiveList(listId).catch((error) => {
+            console.error('Failed to unarchive list', error);
+            window.alert((error as Error)?.message || 'Restore failed.');
+          })
+        }
+        onToggleFavoriteList={(listId, nextFavorited) =>
+          toggleFavoriteList(listId, nextFavorited).catch((error) => {
+            console.error('Failed to toggle favorite', error);
+          })
+        }
+        onFetchArchivedLists={fetchArchivedLists}
         memberOptions={memberOptions}
         currentUserId={user?.id ?? null}
         onDeleteSpace={(spaceId, spaceName) =>

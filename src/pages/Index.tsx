@@ -87,6 +87,25 @@ const Index = () => {
       const nameNorm = normalizeDept(space.name);
       return Boolean(nameNorm && (nameNorm === myDept || nameNorm.includes(myDept) || myDept.includes(nameNorm)));
     };
+    const myUserId = user?.id ?? null;
+    // Restricted lists stay visible in the sidebar (with a lock icon) but
+    // users who aren't on the allow-list can't open them. This flag is
+    // precomputed per workspace so the sidebar item can render muted and the
+    // click handler can short-circuit with a friendly message.
+    const isAccessLocked = (l: (typeof lists)[number], wsRole: AppRole): boolean => {
+      if (!l.is_restricted) return false;
+      if (wsRole === 'admin') return false;
+      if (myUserId && l.created_by === myUserId) return false;
+      const allowed = Array.isArray(l.allowed_user_ids) ? l.allowed_user_ids : [];
+      return !(myUserId && allowed.includes(myUserId));
+    };
+    // Mirror server rule: only creator or workspace admin can change access.
+    // Used to gate the "Edit access" button in the sidebar so non-eligible
+    // users don't see a control that would just return 403 anyway.
+    const canEditAccess = (l: (typeof lists)[number], wsRole: AppRole): boolean => {
+      if (wsRole === 'admin') return true;
+      return Boolean(myUserId && l.created_by === myUserId);
+    };
     return workspaces.map((ws) => {
       const wsRole = rolesByWorkspaceId[ws.id] ?? 'employee';
       const isAdmin = wsRole === 'admin';
@@ -114,7 +133,16 @@ const Index = () => {
                   noExpand: !isAdmin && Boolean(myDept) && !isMyDepartmentSpace(space),
                   showDiscussion: canDiscuss,
                   spaceForView: canDiscuss,
-                  lists: lists.filter((l) => l.space_id === space.id).map((l) => ({ id: l.id, name: l.name })),
+                  lists: lists
+                    .filter((l) => l.space_id === space.id)
+                    .map((l) => ({
+                      id: l.id,
+                      name: l.name,
+                      isRestricted: Boolean(l.is_restricted),
+                      accessLocked: isAccessLocked(l, wsRole),
+                      canEditAccess: canEditAccess(l, wsRole),
+                      allowedUserIds: Array.isArray(l.allowed_user_ids) ? [...l.allowed_user_ids] : [],
+                    })),
                 };
               }),
             },
@@ -128,7 +156,16 @@ const Index = () => {
           id: space.id,
           name: space.name,
           color: space.color,
-          lists: lists.filter((l) => l.space_id === space.id).map((l) => ({ id: l.id, name: l.name })),
+          lists: lists
+            .filter((l) => l.space_id === space.id)
+            .map((l) => ({
+              id: l.id,
+              name: l.name,
+              isRestricted: Boolean(l.is_restricted),
+              accessLocked: isAccessLocked(l, wsRole),
+              canEditAccess: canEditAccess(l, wsRole),
+              allowedUserIds: Array.isArray(l.allowed_user_ids) ? [...l.allowed_user_ids] : [],
+            })),
         })),
       };
     });
@@ -598,16 +635,30 @@ const Index = () => {
     setSpaces((prev) => [...prev, data]);
   };
 
-  const createList = async (spaceId: string, name: string) => {
+  const createList = async (
+    spaceId: string,
+    name: string,
+    access?: { isRestricted: boolean; allowedUserIds: string[] }
+  ) => {
     if (!user) return;
     if (!canManageLists) {
       window.alert('Aapke role me list create karne ki permission nahi hai.');
       return;
     }
-    const { list: data } = await api.app.createList(spaceId, name);
+    const { list: data } = await api.app.createList(spaceId, name, access);
     setLists((prev) => [...prev, data]);
     setActiveList(data.id);
     setTasks([]);
+  };
+
+  const updateListAccess = async (
+    listId: string,
+    payload: { isRestricted: boolean; allowedUserIds: string[] }
+  ) => {
+    const { list: updated } = await api.app.updateListAccess(listId, payload);
+    // Merge the fresh server copy into local state so the sidebar re-renders
+    // with the new lock / allow-list state without needing a full reload.
+    setLists((prev) => prev.map((l) => (l.id === updated.id ? { ...l, ...updated } : l)));
   };
 
   const deleteSpace = async (spaceId: string, spaceName: string) => {
@@ -1112,7 +1163,17 @@ const Index = () => {
         onNavigate={handleNavigate}
         onCreateWorkspace={(name) => createWorkspace(name).catch((error) => console.error('Failed to create workspace', error))}
         onCreateSpace={(name) => createSpace(name).catch((error) => console.error('Failed to create space', error))}
-        onCreateList={(spaceId, name) => createList(spaceId, name).catch((error) => console.error('Failed to create list', error))}
+        onCreateList={(spaceId, name, access) =>
+          createList(spaceId, name, access).catch((error) => console.error('Failed to create list', error))
+        }
+        onUpdateListAccess={(listId, payload) =>
+          updateListAccess(listId, payload).catch((error) => {
+            console.error('Failed to update list access', error);
+            window.alert((error as Error)?.message || 'Access update failed.');
+          })
+        }
+        memberOptions={memberOptions}
+        currentUserId={user?.id ?? null}
         onDeleteSpace={(spaceId, spaceName) =>
           deleteSpace(spaceId, spaceName).catch((error) => console.error('Failed to delete space', error))
         }

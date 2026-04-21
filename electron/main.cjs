@@ -16,6 +16,11 @@ const net = require('node:net');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const http = require('node:http');
+// `electron-updater` downloads a newer installer in the background, verifies
+// its signature against the publisher-name baked into the previous install,
+// and then swaps the app on quit. It pairs with electron-builder's GitHub
+// provider (see `build.publish` in package.json).
+const { autoUpdater } = require('electron-updater');
 
 let logStream = null;
 function getLogStream() {
@@ -210,6 +215,74 @@ function stopBackend() {
   backendProc = null;
 }
 
+/**
+ * Configure and kick off the auto-updater. Safe to call unconditionally —
+ * `electron-updater` short-circuits in dev (unpackaged) mode automatically.
+ *
+ * Flow: check -> download in background -> prompt user to restart & install.
+ * We only show a UI dialog once the update has finished downloading so users
+ * aren't interrupted mid-work; the install itself happens on app quit.
+ */
+function setupAutoUpdater() {
+  if (isDev) {
+    logLine('[updater] skipped in dev mode');
+    return;
+  }
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.logger = {
+    info: (m) => logLine(`[updater] ${m}`),
+    warn: (m) => logLine(`[updater][warn] ${m}`),
+    error: (m) => logLine(`[updater][error] ${m}`),
+    debug: (m) => logLine(`[updater][debug] ${m}`),
+  };
+
+  autoUpdater.on('checking-for-update', () => logLine('[updater] checking...'));
+  autoUpdater.on('update-available', (info) => {
+    logLine(`[updater] update available: ${info?.version}`);
+  });
+  autoUpdater.on('update-not-available', () => logLine('[updater] up to date'));
+  autoUpdater.on('error', (err) => {
+    logLine(`[updater] error: ${err?.stack || err?.message || err}`);
+  });
+  autoUpdater.on('download-progress', (p) => {
+    logLine(`[updater] downloading ${Math.round(p.percent)}% (${p.transferred}/${p.total})`);
+  });
+  autoUpdater.on('update-downloaded', async (info) => {
+    logLine(`[updater] downloaded: ${info?.version} — prompting user`);
+    const { response } = await dialog.showMessageBox(mainWindow ?? undefined, {
+      type: 'info',
+      buttons: ['Restart now', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+      title: 'Update ready',
+      message: `DigitechIO ${info?.version || ''} is ready to install.`,
+      detail:
+        'The app will close, update, and reopen. Any unsaved work should be saved first.',
+    });
+    if (response === 0) {
+      // `isSilent=false` shows the NSIS progress UI; `isForceRunAfter=true`
+      // relaunches the app once the installer finishes.
+      autoUpdater.quitAndInstall(false, true);
+    }
+  });
+
+  // Delay the first check a bit so the app fully boots and the user sees a
+  // responsive window before any background network work kicks in.
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch((err) => {
+      logLine(`[updater] checkForUpdates failed: ${err?.stack || err?.message || err}`);
+    });
+  }, 8_000);
+
+  // Also re-check every 4 hours while the app stays open, so long-running
+  // sessions eventually pick up releases without a manual restart.
+  setInterval(() => {
+    autoUpdater.checkForUpdates().catch(() => {});
+  }, 4 * 60 * 60 * 1000);
+}
+
 async function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -310,6 +383,8 @@ app.whenReady().then(async () => {
     );
   }
   await createMainWindow();
+
+  setupAutoUpdater();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();

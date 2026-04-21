@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Home,
   Bell,
@@ -17,6 +17,8 @@ import {
   X,
   Folder,
   MoreHorizontal,
+  Lock,
+  Check,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -47,6 +49,14 @@ interface SidebarItem {
   color?: string;
   /** Master "Team Space" folder — + creates a department space, not a list */
   isMasterFolder?: boolean;
+  /** For `type: 'list'` — when true, render a small lock icon to indicate restricted access. */
+  isRestricted?: boolean;
+  /** For `type: 'list'` — when true, viewer can't open this restricted list; render muted + block click. */
+  accessLocked?: boolean;
+  /** For `type: 'list'` — when true, viewer may open the "Edit access" modal (creator or admin). */
+  canEditAccess?: boolean;
+  /** For `type: 'list'` — current allow-list snapshot, used to pre-fill the edit modal. */
+  allowedUserIds?: string[];
 }
 
 const navItems = [
@@ -71,7 +81,14 @@ interface AppSidebarProps {
       name: string;
       color?: string;
       isMasterFolder?: boolean;
-      lists?: Array<{ id: string; name: string }>;
+      lists?: Array<{
+        id: string;
+        name: string;
+        isRestricted?: boolean;
+        accessLocked?: boolean;
+        canEditAccess?: boolean;
+        allowedUserIds?: string[];
+      }>;
       children?: Array<{
         id: string;
         name: string;
@@ -81,7 +98,14 @@ interface AppSidebarProps {
         showDiscussion?: boolean;
         /** If true, clicking the space name opens the unified Space View. */
         spaceForView?: boolean;
-        lists: Array<{ id: string; name: string }>;
+        lists: Array<{
+          id: string;
+          name: string;
+          isRestricted?: boolean;
+          accessLocked?: boolean;
+          canEditAccess?: boolean;
+          allowedUserIds?: string[];
+        }>;
       }>;
     }>;
   }>;
@@ -94,7 +118,20 @@ interface AppSidebarProps {
   onNavigate?: (view: 'home' | 'board' | 'dashboard' | 'notifications' | 'team-members' | 'docs' | 'timesheets') => void;
   onCreateWorkspace: (name: string) => Promise<void> | void;
   onCreateSpace: (name: string) => Promise<void> | void;
-  onCreateList: (spaceId: string, name: string) => Promise<void> | void;
+  onCreateList: (
+    spaceId: string,
+    name: string,
+    access?: { isRestricted: boolean; allowedUserIds: string[] }
+  ) => Promise<void> | void;
+  /** Edit access on an existing list. Opens a modal gated by `canEditAccess` on the list. */
+  onUpdateListAccess?: (
+    listId: string,
+    payload: { isRestricted: boolean; allowedUserIds: string[] }
+  ) => Promise<void> | void;
+  /** Workspace members used to populate the "who can access" picker when making a restricted list. */
+  memberOptions?: Array<{ id: string; label: string }>;
+  /** Current viewer — auto-included as an allowed user so the creator never locks themselves out. */
+  currentUserId?: string | null;
   onDeleteSpace: (spaceId: string, spaceName: string) => Promise<void> | void;
   onDeleteList: (listId: string, listName: string) => Promise<void> | void;
   onInvite: (email: string, role: 'employee' | 'team_lead' | 'manager' | 'admin', department: string) => Promise<void> | void;
@@ -129,9 +166,12 @@ export function AppSidebar({
   onCreateWorkspace,
   onCreateSpace,
   onCreateList,
+  onUpdateListAccess,
   onDeleteSpace,
   onDeleteList,
   onInvite,
+  memberOptions = [],
+  currentUserId = null,
   canManageWorkspace,
   canInviteMembers,
   canCreateSpaces,
@@ -189,6 +229,126 @@ export function AppSidebar({
     await promptState.onSubmit(value);
     closePrompt();
   };
+
+  // "New List" modal with optional access restriction.
+  const [newListState, setNewListState] = useState<{ spaceId: string } | null>(null);
+  const [newListName, setNewListName] = useState('');
+  const [newListRestricted, setNewListRestricted] = useState(false);
+  const [newListAllowed, setNewListAllowed] = useState<Set<string>>(() => new Set());
+  const [newListMemberQuery, setNewListMemberQuery] = useState('');
+
+  const openNewListModal = (spaceId: string) => {
+    setNewListName('');
+    setNewListRestricted(false);
+    setNewListAllowed(new Set());
+    setNewListMemberQuery('');
+    setNewListState({ spaceId });
+  };
+
+  const closeNewListModal = () => {
+    setNewListState(null);
+    setNewListName('');
+    setNewListRestricted(false);
+    setNewListAllowed(new Set());
+    setNewListMemberQuery('');
+  };
+
+  const submitNewList = async () => {
+    if (!newListState) return;
+    const trimmed = newListName.trim();
+    if (!trimmed) return;
+    const access = newListRestricted
+      ? {
+          isRestricted: true,
+          // Filter the creator out — server always treats them as allowed —
+          // but keep them in the UI selection so toggling is idempotent.
+          allowedUserIds: [...newListAllowed].filter((id) => id && id !== currentUserId),
+        }
+      : undefined;
+    await onCreateList(newListState.spaceId, trimmed, access);
+    closeNewListModal();
+  };
+
+  const toggleAllowedMember = (memberId: string) => {
+    if (memberId && memberId === currentUserId) return;
+    setNewListAllowed((prev) => {
+      const next = new Set(prev);
+      if (next.has(memberId)) next.delete(memberId);
+      else next.add(memberId);
+      return next;
+    });
+  };
+
+  const filteredMemberOptions = useMemo(() => {
+    const query = newListMemberQuery.trim().toLowerCase();
+    if (!query) return memberOptions;
+    return memberOptions.filter((m) => m.label.toLowerCase().includes(query));
+  }, [memberOptions, newListMemberQuery]);
+
+  // "Edit access" modal — updates an existing list's restriction / allow-list.
+  // Mirrors the create-list access picker so the two experiences feel the
+  // same. Only opens from rows where `canEditAccess` is true (creator/admin).
+  const [editAccessState, setEditAccessState] = useState<{
+    listId: string;
+    listName: string;
+  } | null>(null);
+  const [editAccessRestricted, setEditAccessRestricted] = useState(false);
+  const [editAccessAllowed, setEditAccessAllowed] = useState<Set<string>>(() => new Set());
+  const [editAccessMemberQuery, setEditAccessMemberQuery] = useState('');
+  const [editAccessSaving, setEditAccessSaving] = useState(false);
+
+  const openEditAccessModal = (list: {
+    id: string;
+    name: string;
+    isRestricted?: boolean;
+    allowedUserIds?: string[];
+  }) => {
+    setEditAccessState({ listId: list.id, listName: list.name });
+    setEditAccessRestricted(Boolean(list.isRestricted));
+    setEditAccessAllowed(new Set(list.allowedUserIds ?? []));
+    setEditAccessMemberQuery('');
+  };
+
+  const closeEditAccessModal = () => {
+    setEditAccessState(null);
+    setEditAccessRestricted(false);
+    setEditAccessAllowed(new Set());
+    setEditAccessMemberQuery('');
+  };
+
+  const toggleEditAccessMember = (memberId: string) => {
+    if (memberId && memberId === currentUserId) return;
+    setEditAccessAllowed((prev) => {
+      const next = new Set(prev);
+      if (next.has(memberId)) next.delete(memberId);
+      else next.add(memberId);
+      return next;
+    });
+  };
+
+  const submitEditAccess = async () => {
+    if (!editAccessState || !onUpdateListAccess) return;
+    setEditAccessSaving(true);
+    try {
+      await onUpdateListAccess(editAccessState.listId, {
+        isRestricted: editAccessRestricted,
+        // Same rule as create: creator is implicit, server enforces admin
+        // override. Filter self out so toggling the checkbox is a no-op.
+        allowedUserIds: editAccessRestricted
+          ? [...editAccessAllowed].filter((id) => id && id !== currentUserId)
+          : [],
+      });
+      closeEditAccessModal();
+    } finally {
+      setEditAccessSaving(false);
+    }
+  };
+
+  const filteredEditAccessMembers = useMemo(() => {
+    const query = editAccessMemberQuery.trim().toLowerCase();
+    if (!query) return memberOptions;
+    return memberOptions.filter((m) => m.label.toLowerCase().includes(query));
+  }, [memberOptions, editAccessMemberQuery]);
   const activeWorkspaceSection = workspaceSections.find((s) => s.id === activeWorkspaceId) ?? workspaceSections[0];
   const inviteDepartmentOptions = (activeWorkspaceSection?.spaces || [])
     .flatMap((space) => (space.isMasterFolder ? space.children ?? [] : []))
@@ -219,10 +379,18 @@ export function AppSidebar({
           ? activeSpaceViewId === item.id
           : item.id === activeList;
 
+    const isLockedList = item.type === 'list' && Boolean(item.accessLocked);
+
     return (
       <div key={item.id}>
         <button
           onClick={() => {
+            if (isLockedList) {
+              window.alert(
+                'Ye list restricted hai. Admin ya list creator se access request karo.'
+              );
+              return;
+            }
             if (hasChildren) toggleExpand(item.id);
             if (item.type === 'list') {
               onNavigate?.('board');
@@ -238,10 +406,12 @@ export function AppSidebar({
               onOpenDiscussion?.(item.discussionSpaceId, item.discussionSpaceName ?? item.name);
             }
           }}
+          title={isLockedList ? 'Restricted — no access' : undefined}
           className={cn(
             'group flex w-full min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] transition-all',
-            'hover:bg-sidebar-accent/80 hover:shadow-sm',
-            isActive && 'bg-sidebar-accent text-sidebar-accent-foreground',
+            !isLockedList && 'hover:bg-sidebar-accent/80 hover:shadow-sm',
+            isLockedList && 'cursor-not-allowed opacity-55 hover:bg-transparent',
+            isActive && !isLockedList && 'bg-sidebar-accent text-sidebar-accent-foreground',
             !isActive && 'text-sidebar-foreground'
           )}
           style={{ paddingLeft: `${12 + depth * 16}px` }}
@@ -265,7 +435,14 @@ export function AppSidebar({
             </span>
           )}
           {item.type === 'list' && (
-            <ListChecks className="w-4 h-4 flex-shrink-0 text-sidebar-muted" />
+            item.isRestricted ? (
+              <Lock
+                className="w-4 h-4 flex-shrink-0 text-amber-500"
+                aria-label="Restricted list"
+              />
+            ) : (
+              <ListChecks className="w-4 h-4 flex-shrink-0 text-sidebar-muted" />
+            )
           )}
           {item.type === 'discussion' && (
             <MessageSquare className="w-4 h-4 flex-shrink-0 text-sidebar-muted" />
@@ -327,13 +504,7 @@ export function AppSidebar({
                 onClick={(e) => {
                   e.stopPropagation();
                   if (!canManageLists) return;
-                  openPrompt({
-                    title: 'New List',
-                    label: 'List name',
-                    placeholder: 'e.g. landing pages',
-                    submitText: 'Create',
-                    onSubmit: (value) => onCreateList(item.id, value),
-                  });
+                  openNewListModal(item.id);
                 }}
                 className="text-sidebar-muted hover:text-sidebar-foreground disabled:opacity-30 disabled:cursor-not-allowed"
                 title="Add list"
@@ -356,19 +527,40 @@ export function AppSidebar({
             </div>
           )}
           {item.type === 'list' && (
-            <button
-              type="button"
-              disabled={!canManageLists}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (!canManageLists) return;
-                onDeleteList(item.id, item.name);
-              }}
-              className="text-sidebar-muted opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-30"
-              title="Delete list"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
+            <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+              {item.canEditAccess && onUpdateListAccess && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openEditAccessModal({
+                      id: item.id,
+                      name: item.name,
+                      isRestricted: item.isRestricted,
+                      allowedUserIds: item.allowedUserIds,
+                    });
+                  }}
+                  className="text-sidebar-muted transition-colors hover:text-amber-500"
+                  title={item.isRestricted ? 'Edit access' : 'Restrict list / manage access'}
+                  aria-label="Edit list access"
+                >
+                  <Lock className="w-3.5 h-3.5" />
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={!canManageLists}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!canManageLists) return;
+                  onDeleteList(item.id, item.name);
+                }}
+                className="text-sidebar-muted transition-colors hover:text-destructive disabled:cursor-not-allowed disabled:opacity-30"
+                title="Delete list"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
           )}
         </button>
 
@@ -490,6 +682,10 @@ export function AppSidebar({
                       id: list.id,
                       name: list.name,
                       type: 'list' as const,
+                      isRestricted: list.isRestricted,
+                      accessLocked: list.accessLocked,
+                      canEditAccess: list.canEditAccess,
+                      allowedUserIds: list.allowedUserIds,
                     })),
                   })),
                 });
@@ -503,6 +699,10 @@ export function AppSidebar({
                   id: list.id,
                   name: list.name,
                   type: 'list' as const,
+                  isRestricted: list.isRestricted,
+                  accessLocked: list.accessLocked,
+                  canEditAccess: list.canEditAccess,
+                  allowedUserIds: list.allowedUserIds,
                 })),
               });
             })}
@@ -652,6 +852,299 @@ export function AppSidebar({
                 className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {promptState.submitText ?? 'Save'}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    )}
+    {newListState && (
+      <div
+        className="fixed inset-0 z-[95] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
+        onMouseDown={(e) => {
+          if (e.target === e.currentTarget) closeNewListModal();
+        }}
+      >
+        <div className="flex max-h-[90vh] w-full max-w-md flex-col rounded-xl border border-border bg-background shadow-2xl">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h3 className="text-sm font-semibold text-foreground">New List</h3>
+            <button
+              type="button"
+              onClick={closeNewListModal}
+              className="text-muted-foreground transition-colors hover:text-foreground"
+              aria-label="Close"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <form
+            className="flex min-h-0 flex-1 flex-col"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void submitNewList();
+            }}
+          >
+            <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground">
+                  List name
+                </label>
+                <input
+                  autoFocus
+                  value={newListName}
+                  onChange={(e) => setNewListName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      e.preventDefault();
+                      closeNewListModal();
+                    }
+                  }}
+                  placeholder="e.g. landing pages"
+                  className="mt-1 h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </div>
+
+              <label className="flex items-start gap-2 rounded-md border border-input bg-background/60 px-3 py-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={newListRestricted}
+                  onChange={(e) => setNewListRestricted(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-input text-primary focus:ring-ring"
+                />
+                <span className="flex-1">
+                  <span className="flex items-center gap-1.5 font-medium text-foreground">
+                    <Lock className="h-3.5 w-3.5 text-amber-500" />
+                    Restrict access
+                  </span>
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    Sirf aap, admin, aur neeche select kiye gaye log hi is list ko dekh payenge.
+                  </span>
+                </span>
+              </label>
+
+              {newListRestricted && (
+                <div className="flex min-h-0 flex-1 flex-col rounded-md border border-input">
+                  <div className="border-b border-input p-2">
+                    <input
+                      value={newListMemberQuery}
+                      onChange={(e) => setNewListMemberQuery(e.target.value)}
+                      placeholder="Search members..."
+                      className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                  </div>
+                  <div className="max-h-56 min-h-0 flex-1 overflow-y-auto p-1 [scrollbar-width:thin]">
+                    {filteredMemberOptions.length === 0 && (
+                      <p className="px-3 py-4 text-center text-xs text-muted-foreground">
+                        No members found.
+                      </p>
+                    )}
+                    {filteredMemberOptions.map((m) => {
+                      const isSelf = Boolean(currentUserId && m.id === currentUserId);
+                      const checked = isSelf || newListAllowed.has(m.id);
+                      return (
+                        <button
+                          type="button"
+                          key={m.id}
+                          onClick={() => toggleAllowedMember(m.id)}
+                          disabled={isSelf}
+                          className="group flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left text-sm transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-70"
+                        >
+                          <span className="flex min-w-0 flex-1 flex-col">
+                            <span className="truncate text-foreground">{m.label}</span>
+                            {isSelf && (
+                              <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                                You (always included)
+                              </span>
+                            )}
+                          </span>
+                          <span
+                            className={cn(
+                              'ml-2 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border transition-colors',
+                              checked
+                                ? 'border-primary bg-primary text-primary-foreground'
+                                : 'border-input bg-background'
+                            )}
+                          >
+                            {checked && <Check className="h-3.5 w-3.5" />}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="flex items-center justify-between border-t border-input px-3 py-2 text-[11px] text-muted-foreground">
+                    <span>
+                      {newListAllowed.size === 0
+                        ? 'Only you + admin'
+                        : `${newListAllowed.size} member${newListAllowed.size === 1 ? '' : 's'} + you + admin`}
+                    </span>
+                    {newListAllowed.size > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setNewListAllowed(new Set())}
+                        className="text-muted-foreground transition-colors hover:text-foreground"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+              <button
+                type="button"
+                onClick={closeNewListModal}
+                className="h-9 rounded-md border border-input px-3 text-sm text-foreground transition-colors hover:bg-accent"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!newListName.trim()}
+                className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Create
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    )}
+    {editAccessState && (
+      <div
+        className="fixed inset-0 z-[95] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
+        onMouseDown={(e) => {
+          if (e.target === e.currentTarget && !editAccessSaving) closeEditAccessModal();
+        }}
+      >
+        <div className="flex max-h-[90vh] w-full max-w-md flex-col rounded-xl border border-border bg-background shadow-2xl">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <div className="flex items-center gap-2">
+              <Lock className="h-4 w-4 text-amber-500" />
+              <h3 className="text-sm font-semibold text-foreground">
+                Edit access — {editAccessState.listName}
+              </h3>
+            </div>
+            <button
+              type="button"
+              onClick={closeEditAccessModal}
+              disabled={editAccessSaving}
+              className="text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+              aria-label="Close"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <form
+            className="flex min-h-0 flex-1 flex-col"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void submitEditAccess();
+            }}
+          >
+            <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
+              <label className="flex items-start gap-2 rounded-md border border-input bg-background/60 px-3 py-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={editAccessRestricted}
+                  onChange={(e) => setEditAccessRestricted(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-input text-primary focus:ring-ring"
+                />
+                <span className="flex-1">
+                  <span className="flex items-center gap-1.5 font-medium text-foreground">
+                    <Lock className="h-3.5 w-3.5 text-amber-500" />
+                    Restrict access
+                  </span>
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    Uncheck karoge to list sab ko visible aur accessible ho jayegi
+                    (default department rules apply).
+                  </span>
+                </span>
+              </label>
+
+              {editAccessRestricted && (
+                <div className="flex min-h-0 flex-1 flex-col rounded-md border border-input">
+                  <div className="border-b border-input p-2">
+                    <input
+                      value={editAccessMemberQuery}
+                      onChange={(e) => setEditAccessMemberQuery(e.target.value)}
+                      placeholder="Search members..."
+                      className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                  </div>
+                  <div className="max-h-56 min-h-0 flex-1 overflow-y-auto p-1 [scrollbar-width:thin]">
+                    {filteredEditAccessMembers.length === 0 && (
+                      <p className="px-3 py-4 text-center text-xs text-muted-foreground">
+                        No members found.
+                      </p>
+                    )}
+                    {filteredEditAccessMembers.map((m) => {
+                      const isSelf = Boolean(currentUserId && m.id === currentUserId);
+                      const checked = isSelf || editAccessAllowed.has(m.id);
+                      return (
+                        <button
+                          type="button"
+                          key={m.id}
+                          onClick={() => toggleEditAccessMember(m.id)}
+                          disabled={isSelf}
+                          className="group flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left text-sm transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-70"
+                        >
+                          <span className="flex min-w-0 flex-1 flex-col">
+                            <span className="truncate text-foreground">{m.label}</span>
+                            {isSelf && (
+                              <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                                You (always included)
+                              </span>
+                            )}
+                          </span>
+                          <span
+                            className={cn(
+                              'ml-2 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border transition-colors',
+                              checked
+                                ? 'border-primary bg-primary text-primary-foreground'
+                                : 'border-input bg-background'
+                            )}
+                          >
+                            {checked && <Check className="h-3.5 w-3.5" />}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="flex items-center justify-between border-t border-input px-3 py-2 text-[11px] text-muted-foreground">
+                    <span>
+                      {editAccessAllowed.size === 0
+                        ? 'Only you + admin'
+                        : `${editAccessAllowed.size} member${editAccessAllowed.size === 1 ? '' : 's'} + you + admin`}
+                    </span>
+                    {editAccessAllowed.size > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setEditAccessAllowed(new Set())}
+                        className="text-muted-foreground transition-colors hover:text-foreground"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+              <button
+                type="button"
+                onClick={closeEditAccessModal}
+                disabled={editAccessSaving}
+                className="h-9 rounded-md border border-input px-3 text-sm text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={editAccessSaving}
+                className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {editAccessSaving ? 'Saving...' : 'Save changes'}
               </button>
             </div>
           </form>

@@ -54,8 +54,27 @@ export const api = {
     createSpace: (workspaceId: string, name: string, department?: string) =>
       request('/spaces', { method: 'POST', body: JSON.stringify({ workspaceId, name, department }) }),
     deleteSpace: (spaceId: string) => request(`/spaces/${spaceId}`, { method: 'DELETE' }),
-    createList: (spaceId: string, name: string) =>
-      request('/lists', { method: 'POST', body: JSON.stringify({ spaceId, name }) }),
+    createList: (
+      spaceId: string,
+      name: string,
+      access?: { isRestricted: boolean; allowedUserIds: string[] }
+    ) =>
+      request('/lists', {
+        method: 'POST',
+        body: JSON.stringify({
+          spaceId,
+          name,
+          ...(access ? { isRestricted: access.isRestricted, allowedUserIds: access.allowedUserIds } : {}),
+        }),
+      }),
+    updateListAccess: (
+      listId: string,
+      payload: { isRestricted: boolean; allowedUserIds: string[] }
+    ) =>
+      request(`/lists/${listId}/access`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }),
     deleteList: (listId: string) => request(`/lists/${listId}`, { method: 'DELETE' }),
     updateListKanban: (
       listId: string,

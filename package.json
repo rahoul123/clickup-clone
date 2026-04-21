@@ -2,7 +2,7 @@
   "name": "digitechio-desktop",
   "productName": "DigitechIO",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "DigitechIO collaboration workspace desktop app",
   "author": {
     "name": "DigitechIO"
@@ -26,7 +26,9 @@
     "electron:pack": "npm run build && electron-builder --dir",
     "electron:dist": "npm run build && electron-builder",
     "electron:dist:win": "npm run build && electron-builder --win",
-    "electron:dist:mac": "npm run build && electron-builder --mac"
+    "electron:dist:mac": "npm run build && electron-builder --mac",
+    "electron:publish": "npm run build && electron-builder --publish always",
+    "electron:publish:win": "npm run build && electron-builder --win --publish always"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -62,6 +64,7 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "date-fns": "^3.6.0",
+    "electron-updater": "^6.8.3",
     "embla-carousel-react": "^8.6.0",
     "input-otp": "^1.4.2",
     "lucide-react": "^0.462.0",
@@ -117,6 +120,14 @@
       "output": "release",
       "buildResources": "public"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "rahoul123",
+        "repo": "clickup",
+        "releaseType": "release"
+      }
+    ],
     "files": [
       "electron/**/*",
       "package.json"

@@ -91,6 +91,15 @@ const listSchema = new Schema(
      * without exposing the dept's private sub-folder lists.
      */
     isSharedMainList: { type: Boolean, default: false },
+    /**
+     * When true, only creator + users in `allowedUserIds` + admins can see
+     * and operate on this list (department-level access is bypassed). All
+     * existing lists default to `false`, so behavior is unchanged unless the
+     * creator explicitly opts in via the "Restrict access" option.
+     */
+    isRestricted: { type: Boolean, default: false },
+    /** Explicit allow-list of userIds that may access a restricted list. */
+    allowedUserIds: { type: [String], default: [] },
     /** Permutation of task status keys — board column order (admin). */
     kanbanColumnOrder: { type: [String], default: undefined },
     /** Custom header labels per status key (admin). */

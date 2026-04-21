@@ -120,6 +120,8 @@ function serializeList(l) {
     created_by: l.createdBy,
     created_at: createdAt.toISOString(),
     is_shared_main_list: Boolean(l.isSharedMainList),
+    is_restricted: Boolean(l.isRestricted),
+    allowed_user_ids: Array.isArray(l.allowedUserIds) ? [...l.allowedUserIds] : [],
     kanban_column_order: orderResolved,
     kanban_column_labels: plainLabels,
     kanban_custom_columns,
@@ -263,19 +265,42 @@ async function findTeamLeadForDepartment(workspaceId, department, excludeUserId 
 }
 
 /**
- * Check if a user can read/write tasks in a given list. Shared cross-team
+ * Check if a restricted list is accessible for a given user.
+ * Admins + creator + explicit allow-list always pass. Any other check is
+ * irrelevant once a list is marked restricted (department scope is bypassed).
+ */
+function canAccessRestrictedList(list, userId, role) {
+  if (!list?.isRestricted) return true;
+  if (normalizeRoleForRestriction(role) === 'admin') return true;
+  if (userId && list.createdBy === userId) return true;
+  const allowed = Array.isArray(list.allowedUserIds) ? list.allowedUserIds : [];
+  return Boolean(userId && allowed.includes(userId));
+}
+
+function normalizeRoleForRestriction(role) {
+  if (!role) return null;
+  if (role === 'owner') return 'admin';
+  if (role === 'member') return 'employee';
+  return role;
+}
+
+/**
+ * Check if a user can read/write tasks in a given list. Restricted lists are
+ * gated first (creator / admin / explicit allow-list only). Shared cross-team
  * lists (`list.isSharedMainList`) are accessible to any workspace member,
  * otherwise fall back to strict department-scoped space access.
  */
 function canAccessListForTasks({
   list,
   role,
+  userId,
   userDepartment,
   workspaceDepartment,
   spaceDepartment,
   spaceName,
   isDepartmentMain,
 }) {
+  if (!canAccessRestrictedList(list, userId, role)) return false;
   if (list?.isSharedMainList) return true;
   return canAccessSpaceByDepartment({
     role,
@@ -508,7 +533,10 @@ async function loadAggregatedNavigation(userId) {
       await ensureSharedMainList(space, userId);
     }
 
-    let ownLists = await List.find({ spaceId: { $in: [...ownAccessSpaceIds] } }).sort({ createdAt: 1 }).lean();
+    // Restricted lists remain visible in the sidebar (name + lock icon) so the
+    // viewer knows they exist and can request access. Actual task read/write
+    // is still blocked via `canAccessListForTasks`.
+    const ownLists = await List.find({ spaceId: { $in: [...ownAccessSpaceIds] } }).sort({ createdAt: 1 }).lean();
     const crossLists = crossDeptMainSpaces.length
       ? await List.find({
           spaceId: { $in: crossDeptMainSpaces.map((s) => s._id) },
@@ -1209,6 +1237,7 @@ export function buildRoutes({ realtime } = {}) {
       !canAccessListForTasks({
         list,
         role,
+        userId: req.session.userId,
         userDepartment: currentUser?.department ?? null,
         workspaceDepartment: workspace?.department ?? null,
         spaceDepartment: space.department,
@@ -1270,7 +1299,7 @@ export function buildRoutes({ realtime } = {}) {
   });
 
   router.post('/lists', requireAuth, async (req, res) => {
-    const { spaceId, name } = req.body ?? {};
+    const { spaceId, name, isRestricted, allowedUserIds } = req.body ?? {};
     const space = await Space.findById(spaceId).lean();
     if (!space) return res.status(404).json({ message: 'Space not found' });
     const role = await getRole(space.workspaceId, req.session.userId);
@@ -1295,10 +1324,80 @@ export function buildRoutes({ realtime } = {}) {
       }
     }
 
-    const list = await List.create({ _id: randomUUID(), spaceId, name, createdBy: req.session.userId });
+    // Sanitize restriction payload: only workspace members can appear on the
+    // allow-list, and the creator is always implicitly allowed.
+    const wantsRestriction = Boolean(isRestricted);
+    let safeAllowedUserIds = [];
+    if (wantsRestriction) {
+      const rawIds = Array.isArray(allowedUserIds) ? allowedUserIds : [];
+      const uniqueIds = [...new Set(rawIds.filter((id) => typeof id === 'string' && id.trim()))];
+      if (uniqueIds.length > 0) {
+        const memberRows = await WorkspaceMember.find({
+          workspaceId: space.workspaceId,
+          userId: { $in: uniqueIds },
+        }).lean();
+        const memberSet = new Set(memberRows.map((m) => m.userId));
+        safeAllowedUserIds = uniqueIds.filter((id) => memberSet.has(id));
+      }
+    }
+
+    const list = await List.create({
+      _id: randomUUID(),
+      spaceId,
+      name,
+      createdBy: req.session.userId,
+      isRestricted: wantsRestriction,
+      allowedUserIds: safeAllowedUserIds,
+    });
     res.json({
       list: serializeList(list.toObject()),
     });
+  });
+
+  /**
+   * Update a restricted list's allow-list (or toggle the restriction off).
+   * Only the list creator or a workspace admin may adjust access — this keeps
+   * the default department behavior intact for anyone else.
+   */
+  router.patch('/lists/:listId/access', requireAuth, async (req, res) => {
+    const { listId } = req.params;
+    const { isRestricted, allowedUserIds } = req.body ?? {};
+    const list = await List.findById(listId);
+    if (!list) return res.status(404).json({ message: 'List not found' });
+    const space = await Space.findById(list.spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+
+    const role = await getRole(space.workspaceId, req.session.userId);
+    const isAdmin = normalizeRoleForRestriction(role) === 'admin';
+    const isCreator = list.createdBy === req.session.userId;
+    if (!isAdmin && !isCreator) {
+      return res.status(403).json({ message: 'Only the list creator or an admin can change access.' });
+    }
+
+    const nextRestricted = typeof isRestricted === 'boolean' ? isRestricted : Boolean(list.isRestricted);
+    let nextAllowed = Array.isArray(list.allowedUserIds) ? [...list.allowedUserIds] : [];
+    if (Array.isArray(allowedUserIds)) {
+      const uniqueIds = [...new Set(allowedUserIds.filter((id) => typeof id === 'string' && id.trim()))];
+      if (uniqueIds.length === 0) {
+        nextAllowed = [];
+      } else {
+        const memberRows = await WorkspaceMember.find({
+          workspaceId: space.workspaceId,
+          userId: { $in: uniqueIds },
+        }).lean();
+        const memberSet = new Set(memberRows.map((m) => m.userId));
+        nextAllowed = uniqueIds.filter((id) => memberSet.has(id));
+      }
+    }
+    if (!nextRestricted) {
+      nextAllowed = [];
+    }
+
+    list.isRestricted = nextRestricted;
+    list.allowedUserIds = nextAllowed;
+    await list.save();
+
+    res.json({ list: serializeList(list.toObject()) });
   });
 
   router.patch('/lists/:listId', requireAuth, async (req, res) => {
@@ -1681,6 +1780,7 @@ export function buildRoutes({ realtime } = {}) {
       !canAccessListForTasks({
         list,
         role,
+        userId: req.session.userId,
         userDepartment: currentUser?.department ?? null,
         workspaceDepartment: workspace?.department ?? null,
         spaceDepartment: space.department,
@@ -1805,6 +1905,7 @@ export function buildRoutes({ realtime } = {}) {
       !canAccessListForTasks({
         list,
         role,
+        userId: req.session.userId,
         userDepartment: currentUser?.department ?? null,
         workspaceDepartment: workspace?.department ?? null,
         spaceDepartment: space.department,
@@ -1902,6 +2003,7 @@ export function buildRoutes({ realtime } = {}) {
       !canAccessListForTasks({
         list,
         role,
+        userId: req.session.userId,
         userDepartment: currentUser?.department ?? null,
         workspaceDepartment: workspace?.department ?? null,
         spaceDepartment: space.department,
@@ -2054,6 +2156,7 @@ export function buildRoutes({ realtime } = {}) {
       !canAccessListForTasks({
         list,
         role,
+        userId: req.session.userId,
         userDepartment: currentUser?.department ?? null,
         workspaceDepartment: workspace?.department ?? null,
         spaceDepartment: space.department,
@@ -2100,6 +2203,7 @@ export function buildRoutes({ realtime } = {}) {
       !canAccessListForTasks({
         list,
         role,
+        userId: req.session.userId,
         userDepartment: currentUser?.department ?? null,
         workspaceDepartment: workspace?.department ?? null,
         spaceDepartment: space.department,
@@ -2338,6 +2442,7 @@ export function buildRoutes({ realtime } = {}) {
       canAccessListForTasks({
         list,
         role,
+        userId: req.session.userId,
         userDepartment: currentUser?.department ?? null,
         workspaceDepartment: workspace?.department ?? null,
         spaceDepartment: space.department,

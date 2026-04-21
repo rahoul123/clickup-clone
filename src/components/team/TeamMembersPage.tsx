@@ -24,7 +24,7 @@ export function TeamMembersPage({ members, canManageWorkspace, onUpdateMemberRol
               Team Members
             </div>
             <CardTitle className="text-xl">Manage Team Roles</CardTitle>
-            <CardDescription>Team members ka role yahan se update karein.</CardDescription>
+            <CardDescription>Update team member roles from here.</CardDescription>
           </CardHeader>
           <CardContent>
             {members.length === 0 ? (

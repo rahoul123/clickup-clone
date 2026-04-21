@@ -300,42 +300,53 @@ export function InlineTaskComposer({ memberOptions, onSave, onCancel }: InlineTa
             />
           </button>
           {openSection === 'dates' && (
-            <div className="absolute left-0 top-full z-[80] mt-1.5 w-[min(100vw-3rem,520px)] max-w-[calc(100vw-2rem)] rounded-xl border border-border/80 bg-popover p-2 shadow-xl">
+            /* Anchor to the right edge of the trigger so the popover expands
+               toward the center/board instead of overflowing the viewport when
+               the composer sits in a narrow left-hand kanban column. */
+            <div className="absolute left-0 top-full z-[80] mt-1.5 w-[min(calc(100vw-2rem),460px)] rounded-xl border border-border/80 bg-popover p-2 shadow-xl">
+              {/* Read-only display chips — clicking them selects which field
+                   the calendar should update. The native <input type="date">
+                   was removed on purpose: it opened a second (browser-native)
+                   picker that duplicated the custom calendar below. */}
               <div className="mb-2 grid grid-cols-2 gap-2">
-                <div>
-                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <button
+                  type="button"
+                  onClick={() => setActiveDateField('start')}
+                  className={cn(
+                    'rounded-lg border px-2.5 py-1.5 text-left transition',
+                    activeDateField === 'start'
+                      ? 'border-primary/60 bg-primary/10'
+                      : 'border-border bg-background hover:bg-muted/40'
+                  )}
+                >
+                  <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
                     Start date
-                  </label>
-                  <input
-                    type="date"
-                    value={startDate}
-                    onChange={(e) => {
-                      setStartDate(e.target.value);
-                      setActiveDateField('start');
-                    }}
-                    onFocus={() => setActiveDateField('start')}
-                    className="w-full rounded-lg border border-border bg-background px-2 py-1.5 text-xs"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  </span>
+                  <span className="block text-xs font-medium text-foreground">
+                    {startDate ? format(parseYmd(startDate)!, 'MMM d, yyyy') : 'Not set'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveDateField('due')}
+                  className={cn(
+                    'rounded-lg border px-2.5 py-1.5 text-left transition',
+                    activeDateField === 'due'
+                      ? 'border-primary/60 bg-primary/10'
+                      : 'border-border bg-background hover:bg-muted/40'
+                  )}
+                >
+                  <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
                     Due date
-                  </label>
-                  <input
-                    type="date"
-                    value={endDate}
-                    onChange={(e) => {
-                      setEndDate(e.target.value);
-                      setActiveDateField('due');
-                    }}
-                    onFocus={() => setActiveDateField('due')}
-                    className="w-full rounded-lg border border-border bg-background px-2 py-1.5 text-xs"
-                  />
-                </div>
+                  </span>
+                  <span className="block text-xs font-medium text-foreground">
+                    {endDate ? format(parseYmd(endDate)!, 'MMM d, yyyy') : 'Not set'}
+                  </span>
+                </button>
               </div>
 
               <div className="flex flex-col gap-2 rounded-lg border border-border/50 bg-muted/15 p-1 sm:flex-row sm:items-start">
-                <div className="w-full shrink-0 space-y-0 border-border/40 sm:w-[9.5rem] sm:border-r sm:pr-2">
+                <div className="w-full shrink-0 space-y-0 border-border/40 sm:w-[8.5rem] sm:border-r sm:pr-2">
                   {presets.map((p) => (
                     <button
                       key={p.label}
@@ -363,8 +374,18 @@ export function InlineTaskComposer({ memberOptions, onSave, onCancel }: InlineTa
                     onSelect={(d) => {
                       if (!d) return;
                       const ymd = formatYmd(d);
-                      if (activeDateField === 'start') setStartDate(ymd);
-                      else setEndDate(ymd);
+                      if (activeDateField === 'start') {
+                        setStartDate(ymd);
+                        // If start > due, or due is empty, reset due so the
+                        // user is nudged to pick one; keep picker open on
+                        // the "due" tab so the next click completes the range.
+                        if (!endDate || ymd > endDate) setEndDate('');
+                        setActiveDateField('due');
+                      } else {
+                        setEndDate(ymd);
+                        // Due-date selection finalises the range → close.
+                        setOpenSection(null);
+                      }
                     }}
                     onDayDoubleClick={(d) => {
                       if (!d) return;

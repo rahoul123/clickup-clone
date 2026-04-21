@@ -80,6 +80,8 @@ interface TaskDetailDialogProps {
   ) => Promise<void> | void;
   /** Navigate to another task — used by subtask cards and related-item chips. */
   onOpenTask?: (taskId: string) => void;
+  /** Delete a task (used by the per-subtask trash button). Must surface toast on failure. */
+  onDeleteTask?: (taskId: string) => Promise<void> | void;
   /** Search for tasks (used by Relate items) scoped to the task's workspace. */
   onSearchTasks?: (
     query: string
@@ -136,6 +138,7 @@ export function TaskDetailDialog({
   subtasks = [],
   onCreateSubtask,
   onOpenTask,
+  onDeleteTask,
   onSearchTasks,
   onResolveRelatedTasks,
 }: TaskDetailDialogProps) {
@@ -164,6 +167,18 @@ export function TaskDetailDialog({
   const [reminderDate, setReminderDate] = useState('');
   const [reminderTime, setReminderTime] = useState('09:00');
   const [reminderSubmitting, setReminderSubmitting] = useState(false);
+  /** User ids (in addition to the current user + task assignees) who should be notified. */
+  const [reminderNotifyUserIds, setReminderNotifyUserIds] = useState<string[]>([]);
+  /** Whether the "Notify others" picker is visible. */
+  const [reminderNotifyOpen, setReminderNotifyOpen] = useState(false);
+  /** Search query for the "Notify others" picker. */
+  const [reminderNotifySearch, setReminderNotifySearch] = useState('');
+  /** Private flag — keeps the reminder visible only to the creator + notified users. */
+  const [reminderPrivate, setReminderPrivate] = useState(false);
+  /** Files the user staged on the reminder composer. */
+  const [reminderAttachments, setReminderAttachments] = useState<File[]>([]);
+  const reminderNotifyPickerRef = useRef<HTMLDivElement | null>(null);
+  const reminderFileInputRef = useRef<HTMLInputElement | null>(null);
   /** Which comment currently has its inline reply composer open. */
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
   /** Draft text for the inline reply composer (per currently-open comment). */
@@ -581,6 +596,64 @@ export function TaskDetailDialog({
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, [assigneeDropdownOpen]);
 
+  // Close "Notify others" picker when the user clicks anywhere outside of it.
+  useEffect(() => {
+    if (!reminderNotifyOpen) return;
+    const handleOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (!reminderNotifyPickerRef.current?.contains(target)) {
+        setReminderNotifyOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, [reminderNotifyOpen]);
+
+  const filteredReminderNotifyMembers = useMemo(() => {
+    const q = reminderNotifySearch.trim().toLowerCase();
+    const base = q
+      ? memberOptions.filter((m) => m.label.toLowerCase().includes(q))
+      : memberOptions;
+    // Don't offer yourself as a "notify other" — use the "For me" button instead.
+    return base.filter((m) => m.id !== currentUserId);
+  }, [memberOptions, reminderNotifySearch, currentUserId]);
+
+  const toggleReminderNotifyMember = (id: string) => {
+    setReminderNotifyUserIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+
+  /** Cycles through a small palette so each avatar in the notify picker gets a
+   *  distinct, stable color (matches the compact AddTaskDialog styling). */
+  const reminderAvatarColor = (idx: number) => {
+    const palette = [
+      'bg-indigo-500',
+      'bg-blue-600',
+      'bg-green-600',
+      'bg-orange-500',
+      'bg-pink-500',
+      'bg-cyan-600',
+      'bg-gray-700',
+    ];
+    return palette[idx % palette.length];
+  };
+
+  const handleReminderFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length === 0) return;
+    setReminderAttachments((prev) => [...prev, ...files]);
+    if (event.target) event.target.value = '';
+  };
+
+  const removeReminderAttachment = (index: number) => {
+    setReminderAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const triggerReminderFilePicker = () => {
+    reminderFileInputRef.current?.click();
+  };
+
   useEffect(() => {
     if (!showMentionPicker) return;
     const handleOutsideClick = (event: MouseEvent) => {
@@ -749,20 +822,37 @@ export function TaskDetailDialog({
                 </PropertyItem>
 
                 <PropertyItem icon={<Calendar size={14} />} label="Dates">
-                  <div className="flex items-center gap-1">
-                    <input
-                      type="date"
-                      value={startDate}
-                      onChange={(e) => setStartDate(e.target.value)}
-                      className="flex-1 h-8 px-2 py-1 text-xs font-semibold rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-purple-300 dark:hover:border-purple-700 focus:border-purple-400 focus:ring-1 focus:ring-purple-100 transition-all"
-                    />
+                  {/* Two read-only chips open the same custom DatePopover (with
+                       presets + calendar). Using buttons avoids the duplicate
+                       browser-native date picker that `<input type="date">`
+                       would render alongside the custom popover. */}
+                  <div className="relative flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setActivePopup((p) => (p === 'dates' ? null : 'dates'))}
+                      className="flex-1 h-8 px-2 py-1 text-xs font-semibold rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-purple-300 dark:hover:border-purple-700 transition-all text-left truncate"
+                    >
+                      {startDate || <span className="text-gray-400 dark:text-slate-500">Start date</span>}
+                    </button>
                     <div className="text-gray-300 dark:text-slate-600 text-xs">→</div>
-                    <input
-                      type="date"
-                      value={endDate}
-                      onChange={(e) => setEndDate(e.target.value)}
-                      className="flex-1 h-8 px-2 py-1 text-xs font-semibold rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-purple-300 dark:hover:border-purple-700 focus:border-purple-400 focus:ring-1 focus:ring-purple-100 transition-all"
-                    />
+                    <button
+                      type="button"
+                      onClick={() => setActivePopup((p) => (p === 'dates' ? null : 'dates'))}
+                      className="flex-1 h-8 px-2 py-1 text-xs font-semibold rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-purple-300 dark:hover:border-purple-700 transition-all text-left truncate"
+                    >
+                      {endDate || <span className="text-gray-400 dark:text-slate-500">Due date</span>}
+                    </button>
+                    {activePopup === 'dates' && (
+                      <DatePopover
+                        startDate={startDate}
+                        dueDate={endDate}
+                        onChange={(next) => {
+                          setStartDate(next.startDate);
+                          setEndDate(next.dueDate);
+                        }}
+                        onClose={() => setActivePopup(null)}
+                      />
+                    )}
                   </div>
                 </PropertyItem>
 
@@ -862,10 +952,42 @@ export function TaskDetailDialog({
                           >
                             {sub.title}
                           </button>
-                          <ExternalLink
-                            size={12}
-                            className="text-gray-300 dark:text-slate-600 opacity-0 group-hover:opacity-100 transition"
-                          />
+                          {/* Hover-revealed row actions: open in new view + delete subtask.
+                               Stop propagation so clicks don't toggle the checkbox above. */}
+                          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onOpenTask?.(sub.id);
+                              }}
+                              title="Open subtask"
+                              className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-slate-200"
+                            >
+                              <ExternalLink size={12} />
+                            </button>
+                            {onDeleteTask && (
+                              <button
+                                type="button"
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  const ok = window.confirm(
+                                    `Delete subtask "${sub.title}"? This cannot be undone.`,
+                                  );
+                                  if (!ok) return;
+                                  try {
+                                    await onDeleteTask(sub.id);
+                                  } catch (err) {
+                                    console.error('Failed to delete subtask', err);
+                                  }
+                                }}
+                                title="Delete subtask"
+                                className="rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-500/15 dark:hover:text-red-400"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            )}
+                          </div>
                         </div>
                       );
                     })}
@@ -1786,131 +1908,359 @@ export function TaskDetailDialog({
           </div>
         </div>
         ) : activeTab === 'reminder' ? (
-          <div className="flex-1 bg-white dark:bg-slate-900 px-8 py-6 flex flex-col">
-            <div className="max-w-2xl space-y-5">
-              <input
-                type="text"
-                value={reminderTitle}
-                onChange={(e) => setReminderTitle(e.target.value)}
-                placeholder="Reminder name…"
-                className="w-full bg-transparent text-2xl font-semibold text-gray-900 dark:text-slate-100 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500 caret-purple-500"
-              />
-              <textarea
-                value={reminderBody}
-                onChange={(e) => setReminderBody(e.target.value)}
-                placeholder="Add a short description (optional)"
-                rows={3}
-                className="w-full resize-none rounded-md border border-gray-200 dark:border-slate-700 bg-transparent px-3 py-2 text-sm text-gray-700 dark:text-slate-200 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500 focus:border-purple-500"
-              />
-              <div className="grid grid-cols-[auto_auto_1fr] items-center gap-3">
-                <label className="text-[12px] font-medium text-gray-500 dark:text-slate-400">When</label>
+          <div className="flex-1 bg-white dark:bg-slate-900 flex flex-col">
+            <div className="flex-1 px-8 py-6 overflow-y-auto">
+              <div className="max-w-2xl space-y-5">
                 <input
-                  type="date"
-                  value={reminderDate}
-                  onChange={(e) => setReminderDate(e.target.value)}
-                  className="h-9 rounded-md border border-gray-200 dark:border-slate-700 bg-transparent px-2 text-sm text-gray-700 dark:text-slate-200 outline-none focus:border-purple-500"
+                  type="text"
+                  value={reminderTitle}
+                  onChange={(e) => setReminderTitle(e.target.value)}
+                  placeholder="Reminder name or type '/' for commands"
+                  className="w-full bg-transparent text-2xl font-semibold text-gray-900 dark:text-slate-100 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500 caret-purple-500"
                 />
                 <input
-                  type="time"
-                  value={reminderTime}
-                  onChange={(e) => setReminderTime(e.target.value)}
-                  className="h-9 w-28 rounded-md border border-gray-200 dark:border-slate-700 bg-transparent px-2 text-sm text-gray-700 dark:text-slate-200 outline-none focus:border-purple-500"
+                  type="text"
+                  value={reminderBody}
+                  onChange={(e) => setReminderBody(e.target.value)}
+                  placeholder="Add description"
+                  className="w-full bg-transparent text-base text-gray-700 dark:text-slate-300 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500"
                 />
+
+                <div className="grid grid-cols-[auto_auto_1fr] items-center gap-3">
+                  <label className="text-[12px] font-medium text-gray-500 dark:text-slate-400">When</label>
+                  <input
+                    type="date"
+                    value={reminderDate}
+                    onChange={(e) => setReminderDate(e.target.value)}
+                    className="h-9 rounded-md border border-gray-200 dark:border-slate-700 bg-transparent px-2 text-sm text-gray-700 dark:text-slate-200 outline-none focus:border-purple-500"
+                  />
+                  <input
+                    type="time"
+                    value={reminderTime}
+                    onChange={(e) => setReminderTime(e.target.value)}
+                    className="h-9 w-28 rounded-md border border-gray-200 dark:border-slate-700 bg-transparent px-2 text-sm text-gray-700 dark:text-slate-200 outline-none focus:border-purple-500"
+                  />
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const t = new Date();
+                      setReminderDate(
+                        `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`,
+                      );
+                    }}
+                    className="rounded border border-gray-200 dark:border-slate-700 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
+                  >
+                    Today
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const t = new Date();
+                      t.setDate(t.getDate() + 1);
+                      setReminderDate(
+                        `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`,
+                      );
+                    }}
+                    className="rounded border border-gray-200 dark:border-slate-700 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
+                  >
+                    Tomorrow
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const t = new Date();
+                      t.setDate(t.getDate() + 7);
+                      setReminderDate(
+                        `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`,
+                      );
+                    }}
+                    className="rounded border border-gray-200 dark:border-slate-700 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
+                  >
+                    Next week
+                  </button>
+
+                  {/* "For me" — adds the current user as an assignee so they get
+                       the task reminder too. Mirrors the behavior in the
+                       compact AddTaskDialog so this expanded view stays 1:1. */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (currentUserId) {
+                        setAssigneeIds((prev) =>
+                          prev.includes(currentUserId) ? prev : [...prev, currentUserId],
+                        );
+                      }
+                    }}
+                    className={`rounded border px-2.5 py-1.5 text-[12px] transition-colors ${
+                      currentUserId && assigneeIds.includes(currentUserId)
+                        ? 'border-purple-300 dark:border-purple-500/60 bg-purple-50 dark:bg-purple-500/15 text-purple-700 dark:text-purple-300'
+                        : 'border-gray-200 dark:border-slate-700 text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    For me
+                  </button>
+
+                  {/* "Notify others…" — opens a searchable member picker so the
+                       creator can ping teammates who aren't currently assigned. */}
+                  <div className="relative" ref={reminderNotifyPickerRef}>
+                    <button
+                      type="button"
+                      onClick={() => setReminderNotifyOpen((prev) => !prev)}
+                      className={`rounded border px-2.5 py-1.5 text-[12px] transition-colors ${
+                        reminderNotifyOpen
+                          ? 'border-blue-300 dark:border-blue-500/60 bg-blue-50 dark:bg-blue-500/15 text-blue-700 dark:text-blue-300'
+                          : 'border-gray-200 dark:border-slate-700 text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      Notify others…
+                      {reminderNotifyUserIds.length > 0 && (
+                        <span className="ml-1.5 rounded bg-blue-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                          {reminderNotifyUserIds.length}
+                        </span>
+                      )}
+                    </button>
+                    {reminderNotifyOpen && (
+                      <div className="absolute left-0 top-full z-[70] mt-2 w-[min(calc(100vw-2rem),22rem)] overflow-hidden rounded-xl border border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl">
+                        {/* "Notify only" header explains that tagged users are pinged
+                             without being formally assigned to the reminder. */}
+                        <div className="border-b border-gray-50 dark:border-slate-800 bg-blue-50/60 dark:bg-blue-950/30 px-3 py-2">
+                          <p className="text-[11px] font-semibold text-blue-900 dark:text-blue-200">Notify only</p>
+                          <p className="text-[10px] leading-snug text-blue-800/80 dark:text-blue-300/80">
+                            Selected people get a notification — they are not assigned unless you also pick them under Assignee.
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 border-b border-gray-50 dark:border-slate-800 px-3 py-2">
+                          <Search size={14} className="shrink-0 text-gray-400 dark:text-slate-500" />
+                          <input
+                            type="text"
+                            value={reminderNotifySearch}
+                            onChange={(e) => setReminderNotifySearch(e.target.value)}
+                            placeholder="Search or enter email..."
+                            className="w-full bg-transparent text-[12px] text-gray-700 dark:text-slate-200 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500"
+                          />
+                        </div>
+                        <div className="max-h-64 overflow-y-auto py-1">
+                          {filteredReminderNotifyMembers.length === 0 ? (
+                            <p className="px-3 py-6 text-center text-[12px] text-gray-400 dark:text-slate-500">
+                              No users available
+                            </p>
+                          ) : (
+                            filteredReminderNotifyMembers.map((m, idx) => {
+                              const selected = reminderNotifyUserIds.includes(m.id);
+                              const initial = (m.label || 'U').trim().charAt(0).toUpperCase() || 'U';
+                              return (
+                                <button
+                                  key={m.id}
+                                  type="button"
+                                  onClick={() => toggleReminderNotifyMember(m.id)}
+                                  className={`flex w-full items-center justify-between px-3 py-2 text-left transition-colors ${
+                                    selected
+                                      ? 'bg-blue-50 dark:bg-blue-500/15'
+                                      : 'hover:bg-gray-50 dark:hover:bg-slate-800'
+                                  }`}
+                                >
+                                  <span className="flex min-w-0 items-center gap-2">
+                                    <span
+                                      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white ${reminderAvatarColor(idx)}`}
+                                    >
+                                      {initial}
+                                    </span>
+                                    <span className="truncate text-[12px] text-gray-700 dark:text-slate-200">{m.label}</span>
+                                  </span>
+                                  <span className="flex shrink-0 items-center gap-1.5">
+                                    <span className="h-2 w-2 rounded-full bg-emerald-500" title="Online" />
+                                    {selected && <Check size={14} className="text-blue-600 dark:text-blue-400" />}
+                                  </span>
+                                </button>
+                              );
+                            })
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {(assigneeIds.length > 0 || reminderNotifyUserIds.length > 0) && (
+                  <div className="flex flex-wrap items-center gap-2 text-[12px] text-gray-600 dark:text-slate-400">
+                    <span className="font-medium">Notify:</span>
+                    {[...new Set([...assigneeIds, ...reminderNotifyUserIds])].map((id) => {
+                      const member = memberOptions.find((m) => m.id === id);
+                      if (!member) return null;
+                      const isAssignee = assigneeIds.includes(id);
+                      return (
+                        <span
+                          key={id}
+                          className="inline-flex items-center gap-1 rounded-full border border-purple-200 dark:border-purple-800/60 bg-purple-50 dark:bg-purple-900/30 px-2 py-0.5 text-purple-700 dark:text-purple-300"
+                        >
+                          {member.label}
+                          {!isAssignee && (
+                            <button
+                              type="button"
+                              onClick={() => toggleReminderNotifyMember(id)}
+                              className="ml-0.5 rounded-full p-0.5 transition-colors hover:bg-purple-100 dark:hover:bg-purple-900/60"
+                              aria-label={`Remove ${member.label}`}
+                            >
+                              <X size={10} />
+                            </button>
+                          )}
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {reminderAttachments.length > 0 && (
+                  <div className="space-y-2">
+                    <div className="text-[12px] font-medium text-gray-500 dark:text-slate-400">
+                      Attachments ({reminderAttachments.length})
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {reminderAttachments.map((file, idx) => (
+                        <div
+                          key={`${file.name}-${idx}`}
+                          className="group inline-flex max-w-full items-center gap-2 rounded-md border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800/60 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-200"
+                        >
+                          <Paperclip size={12} className="flex-shrink-0 text-gray-400 dark:text-slate-500" />
+                          <span className="truncate" title={file.name}>
+                            {file.name}
+                          </span>
+                          <span className="flex-shrink-0 text-[10px] text-gray-400 dark:text-slate-500">
+                            {(file.size / 1024).toFixed(0)} KB
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => removeReminderAttachment(idx)}
+                            className="ml-1 flex-shrink-0 rounded p-0.5 text-gray-400 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
+                            title="Remove"
+                          >
+                            <X size={12} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <p className="text-[11px] text-gray-400 dark:text-slate-500">
+                  We'll send a heads-up notification <span className="font-medium">one day before</span> and again on the <span className="font-medium">reminder date</span>.
+                  {assigneeIds.length > 0 && ' Assignees of this task will also receive both notifications.'}
+                </p>
               </div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const t = new Date();
-                    setReminderDate(
-                      `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`,
-                    );
-                  }}
-                  className="rounded border border-gray-200 dark:border-slate-700 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
-                >
-                  Today
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const t = new Date();
-                    t.setDate(t.getDate() + 1);
-                    setReminderDate(
-                      `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`,
-                    );
-                  }}
-                  className="rounded border border-gray-200 dark:border-slate-700 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
-                >
-                  Tomorrow
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const t = new Date();
-                    t.setDate(t.getDate() + 7);
-                    setReminderDate(
-                      `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`,
-                    );
-                  }}
-                  className="rounded border border-gray-200 dark:border-slate-700 px-2.5 py-1.5 text-[12px] text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
-                >
-                  Next week
-                </button>
-              </div>
-              <p className="text-[11px] text-gray-400 dark:text-slate-500">
-                We'll notify you <span className="font-medium">1 day before</span> and again on the <span className="font-medium">reminder date</span>.
-                {assigneeIds.length > 0 && ' Assignees of this task will also receive both notifications.'}
-              </p>
             </div>
-            <div className="mt-auto flex justify-end pt-6">
-              <button
-                type="button"
-                disabled={reminderSubmitting}
-                onClick={async () => {
-                  if (!onCreateReminder) {
-                    toast({ title: 'Reminder service unavailable' });
-                    return;
+
+            {/* Sticky footer: Private toggle (left) · paperclip + Create (right). */}
+            <div className="flex items-center justify-between gap-4 border-t border-gray-100 dark:border-slate-800/80 bg-gray-50/50 dark:bg-slate-950/40 px-6 py-3">
+              <label className="inline-flex items-center gap-2 text-[13px] text-gray-600 dark:text-slate-400">
+                <input
+                  type="checkbox"
+                  checked={reminderPrivate}
+                  onChange={(e) => setReminderPrivate(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300 dark:border-slate-600"
+                />
+                Private
+              </label>
+
+              <div className="flex items-center gap-3">
+                <input
+                  ref={reminderFileInputRef}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={handleReminderFileSelect}
+                />
+                <button
+                  type="button"
+                  onClick={triggerReminderFilePicker}
+                  title={
+                    reminderAttachments.length > 0
+                      ? `${reminderAttachments.length} file${reminderAttachments.length > 1 ? 's' : ''} attached`
+                      : 'Attach files to this reminder'
                   }
-                  const titleTrim = reminderTitle.trim();
-                  if (!titleTrim) {
-                    toast({ title: 'Reminder needs a name' });
-                    return;
-                  }
-                  if (!reminderDate) {
-                    toast({ title: 'Pick a date', description: 'Choose when this reminder should fire.' });
-                    return;
-                  }
-                  const timeStr = /^\d{2}:\d{2}$/.test(reminderTime) ? reminderTime : '09:00';
-                  const [hh, mm] = timeStr.split(':').map((n) => Number(n));
-                  const [y, mo, d] = reminderDate.split('-').map((n) => Number(n));
-                  const dueLocal = new Date(y, (mo || 1) - 1, d || 1, hh || 9, mm || 0, 0, 0);
-                  if (Number.isNaN(dueLocal.getTime())) {
-                    toast({ title: 'Invalid reminder date' });
-                    return;
-                  }
-                  const notifyIds = Array.from(
-                    new Set([...(currentUserId ? [currentUserId] : []), ...assigneeIds]),
-                  );
-                  setReminderSubmitting(true);
-                  try {
-                    await onCreateReminder({
-                      title: `${titleTrim} (${task.title})`,
-                      description: reminderBody.trim() || undefined,
-                      dueDate: dueLocal.toISOString(),
-                      notifyUserIds: notifyIds.length > 0 ? notifyIds : undefined,
-                    });
-                    setReminderTitle('');
-                    setReminderBody('');
-                    setReminderDate('');
-                    setReminderTime('09:00');
-                  } finally {
-                    setReminderSubmitting(false);
-                  }
-                }}
-                className="h-9 px-5 bg-purple-600 text-white rounded text-sm font-semibold hover:bg-purple-700 disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {reminderSubmitting ? 'Creating…' : 'Create Reminder'}
-              </button>
+                  className={`relative inline-flex items-center justify-center rounded-md p-2 transition-colors ${
+                    reminderAttachments.length > 0
+                      ? 'text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-500/10'
+                      : 'text-gray-500 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800 hover:text-gray-700 dark:hover:text-slate-200'
+                  }`}
+                  aria-label="Attach files"
+                >
+                  <Paperclip size={16} />
+                  {reminderAttachments.length > 0 && (
+                    <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-purple-600 px-1 text-[9px] font-bold text-white">
+                      {reminderAttachments.length}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  disabled={reminderSubmitting}
+                  onClick={async () => {
+                    if (!onCreateReminder) {
+                      toast({ title: 'Reminder service unavailable' });
+                      return;
+                    }
+                    const titleTrim = reminderTitle.trim();
+                    if (!titleTrim) {
+                      toast({ title: 'Reminder needs a name' });
+                      return;
+                    }
+                    if (!reminderDate) {
+                      toast({ title: 'Pick a date', description: 'Choose when this reminder should fire.' });
+                      return;
+                    }
+                    const timeStr = /^\d{2}:\d{2}$/.test(reminderTime) ? reminderTime : '09:00';
+                    const [hh, mm] = timeStr.split(':').map((n) => Number(n));
+                    const [y, mo, d] = reminderDate.split('-').map((n) => Number(n));
+                    const dueLocal = new Date(y, (mo || 1) - 1, d || 1, hh || 9, mm || 0, 0, 0);
+                    if (Number.isNaN(dueLocal.getTime())) {
+                      toast({ title: 'Invalid reminder date' });
+                      return;
+                    }
+                    // When "Private", skip task-assignees and only ping the
+                    // creator + explicitly chosen teammates.
+                    const notifyIds = reminderPrivate
+                      ? Array.from(
+                          new Set([
+                            ...(currentUserId ? [currentUserId] : []),
+                            ...reminderNotifyUserIds,
+                          ]),
+                        )
+                      : Array.from(
+                          new Set([
+                            ...(currentUserId ? [currentUserId] : []),
+                            ...assigneeIds,
+                            ...reminderNotifyUserIds,
+                          ]),
+                        );
+                    setReminderSubmitting(true);
+                    try {
+                      await onCreateReminder({
+                        title: `${titleTrim} (${task.title})`,
+                        description: reminderBody.trim() || undefined,
+                        dueDate: dueLocal.toISOString(),
+                        notifyUserIds: notifyIds.length > 0 ? notifyIds : undefined,
+                        attachments: reminderAttachments.length ? reminderAttachments : undefined,
+                      });
+                      setReminderTitle('');
+                      setReminderBody('');
+                      setReminderDate('');
+                      setReminderTime('09:00');
+                      setReminderNotifyUserIds([]);
+                      setReminderNotifySearch('');
+                      setReminderAttachments([]);
+                      setReminderPrivate(false);
+                    } finally {
+                      setReminderSubmitting(false);
+                    }
+                  }}
+                  className="h-9 px-5 bg-purple-600 text-white rounded text-sm font-semibold hover:bg-purple-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {reminderSubmitting ? 'Creating…' : 'Create Reminder'}
+                </button>
+              </div>
             </div>
           </div>
         ) : (
@@ -2617,8 +2967,18 @@ const DatePopover = ({
   };
 
   const setActiveDate = (iso: string) => {
-    if (tab === 'start') onChange({ startDate: iso, dueDate });
-    else onChange({ startDate, dueDate: iso });
+    if (tab === 'start') {
+      // Natural flow: after picking a start, move focus to the due tab so
+      // the next click completes the range. Clear due if the new start is
+      // later than the existing due.
+      const nextDue = !dueDate || iso > dueDate ? '' : dueDate;
+      onChange({ startDate: iso, dueDate: nextDue });
+      setTab('due');
+    } else {
+      onChange({ startDate, dueDate: iso });
+      // Due-date selection finalises the range → close the popover.
+      onClose();
+    }
   };
 
   const today = new Date();

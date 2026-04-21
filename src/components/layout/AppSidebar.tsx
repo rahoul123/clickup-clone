@@ -768,7 +768,7 @@ export function AppSidebar({
           onClick={() => {
             if (isLockedList) {
               window.alert(
-                'Ye list restricted hai. Admin ya list creator se access request karo.'
+                'This list is restricted. Please request access from the admin or list creator.'
               );
               return;
             }
@@ -1309,7 +1309,7 @@ export function AppSidebar({
                     Restrict access
                   </span>
                   <span className="mt-0.5 block text-xs text-muted-foreground">
-                    Sirf aap, admin, aur neeche select kiye gaye log hi is list ko dekh payenge.
+                    Only you, admins, and the people selected below will be able to see this list.
                   </span>
                 </span>
               </label>
@@ -1448,7 +1448,7 @@ export function AppSidebar({
                     Restrict access
                   </span>
                   <span className="mt-0.5 block text-xs text-muted-foreground">
-                    Uncheck karoge to list sab ko visible aur accessible ho jayegi
+                    If unchecked, the list will be visible and accessible to everyone
                     (default department rules apply).
                   </span>
                 </span>

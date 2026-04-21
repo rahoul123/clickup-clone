@@ -38,7 +38,7 @@ class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, { 
           <div className="mx-auto mt-10 max-w-2xl rounded-xl border border-destructive/30 bg-card p-5 shadow-sm">
             <h1 className="text-lg font-semibold text-destructive">Something went wrong</h1>
             <p className="mt-2 text-sm text-muted-foreground">
-              Runtime error aya hai. Page blank hone ke bajaye yeh panel show ho raha hai.
+              A runtime error occurred. This panel is shown instead of a blank page.
             </p>
             <pre className="mt-3 overflow-auto rounded-md bg-muted p-3 text-xs text-muted-foreground">{this.state.message}</pre>
             <button

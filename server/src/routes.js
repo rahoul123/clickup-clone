@@ -2500,13 +2500,22 @@ export function buildRoutes({ realtime } = {}) {
       if (!canTouch) return res.status(403).json({ message: 'Employees can delete only their own/assigned tasks' });
     }
 
-    await TaskAssignee.deleteMany({ taskId });
-    await TaskComment.deleteMany({ taskId });
-    await Notification.deleteMany({ taskId });
-    await Task.deleteOne({ _id: taskId });
+    // Cascade-delete subtasks so the UI doesn't end up with orphaned children
+    // whose parent_task_id points at a now-missing row.
+    const subtaskDocs = await Task.find({ parentTaskId: taskId }).select('_id').lean();
+    const subtaskIds = subtaskDocs.map((doc) => doc._id);
+    const allIds = [taskId, ...subtaskIds];
+
+    await TaskAssignee.deleteMany({ taskId: { $in: allIds } });
+    await TaskComment.deleteMany({ taskId: { $in: allIds } });
+    await Notification.deleteMany({ taskId: { $in: allIds } });
+    await Task.deleteMany({ _id: { $in: allIds } });
 
     rt.broadcast('task:deleted', { task_id: taskId, list_id: task.listId });
-    res.json({ ok: true });
+    for (const childId of subtaskIds) {
+      rt.broadcast('task:deleted', { task_id: childId, list_id: task.listId });
+    }
+    res.json({ ok: true, deleted_subtask_ids: subtaskIds });
   });
 
   router.get('/tasks/:taskId', requireAuth, async (req, res) => {

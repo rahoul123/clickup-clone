@@ -1116,6 +1116,7 @@ export function KanbanBoard({
             const next = tasks.find((t) => t.id === taskId);
             if (next) setSelectedTask(next);
           }}
+          onDeleteTask={handleDeleteTask}
           onSearchTasks={onSearchTasks ? (q) => onSearchTasks(q, selectedTask.id) : undefined}
           onResolveRelatedTasks={onResolveRelatedTasks}
         />

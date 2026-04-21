@@ -596,7 +596,7 @@ const Index = () => {
       await hydrateTasks(listId);
     } catch (error) {
       console.error('Failed to open task from notification', error);
-      toast.error('Task open nahi ho saka. Shayad access issue hai.');
+      toast.error('Could not open task. This may be an access issue.');
     }
   };
 
@@ -648,7 +648,7 @@ const Index = () => {
   const createSpace = async (name: string) => {
     if (!user || !activeWorkspaceId) return;
     if (!canCreateSpaces) {
-      window.alert('Sirf admin space create kar sakta hai.');
+      window.alert('Only admins can create team spaces.');
       return;
     }
     const suggestedDepartment = activeWorkspace?.department ?? user.department ?? '';
@@ -665,7 +665,7 @@ const Index = () => {
   ) => {
     if (!user) return;
     if (!canManageLists) {
-      window.alert('Aapke role me list create karne ki permission nahi hai.');
+      window.alert('Your role does not have permission to create lists.');
       return;
     }
     const { list: data } = await api.app.createList(spaceId, name, access);
@@ -789,7 +789,7 @@ const Index = () => {
 
   const deleteList = async (listId: string, listName: string) => {
     if (!canManageLists) {
-      window.alert('Aapke role me list delete karne ki permission nahi hai.');
+      window.alert('Your role does not have permission to delete lists.');
       return;
     }
     const ok = window.confirm(`Are you sure you want to delete list "${listName}"?`);
@@ -815,7 +815,7 @@ const Index = () => {
   ) => {
     if (!activeWorkspaceId) return;
     if (!canInviteMembers) {
-      window.alert('Sirf admin invite kar sakta hai.');
+      window.alert('Only admins can send invites.');
       return;
     }
     const result = await api.app.inviteMember(activeWorkspaceId, email, role, department);
@@ -850,7 +850,7 @@ const Index = () => {
     const targetListId = payload.listId || activeList;
     if (!user || !targetListId) return;
     if (!canCreateTasks) {
-      window.alert('Guest role task create nahi kar sakta.');
+      window.alert('Guest role cannot create tasks.');
       return;
     }
     const { task: data } = await api.app.createTask({
@@ -1012,7 +1012,7 @@ const Index = () => {
 
   const moveTask = async (taskId: string, nextStatus: string) => {
     if (!canCreateTasks) {
-      window.alert('Aapke role me drag-drop permission nahi hai.');
+      window.alert('Your role does not have drag-and-drop permission.');
       return;
     }
     const currentTask = tasks.find((task) => task.id === taskId);
@@ -1189,18 +1189,21 @@ const Index = () => {
     toast.success('Task deleted successfully.');
   };
 
-  const patchListKanban = useCallback(
-    async (payload: {
-      kanbanColumnOrder?: string[];
-      kanbanColumnLabels?: Partial<Record<string, string>>;
-      addKanbanColumn?: { label: string; color?: string };
-      updateKanbanCustomColumn?: { id: string; label: string; color?: string };
-      deleteKanbanCustomColumn?: { id: string };
-      deleteKanbanColumn?: { id: string };
-    }) => {
-      if (!activeList) return;
+  /** Low-level helper: patch kanban settings for a specific list id. */
+  const patchKanbanForList = useCallback(
+    async (
+      listId: string,
+      payload: {
+        kanbanColumnOrder?: string[];
+        kanbanColumnLabels?: Partial<Record<string, string>>;
+        addKanbanColumn?: { label: string; color?: string };
+        updateKanbanCustomColumn?: { id: string; label: string; color?: string };
+        deleteKanbanCustomColumn?: { id: string };
+        deleteKanbanColumn?: { id: string };
+      }
+    ) => {
       try {
-        const { list } = await api.app.updateListKanban(activeList, {
+        const { list } = await api.app.updateListKanban(listId, {
           kanbanColumnOrder: payload.kanbanColumnOrder,
           kanbanColumnLabels: payload.kanbanColumnLabels as Record<string, string> | undefined,
           addKanbanColumn: payload.addKanbanColumn,
@@ -1226,7 +1229,16 @@ const Index = () => {
         toast.error('Board settings save failed.');
       }
     },
-    [activeList]
+    []
+  );
+
+  /** Used by the list-view KanbanBoard — targets the currently active list. */
+  const patchListKanban = useCallback(
+    async (payload: Parameters<typeof patchKanbanForList>[1]) => {
+      if (!activeList) return;
+      await patchKanbanForList(activeList, payload);
+    },
+    [activeList, patchKanbanForList]
   );
 
   if (loading) {
@@ -1470,6 +1482,12 @@ const Index = () => {
             (() => {
               const spaceLists = lists.filter((l) => l.space_id === activeSpaceView.spaceId);
               const firstListId = spaceLists[0]?.id ?? null;
+              // The space view groups tasks from all lists in the space; the
+              // kanban columns however live on a specific list, so we edit
+              // the first list's config. If a manager adds a "group" here,
+              // it's added to that list and stays consistent when they drill
+              // into it.
+              const firstListEntity = spaceLists[0] ?? null;
               return (
                 <KanbanBoard
                   workspaceName={activeWorkspace?.name ?? 'Team Workspace'}
@@ -1494,19 +1512,27 @@ const Index = () => {
                   onDeleteTask={(taskId) =>
                     deleteTaskDetails(taskId).catch((error) => {
                       console.error('Failed to delete task', error);
-                      toast.error('Task delete failed.');
+                      toast.error(
+                        error instanceof Error && error.message
+                          ? `Task delete failed: ${error.message}`
+                          : 'Task delete failed.'
+                      );
                     })
                   }
                   canCreateTask={canCreateTasks && Boolean(firstListId)}
                   taskToOpenId={taskToOpenId}
                   onConsumedTaskOpen={() => setTaskToOpenId(null)}
-                  kanbanColumnOrder={null}
-                  kanbanColumnLabels={undefined}
-                  kanbanCustomColumns={[]}
-                  canManageKanban={false}
+                  kanbanColumnOrder={firstListEntity?.kanban_column_order}
+                  kanbanColumnLabels={firstListEntity?.kanban_column_labels}
+                  kanbanCustomColumns={firstListEntity?.kanban_custom_columns ?? []}
+                  canManageKanban={canManageStructure && Boolean(firstListId)}
                   spaceDiscussionId={activeSpaceView.spaceId}
                   spaceDiscussionName={activeSpaceView.spaceName}
-                  onUpdateKanban={undefined}
+                  onUpdateKanban={
+                    firstListId
+                      ? (payload) => patchKanbanForList(firstListId, payload)
+                      : undefined
+                  }
                   onCreateReminder={createReminder}
                   onCreateSubtask={createSubtask}
                   onSearchTasks={searchWorkspaceTasks}
@@ -1535,7 +1561,11 @@ const Index = () => {
               }
               onDeleteTask={(taskId) => deleteTaskDetails(taskId).catch((error) => {
                 console.error('Failed to delete task', error);
-                toast.error('Task delete failed.');
+                toast.error(
+                  error instanceof Error && error.message
+                    ? `Task delete failed: ${error.message}`
+                    : 'Task delete failed.'
+                );
               })}
               canCreateTask={canCreateTasks && Boolean(activeList)}
               taskToOpenId={taskToOpenId}

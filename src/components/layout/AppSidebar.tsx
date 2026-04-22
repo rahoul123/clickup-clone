@@ -40,6 +40,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { ThemeToggle } from '@/components/ThemeToggle';
+import { toast } from 'sonner';
 
 interface SidebarItem {
   id: string;
@@ -59,6 +60,8 @@ interface SidebarItem {
   noExpand?: boolean;
   type: 'space' | 'list' | 'nav' | 'discussion';
   color?: string;
+  /** For `type: 'space'` — optional custom 1-4 char label shown inside the color avatar. */
+  spaceIcon?: string | null;
   /** Master "Team Space" folder — + creates a department space, not a list */
   isMasterFolder?: boolean;
   /** For `type: 'list'` — when true, render a small lock icon to indicate restricted access. */
@@ -122,12 +125,15 @@ interface AppSidebarProps {
       id: string;
       name: string;
       color?: string;
+      /** Optional short label shown inside the space avatar (e.g. "W"). */
+      spaceIcon?: string | null;
       isMasterFolder?: boolean;
       lists?: Array<ListRowProps>;
       children?: Array<{
         id: string;
         name: string;
         color?: string;
+        spaceIcon?: string | null;
         noExpand?: boolean;
         /** If true, render a '# <name> Discussion' channel entry first under this department. */
         showDiscussion?: boolean;
@@ -189,6 +195,11 @@ interface AppSidebarProps {
   /** Current viewer — auto-included as an allowed user so the creator never locks themselves out. */
   currentUserId?: string | null;
   onDeleteSpace: (spaceId: string, spaceName: string) => Promise<void> | void;
+  /** Rename / recolor / re-icon a department space. Only shown to structure managers. */
+  onUpdateSpaceDetails?: (
+    spaceId: string,
+    payload: { name?: string; color?: string | null; icon?: string | null }
+  ) => Promise<void> | void;
   onDeleteList: (listId: string, listName: string) => Promise<void> | void;
   onInvite: (email: string, role: 'employee' | 'team_lead' | 'manager' | 'admin', department: string) => Promise<void> | void;
   canManageWorkspace: boolean;
@@ -231,6 +242,7 @@ export function AppSidebar({
   onToggleFavoriteList,
   onFetchArchivedLists,
   onDeleteSpace,
+  onUpdateSpaceDetails,
   onDeleteList,
   onInvite,
   memberOptions = [],
@@ -459,6 +471,54 @@ export function AppSidebar({
       icon: appearanceState.icon,
     });
     setAppearanceState(null);
+  };
+
+  // ---------- Space rename / appearance (same pattern as list, separate state) ----------
+  const [spaceRenameState, setSpaceRenameState] = useState<{ spaceId: string; name: string } | null>(null);
+  const [spaceRenameValue, setSpaceRenameValue] = useState('');
+
+  const openSpaceRenameModal = (space: { id: string; name: string }) => {
+    setSpaceRenameState({ spaceId: space.id, name: space.name });
+    setSpaceRenameValue(space.name);
+  };
+  const submitSpaceRename = async () => {
+    if (!spaceRenameState || !onUpdateSpaceDetails) return;
+    const trimmed = spaceRenameValue.trim();
+    if (!trimmed || trimmed === spaceRenameState.name) {
+      setSpaceRenameState(null);
+      return;
+    }
+    await onUpdateSpaceDetails(spaceRenameState.spaceId, { name: trimmed });
+    setSpaceRenameState(null);
+  };
+
+  const [spaceAppearanceState, setSpaceAppearanceState] = useState<{
+    spaceId: string;
+    name: string;
+    color: string | null;
+    icon: string | null;
+  } | null>(null);
+
+  const openSpaceAppearanceModal = (space: {
+    id: string;
+    name: string;
+    color?: string | null;
+    icon?: string | null;
+  }) => {
+    setSpaceAppearanceState({
+      spaceId: space.id,
+      name: space.name,
+      color: space.color ?? null,
+      icon: space.icon ?? null,
+    });
+  };
+  const submitSpaceAppearance = async () => {
+    if (!spaceAppearanceState || !onUpdateSpaceDetails) return;
+    await onUpdateSpaceDetails(spaceAppearanceState.spaceId, {
+      color: spaceAppearanceState.color,
+      icon: spaceAppearanceState.icon,
+    });
+    setSpaceAppearanceState(null);
   };
 
   const [infoState, setInfoState] = useState<{
@@ -812,7 +872,7 @@ export function AppSidebar({
               className="w-5 h-5 rounded flex items-center justify-center text-xs font-bold text-sidebar-primary-foreground flex-shrink-0"
               style={{ backgroundColor: item.color || 'hsl(var(--sidebar-primary))' }}
             >
-              {item.name[0]}
+              {(item.spaceIcon && item.spaceIcon.trim()) || item.name[0]}
             </span>
           )}
           {item.type === 'list' && (
@@ -900,7 +960,7 @@ export function AppSidebar({
               >
                 <Plus className="w-3.5 h-3.5" />
               </button>
-              {onFetchArchivedLists && canManageLists && (
+              {(canManageLists || canDeleteSpaces) && (
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <button
@@ -913,26 +973,61 @@ export function AppSidebar({
                       <MoreHorizontal className="w-3.5 h-3.5" />
                     </button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-48">
-                    <DropdownMenuItem onSelect={() => openArchivedModal(item.id, item.name)}>
-                      <Archive className="h-3.5 w-3.5 mr-2" /> View archived lists
+                  <DropdownMenuContent align="end" className="w-52">
+                    {onUpdateSpaceDetails && canManageLists && (
+                      <DropdownMenuItem
+                        onSelect={() => openSpaceRenameModal({ id: item.id, name: item.name })}
+                      >
+                        <Pencil className="h-3.5 w-3.5 mr-2" /> Rename
+                      </DropdownMenuItem>
+                    )}
+                    {onUpdateSpaceDetails && canManageLists && (
+                      <DropdownMenuItem
+                        onSelect={() =>
+                          openSpaceAppearanceModal({
+                            id: item.id,
+                            name: item.name,
+                            color: item.color ?? null,
+                            icon: item.spaceIcon ?? null,
+                          })
+                        }
+                      >
+                        <Palette className="h-3.5 w-3.5 mr-2" /> Color &amp; icon
+                      </DropdownMenuItem>
+                    )}
+                    <DropdownMenuItem
+                      onSelect={() => {
+                        const url = `${window.location.origin}${window.location.pathname}?space=${item.id}`;
+                        navigator.clipboard
+                          .writeText(url)
+                          .then(() => toast.success('Link copied'))
+                          .catch(() => toast.error('Copy failed'));
+                      }}
+                    >
+                      <LinkIcon className="h-3.5 w-3.5 mr-2" /> Copy link
                     </DropdownMenuItem>
+                    {onFetchArchivedLists && canManageLists && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onSelect={() => openArchivedModal(item.id, item.name)}>
+                          <Archive className="h-3.5 w-3.5 mr-2" /> View archived lists
+                        </DropdownMenuItem>
+                      </>
+                    )}
+                    {canDeleteSpaces && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          className="text-destructive focus:text-destructive"
+                          onSelect={() => onDeleteSpace(item.id, item.name)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
+                        </DropdownMenuItem>
+                      </>
+                    )}
                   </DropdownMenuContent>
                 </DropdownMenu>
               )}
-              <button
-                type="button"
-                disabled={!canDeleteSpaces}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (!canDeleteSpaces) return;
-                  onDeleteSpace(item.id, item.name);
-                }}
-                className="text-sidebar-muted hover:text-destructive disabled:opacity-30 disabled:cursor-not-allowed"
-                title="Delete space"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
             </div>
           )}
           {item.type === 'list' && renderListRowActions(item)}
@@ -1050,6 +1145,7 @@ export function AppSidebar({
                       id: child.id,
                       name: child.name,
                       color: child.color,
+                      spaceIcon: child.spaceIcon ?? null,
                       openListId: child.spaceForView ? undefined : child.lists[0]?.id,
                       spaceForView: child.spaceForView,
                       noExpand: child.noExpand,
@@ -1079,6 +1175,7 @@ export function AppSidebar({
                 id: space.id,
                 name: space.name,
                 color: space.color,
+                spaceIcon: space.spaceIcon ?? null,
                 type: 'space',
                 children: (space.lists ?? []).map((list) => ({
                   id: list.id,
@@ -1159,7 +1256,9 @@ export function AppSidebar({
                 onChange={(e) => setInviteRole(e.target.value as 'employee' | 'team_lead' | 'manager' | 'admin')}
                 className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
               >
-                <option value="employee">Employee</option>
+                {/* `employee` is the backend role key; UI copy is "Team Member"
+                   so the label doesn't read oddly to staff. */}
+                <option value="employee">Team Member</option>
                 <option value="team_lead">Team Lead</option>
                 <option value="manager">Manager</option>
                 <option value="admin">Admin</option>
@@ -1540,6 +1639,167 @@ export function AppSidebar({
               </button>
             </div>
           </form>
+        </div>
+      </div>
+    )}
+
+    {/* Rename space modal ---------------------------------------------- */}
+    {spaceRenameState && (
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+        <div className="w-full max-w-sm rounded-xl border border-border bg-background shadow-2xl">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h3 className="text-sm font-semibold">Rename department</h3>
+            <button
+              type="button"
+              onClick={() => setSpaceRenameState(null)}
+              className="text-muted-foreground hover:text-foreground"
+              aria-label="Close rename"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              submitSpaceRename();
+            }}
+            className="p-4 space-y-3"
+          >
+            <label className="text-xs text-muted-foreground">Department name</label>
+            <input
+              autoFocus
+              value={spaceRenameValue}
+              onChange={(e) => setSpaceRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setSpaceRenameState(null);
+              }}
+              className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+              maxLength={120}
+            />
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setSpaceRenameState(null)}
+                className="h-9 rounded-md border border-input px-3 text-sm transition-colors hover:bg-accent"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!spaceRenameValue.trim() || spaceRenameValue.trim() === spaceRenameState.name}
+                className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Save
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    )}
+
+    {/* Space appearance modal — color + short icon label --------------- */}
+    {spaceAppearanceState && (
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+        <div className="w-full max-w-sm rounded-xl border border-border bg-background shadow-2xl">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h3 className="text-sm font-semibold">
+              Appearance — {spaceAppearanceState.name}
+            </h3>
+            <button
+              type="button"
+              onClick={() => setSpaceAppearanceState(null)}
+              className="text-muted-foreground hover:text-foreground"
+              aria-label="Close appearance"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="p-4 space-y-5">
+            {/* Preview chip */}
+            <div className="flex items-center gap-3">
+              <span
+                className="flex h-10 w-10 items-center justify-center rounded-md text-sm font-bold text-white"
+                style={{
+                  backgroundColor: spaceAppearanceState.color || '#7C3AED',
+                }}
+              >
+                {(spaceAppearanceState.icon && spaceAppearanceState.icon.trim()) ||
+                  spaceAppearanceState.name[0] ||
+                  '?'}
+              </span>
+              <div className="text-xs text-muted-foreground">
+                Preview — how this department will appear in the sidebar.
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs text-muted-foreground">Color</label>
+              <div className="mt-2 grid grid-cols-5 gap-2">
+                {LIST_COLOR_SWATCHES.filter((s) => s.value !== null).map((swatch) => {
+                  const selected = spaceAppearanceState.color === swatch.sample;
+                  return (
+                    <button
+                      key={swatch.label}
+                      type="button"
+                      onClick={() =>
+                        setSpaceAppearanceState((prev) =>
+                          prev ? { ...prev, color: swatch.sample } : prev
+                        )
+                      }
+                      className={cn(
+                        'flex h-10 items-center justify-center rounded-md border text-[11px] font-medium transition-all',
+                        selected
+                          ? 'border-primary ring-2 ring-primary/40'
+                          : 'border-input hover:border-foreground/30'
+                      )}
+                      title={swatch.label}
+                    >
+                      <span
+                        className="h-5 w-5 rounded"
+                        style={{ backgroundColor: swatch.sample }}
+                      />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs text-muted-foreground">
+                Icon label (optional, 1-4 characters)
+              </label>
+              <input
+                value={spaceAppearanceState.icon ?? ''}
+                maxLength={4}
+                placeholder="e.g. W"
+                onChange={(e) =>
+                  setSpaceAppearanceState((prev) =>
+                    prev ? { ...prev, icon: e.target.value } : prev
+                  )
+                }
+                className="mt-2 h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+              />
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Leave empty to default to the first letter of the department name.
+              </p>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+            <button
+              type="button"
+              onClick={() => setSpaceAppearanceState(null)}
+              className="h-9 rounded-md border border-input px-3 text-sm transition-colors hover:bg-accent"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={submitSpaceAppearance}
+              className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+            >
+              Save
+            </button>
+          </div>
         </div>
       </div>
     )}

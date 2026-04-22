@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { connectMongo } from './db.js';
 import { buildRoutes } from './routes.js';
 import { startReminderScheduler } from './reminderScheduler.js';
+import { startOverdueScheduler } from './overdueScheduler.js';
 import { createRealtime } from './realtime.js';
 
 dotenv.config({ path: '../.env' });
@@ -90,6 +91,7 @@ connectMongo()
       console.log(`Socket.IO ready on ws://localhost:${PORT}/socket.io`);
     });
     startReminderScheduler({ realtime });
+    startOverdueScheduler({ realtime });
   })
   .catch((error) => {
     console.error('Failed to start server', error);

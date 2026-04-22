@@ -54,6 +54,11 @@ export const api = {
     createSpace: (workspaceId: string, name: string, department?: string) =>
       request('/spaces', { method: 'POST', body: JSON.stringify({ workspaceId, name, department }) }),
     deleteSpace: (spaceId: string) => request(`/spaces/${spaceId}`, { method: 'DELETE' }),
+    updateSpaceDetails: (
+      spaceId: string,
+      payload: { name?: string; color?: string | null; icon?: string | null }
+    ) =>
+      request(`/spaces/${spaceId}`, { method: 'PATCH', body: JSON.stringify(payload) }),
     createList: (
       spaceId: string,
       name: string,
@@ -128,6 +133,25 @@ export const api = {
     ) => request(`/workspaces/${workspaceId}/invite`, { method: 'POST', body: JSON.stringify({ email, role, department }) }),
     updateMemberRole: (workspaceId: string, memberId: string, role: 'employee' | 'team_lead' | 'manager' | 'admin') =>
       request(`/workspaces/${workspaceId}/members/${memberId}/role`, { method: 'PATCH', body: JSON.stringify({ role }) }),
+    getOverdueSettings: (workspaceId: string) =>
+      request(`/workspaces/${workspaceId}/settings/overdue`),
+    updateOverdueSettings: (
+      workspaceId: string,
+      payload: {
+        enabled?: boolean;
+        intervalMinutes?: number;
+        officeHoursStart?: number;
+        officeHoursEnd?: number;
+      }
+    ) =>
+      request(`/workspaces/${workspaceId}/settings/overdue`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }),
+    listOrphanTasks: (workspaceId: string) =>
+      request(`/workspaces/${workspaceId}/maintenance/orphan-tasks`),
+    deleteOrphanTasks: (workspaceId: string) =>
+      request(`/workspaces/${workspaceId}/maintenance/orphan-tasks`, { method: 'DELETE' }),
     createTask: (payload: {
       listId: string;
       title: string;

@@ -9,6 +9,8 @@ import {
   ChevronRight,
   CheckCheck,
   Loader2,
+  AlertTriangle,
+  Clock,
 } from 'lucide-react';
 import type { Notification } from '@/types';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -173,7 +175,10 @@ export function NotificationsPanel({
               </div>
             ) : (
               <ul className="space-y-2">
-                {pageItems.map((item) => (
+                {pageItems.map((item) => {
+                  const isOverdue = item.type === 'task_overdue';
+                  const isDueSoon = item.type === 'task_due_soon';
+                  return (
                   <li key={item.id}>
                     <button
                       type="button"
@@ -181,6 +186,10 @@ export function NotificationsPanel({
                         'group w-full rounded-xl border px-3 py-3 text-left transition-all hover:-translate-y-0.5 hover:shadow-sm',
                         item.read
                           ? 'border-border/70 bg-background/80 hover:bg-muted/50'
+                          : isOverdue
+                          ? 'border-red-300/60 bg-red-50/60 shadow-sm hover:bg-red-50 dark:border-red-900/60 dark:bg-red-950/20 dark:hover:bg-red-950/30'
+                          : isDueSoon
+                          ? 'border-amber-300/60 bg-amber-50/60 shadow-sm hover:bg-amber-50 dark:border-amber-900/60 dark:bg-amber-950/20 dark:hover:bg-amber-950/30'
                           : 'border-primary/30 bg-primary/[0.06] shadow-sm hover:bg-primary/[0.10]',
                       )}
                       onClick={() => {
@@ -194,11 +203,19 @@ export function NotificationsPanel({
                             'mt-0.5 flex h-7 w-7 items-center justify-center rounded-full flex-shrink-0',
                             item.read
                               ? 'bg-muted text-muted-foreground'
+                              : isOverdue
+                              ? 'bg-red-100 text-red-600 ring-1 ring-red-200 dark:bg-red-950/50 dark:text-red-300 dark:ring-red-900/70'
+                              : isDueSoon
+                              ? 'bg-amber-100 text-amber-600 ring-1 ring-amber-200 dark:bg-amber-950/50 dark:text-amber-300 dark:ring-amber-900/70'
                               : 'bg-primary/15 text-primary ring-1 ring-primary/20',
                           )}
                         >
                           {item.read ? (
                             <CheckCircle2 className="h-4 w-4" />
+                          ) : isOverdue ? (
+                            <AlertTriangle className="h-4 w-4" />
+                          ) : isDueSoon ? (
+                            <Clock className="h-4 w-4" />
                           ) : (
                             <Bell className="h-4 w-4" />
                           )}
@@ -217,15 +234,31 @@ export function NotificationsPanel({
                           </p>
                         </div>
                         {!item.read && (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground">
-                            <Sparkles className="h-2.5 w-2.5" />
-                            new
+                          <span
+                            className={cn(
+                              'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold',
+                              isOverdue
+                                ? 'bg-red-600 text-white'
+                                : isDueSoon
+                                ? 'bg-amber-500 text-white'
+                                : 'bg-primary text-primary-foreground',
+                            )}
+                          >
+                            {isOverdue ? (
+                              <AlertTriangle className="h-2.5 w-2.5" />
+                            ) : isDueSoon ? (
+                              <Clock className="h-2.5 w-2.5" />
+                            ) : (
+                              <Sparkles className="h-2.5 w-2.5" />
+                            )}
+                            {isOverdue ? 'overdue' : isDueSoon ? 'due soon' : 'new'}
                           </span>
                         )}
                       </div>
                     </button>
                   </li>
-                ))}
+                  );
+                })}
               </ul>
             )}
           </CardContent>

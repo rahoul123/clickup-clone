@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Building2, UserCircle2, ChevronDown } from 'lucide-react';
+import { Building2, UserCircle2, ChevronDown, AlarmClock } from 'lucide-react';
 import { AppSidebar } from '@/components/layout/AppSidebar';
 import { GlobalSearch } from '@/components/layout/GlobalSearch';
 import { ExportReportDialog } from '@/components/layout/ExportReportDialog';
+import { OverdueSettingsDialog } from '@/components/settings/OverdueSettingsDialog';
 import { KanbanBoard } from '@/components/board/KanbanBoard';
 import { HomeInbox } from '@/components/home/HomeInbox';
 import { ModernDashboard } from '@/components/dashboard/ModernDashboard';
@@ -60,6 +61,7 @@ const Index = () => {
   const [docsLoading, setDocsLoading] = useState(false);
   const [taskToOpenId, setTaskToOpenId] = useState<string | null>(null);
   const [exportReportWorkspaceId, setExportReportWorkspaceId] = useState<string | null>(null);
+  const [overdueSettingsOpen, setOverdueSettingsOpen] = useState(false);
   // Reminders the current user created or is being notified on. Rendered
   // inside the Home inbox alongside tasks so they're never forgotten.
   const [reminders, setReminders] = useState<Reminder[]>([]);
@@ -137,6 +139,7 @@ const Index = () => {
                   id: space.id,
                   name: space.name,
                   color: space.color,
+                  spaceIcon: space.icon ?? null,
                   noExpand: !isAdmin && Boolean(myDept) && !isMyDepartmentSpace(space),
                   showDiscussion: canDiscuss,
                   spaceForView: canDiscuss,
@@ -171,6 +174,7 @@ const Index = () => {
           id: space.id,
           name: space.name,
           color: space.color,
+          spaceIcon: space.icon ?? null,
           lists: lists
             .filter((l) => l.space_id === space.id && !l.archived_at)
             .slice()
@@ -763,6 +767,14 @@ const Index = () => {
     return archived as List[];
   };
 
+  const updateSpaceDetails = async (
+    spaceId: string,
+    payload: { name?: string; color?: string | null; icon?: string | null }
+  ) => {
+    const { space: updated } = await api.app.updateSpaceDetails(spaceId, payload);
+    setSpaces((prev) => prev.map((s) => (s.id === spaceId ? (updated as Space) : s)));
+  };
+
   const deleteSpace = async (spaceId: string, spaceName: string) => {
     if (!canDeleteSpaces) {
       window.alert('Only admin/manager can delete team spaces.');
@@ -1326,6 +1338,16 @@ const Index = () => {
         onDeleteSpace={(spaceId, spaceName) =>
           deleteSpace(spaceId, spaceName).catch((error) => console.error('Failed to delete space', error))
         }
+        onUpdateSpaceDetails={(spaceId, payload) =>
+          updateSpaceDetails(spaceId, payload).catch((error) => {
+            console.error('Failed to update space', error);
+            toast.error(
+              error instanceof Error && error.message
+                ? `Space update failed: ${error.message}`
+                : 'Space update failed.'
+            );
+          })
+        }
         onDeleteList={(listId, listName) =>
           deleteList(listId, listName).catch((error) => console.error('Failed to delete list', error))
         }
@@ -1357,6 +1379,12 @@ const Index = () => {
         onClose={() => setActiveReminder(null)}
         onMarkDone={markReminderDone}
         onDelete={deleteReminder}
+      />
+      <OverdueSettingsDialog
+        open={overdueSettingsOpen}
+        onOpenChange={setOverdueSettingsOpen}
+        workspaceId={activeWorkspaceId}
+        workspaceName={activeWorkspace?.name ?? 'Workspace'}
       />
       <ExportReportDialog
         key={exportReportWorkspaceId ?? 'closed'}
@@ -1403,6 +1431,17 @@ const Index = () => {
             />
           </div>
           <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-background px-2 py-1 shadow-sm">
+            {activeRole === 'admin' && activeWorkspaceId && (
+              <button
+                type="button"
+                onClick={() => setOverdueSettingsOpen(true)}
+                title="Overdue notifications (admin)"
+                className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-[11px] font-medium text-foreground hover:bg-muted transition-colors"
+              >
+                <AlarmClock className="h-3.5 w-3.5 text-red-500" />
+                Overdue
+              </button>
+            )}
             <div className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1">
             <Building2 className="h-3 w-3 text-muted-foreground" />
             <select

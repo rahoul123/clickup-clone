@@ -39,10 +39,29 @@ export interface Notification {
   id: string;
   taskId?: string | null;
   workspaceId: string;
-  type: 'task_created' | 'task_status_changed' | 'reminder_pre_day' | 'reminder_due';
+  type:
+    | 'task_created'
+    | 'task_status_changed'
+    | 'reminder_pre_day'
+    | 'reminder_due'
+    | 'task_due_soon'
+    | 'task_overdue';
   message: string;
   read: boolean;
   createdAt: string;
+}
+
+/**
+ * Admin-only workspace settings controlling automated overdue notifications.
+ * When enabled, the server re-notifies assignees + creator every
+ * `intervalMinutes` while a task stays past its due date and incomplete.
+ */
+export interface WorkspaceOverdueSettings {
+  enabled: boolean;
+  intervalMinutes: number;
+  /** Office hours window (local 24h clock). Reminders only fire inside it. */
+  officeHoursStart: number;
+  officeHoursEnd: number;
 }
 
 export interface WorkspaceDoc {
@@ -81,6 +100,8 @@ export interface Space {
   name: string;
   department?: string | null;
   color: string;
+  /** Optional 1-4 char label shown in sidebar avatar; falls back to first letter of name. */
+  icon?: string | null;
   is_private: boolean;
   created_by?: string;
   created_at: string;
@@ -391,6 +412,19 @@ export const KANBAN_COLUMN_THEME: Record<TaskStatus, KanbanColumnTheme> = {
 
 export function isBuiltinTaskStatus(s: string): s is TaskStatus {
   return (Object.keys(STATUS_CONFIG) as TaskStatus[]).includes(s as TaskStatus);
+}
+
+/**
+ * A task is considered overdue when it has a due date in the past AND is not
+ * in a completed state. We keep this as a derived flag (never as a real
+ * status value) so tasks stay in their original Kanban column.
+ */
+export function isTaskOverdue(task: Pick<Task, 'due_date' | 'status'>, now: Date = new Date()): boolean {
+  if (!task.due_date) return false;
+  if (task.status === 'complete') return false;
+  const due = new Date(task.due_date);
+  if (Number.isNaN(due.getTime())) return false;
+  return due.getTime() < now.getTime();
 }
 
 /** Theming for a column key: built-in uses its palette; custom columns reuse the revision theme. */

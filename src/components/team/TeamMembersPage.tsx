@@ -47,14 +47,20 @@ export function TeamMembersPage({ members, canManageWorkspace, onUpdateMemberRol
                         }
                         className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground"
                       >
-                        <option value="employee">Employee</option>
+                        {/* `employee` is the backend role key; the UI copy is "Team Member"
+                           because "Employee" read oddly to staff ("we're all employees"). */}
+                        <option value="employee">Team Member</option>
                         <option value="team_lead">Team Lead</option>
                         <option value="manager">Manager</option>
                         <option value="admin">Admin</option>
                       </select>
                     ) : (
                       <span className="rounded-full bg-muted px-2 py-0.5 text-xs capitalize text-muted-foreground">
-                        {member.role === 'team_lead' ? 'team lead' : member.role}
+                        {member.role === 'team_lead'
+                          ? 'team lead'
+                          : member.role === 'employee'
+                            ? 'team member'
+                            : member.role}
                       </span>
                     )}
                   </div>

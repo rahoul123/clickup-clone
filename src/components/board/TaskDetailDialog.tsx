@@ -252,8 +252,23 @@ export function TaskDetailDialog({
 
   const saveDebounceRef = useRef<number | null>(null);
   const skipAutoSaveRef = useRef(false);
+  /**
+   * Holds the latest `task` prop so the autosave comparison always sees the
+   * freshest server values, without putting `task` itself into the effect
+   * dependency list (which would re-fire the effect on every save round-trip
+   * and stomp the user's in-progress edits).
+   */
+  const taskRef = useRef(task);
+  useEffect(() => {
+    taskRef.current = task;
+  }, [task]);
   const MAX_ATTACHMENT_SIZE_BYTES = 4 * 1024 * 1024;
 
+  // Only reset local form state when the user switches to a DIFFERENT task.
+  // Using `task.id` (instead of `task`) prevents the dialog from blowing away
+  // in-flight edits when the parent swaps in an updated `task` object after
+  // an autosave round-trip, which previously caused the "old + new title
+  // combining" bug.
   useEffect(() => {
     skipAutoSaveRef.current = true;
     setTitle(task.title);
@@ -270,7 +285,8 @@ export function TaskDetailDialog({
       skipAutoSaveRef.current = false;
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [task]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task.id]);
 
   // When the set of related ids changes, fetch nice labels for any we don't know about yet.
   useEffect(() => {
@@ -359,14 +375,19 @@ export function TaskDetailDialog({
   useEffect(() => {
     if (skipAutoSaveRef.current) return;
 
+    // Compare against the *current* server task via the ref so the effect's
+    // dependency array doesn't need `task`. Including `task` there caused
+    // every save response to retrigger this effect and race with the user's
+    // ongoing edits.
+    const t = taskRef.current;
     const isSameAsOriginal =
-      title === task.title &&
-      description === (task.description ?? '') &&
-      status === task.status &&
-      priority === task.priority &&
-      startDate === (task.start_date ? task.start_date.slice(0, 10) : '') &&
-      endDate === (task.due_date ? task.due_date.slice(0, 10) : '') &&
-      JSON.stringify(assigneeIds) === JSON.stringify(task.assignee_ids);
+      title === t.title &&
+      description === (t.description ?? '') &&
+      status === t.status &&
+      priority === t.priority &&
+      startDate === (t.start_date ? t.start_date.slice(0, 10) : '') &&
+      endDate === (t.due_date ? t.due_date.slice(0, 10) : '') &&
+      JSON.stringify(assigneeIds) === JSON.stringify(t.assignee_ids);
 
     if (isSameAsOriginal) return;
 
@@ -396,7 +417,7 @@ export function TaskDetailDialog({
         window.clearTimeout(saveDebounceRef.current);
       }
     };
-  }, [title, description, status, priority, assigneeIds, startDate, endDate, task, onUpdateTask]);
+  }, [title, description, status, priority, assigneeIds, startDate, endDate, onUpdateTask]);
 
   const readFileAsDataUrl = (file: File) =>
     new Promise<string>((resolve, reject) => {

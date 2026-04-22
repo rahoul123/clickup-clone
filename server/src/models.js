@@ -22,6 +22,22 @@ const workspaceSchema = new Schema(
     logoUrl: { type: String, default: null },
     createdBy: { type: String, required: true, index: true },
     department: { type: String, required: true, index: true },
+    /**
+     * Admin-only overdue notification settings. When enabled, the server
+     * periodically notifies task assignees + the creator that an incomplete
+     * task has crossed its due date. Applies to every department/space in
+     * the workspace.
+     */
+    overdueNotificationsEnabled: { type: Boolean, default: false },
+    /** How often (minutes) to re-notify while the task stays overdue. */
+    overdueNotificationIntervalMinutes: { type: Number, default: 30, min: 1 },
+    /**
+     * Office hours window (server local time, 24h clock). The overdue
+     * scheduler only dispatches reminders when the current hour is within
+     * [officeHoursStart, officeHoursEnd). Defaults to 10:00 – 19:00.
+     */
+    officeHoursStart: { type: Number, default: 10, min: 0, max: 23 },
+    officeHoursEnd: { type: Number, default: 19, min: 1, max: 24 },
   },
   { timestamps: true }
 );
@@ -57,6 +73,9 @@ const spaceSchema = new Schema(
     name: { type: String, required: true },
     department: { type: String, default: null, index: true },
     color: { type: String, default: '#7C3AED' },
+    /** Optional single-character icon label (e.g. "W", "B"). Falls back to the
+     *  first letter of the space name when empty. */
+    icon: { type: String, default: null },
     isPrivate: { type: Boolean, default: false },
     createdBy: { type: String, required: true },
     /** Parent space id — department spaces live under the master "Team Space" folder. */
@@ -199,6 +218,18 @@ const taskSchema = new Schema(
     },
     /** When true, only explicit collaborators + assignees + admins see the task in the UI. */
     isPrivate: { type: Boolean, default: false },
+    /**
+     * Last time the overdue scheduler sent an "overdue" / "due today" ping
+     * for this task. Used to enforce the admin-configured interval between
+     * re-notifications so assignees don't get spammed every poll.
+     */
+    lastOverdueNotifiedAt: { type: Date, default: null },
+    /**
+     * Marks when the one-time "due tomorrow" heads-up was dispatched. We only
+     * send this reminder once per task; resetting to null (e.g. when the due
+     * date is pushed out) re-enables the reminder.
+     */
+    dueSoonNotifiedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );
@@ -277,7 +308,14 @@ const notificationSchema = new Schema(
     taskId: { type: String, default: null },
     type: {
       type: String,
-      enum: ['task_created', 'task_status_changed', 'reminder_pre_day', 'reminder_due'],
+      enum: [
+        'task_created',
+        'task_status_changed',
+        'reminder_pre_day',
+        'reminder_due',
+        'task_due_soon',
+        'task_overdue',
+      ],
       required: true,
     },
     reminderId: { type: String, default: null },

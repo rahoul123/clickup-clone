@@ -1104,8 +1104,14 @@ export function KanbanBoard({
           onToggleReaction={toggleTaskCommentReaction}
           statusOptions={statusOptions}
           onUpdateTask={async (payload) => {
-            const updated = await onUpdateTask(selectedTask.id, payload);
-            if (updated) setSelectedTask(updated);
+            // Capture the id at call time so a late-arriving response can't
+            // reopen/replace the dialog if the user has already closed it or
+            // switched to a different task.
+            const savedId = selectedTask.id;
+            const updated = await onUpdateTask(savedId, payload);
+            if (updated) {
+              setSelectedTask((prev) => (prev && prev.id === savedId ? updated : prev));
+            }
           }}
           onClose={() => setSelectedTask(null)}
           onCreateReminder={onCreateReminder}

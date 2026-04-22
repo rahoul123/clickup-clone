@@ -173,6 +173,7 @@ function serializeSpace(s) {
     name: s.name,
     department: s.department ?? null,
     color: s.color,
+    icon: s.icon ?? null,
     is_private: s.isPrivate,
     created_by: s.createdBy,
     created_at: createdAt.toISOString(),
@@ -1668,6 +1669,46 @@ export function buildRoutes({ realtime } = {}) {
     res.json({ list: serializeList(updated) });
   });
 
+  /**
+   * Update a space's lightweight cosmetic fields (name / color / icon).
+   * Only admin / manager / team-lead can edit; master "Team Space" folder
+   * is immutable so its renaming doesn't desync clients.
+   */
+  router.patch('/spaces/:spaceId', requireAuth, async (req, res) => {
+    const { spaceId } = req.params;
+    const space = await Space.findById(spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+    if (space.isMasterTeamSpace) {
+      return res.status(400).json({ message: 'Master Team Space folder cannot be edited.' });
+    }
+    const role = await getRole(space.workspaceId, req.session.userId);
+    if (!canManageStructure(role)) {
+      return res.status(403).json({ message: 'Only admin/manager/team-lead can edit spaces' });
+    }
+
+    const updates = {};
+    if (typeof req.body?.name === 'string') {
+      const trimmed = req.body.name.trim();
+      if (!trimmed) return res.status(400).json({ message: 'Name cannot be empty' });
+      updates.name = trimmed;
+    }
+    if (req.body?.color !== undefined) {
+      const c = req.body.color;
+      updates.color = typeof c === 'string' && c.trim() ? c.trim() : null;
+    }
+    if (req.body?.icon !== undefined) {
+      const ic = req.body.icon;
+      updates.icon = typeof ic === 'string' && ic.trim() ? ic.trim().slice(0, 4) : null;
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: 'Nothing to update' });
+    }
+
+    await Space.updateOne({ _id: spaceId }, { $set: updates });
+    const fresh = await Space.findById(spaceId).lean();
+    res.json({ space: serializeSpace(fresh) });
+  });
+
   router.delete('/spaces/:spaceId', requireAuth, async (req, res) => {
     const { spaceId } = req.params;
     const space = await Space.findById(spaceId).lean();
@@ -2058,6 +2099,176 @@ export function buildRoutes({ realtime } = {}) {
     });
   });
 
+  /**
+   * Admin-only: read + update the workspace's overdue notification settings.
+   * These apply to every department/space inside the workspace.
+   */
+  /**
+   * Build the serialisable settings payload. Kept in one place so GET + PUT
+   * stay in sync.
+   */
+  const serializeOverdueSettings = (workspace) => ({
+    enabled: Boolean(workspace.overdueNotificationsEnabled),
+    intervalMinutes: Number(workspace.overdueNotificationIntervalMinutes || 30),
+    officeHoursStart: Number(workspace.officeHoursStart ?? 10),
+    officeHoursEnd: Number(workspace.officeHoursEnd ?? 19),
+  });
+
+  router.get('/workspaces/:workspaceId/settings/overdue', requireAuth, async (req, res) => {
+    const { workspaceId } = req.params;
+    const role = await getRole(workspaceId, req.session.userId);
+    if (!canManageWorkspace(role)) {
+      return res.status(403).json({ message: 'Only admin can view overdue settings.' });
+    }
+    const workspace = await Workspace.findById(workspaceId).lean();
+    if (!workspace) return res.status(404).json({ message: 'Workspace not found' });
+    res.json(serializeOverdueSettings(workspace));
+  });
+
+  router.put('/workspaces/:workspaceId/settings/overdue', requireAuth, async (req, res) => {
+    const { workspaceId } = req.params;
+    const role = await getRole(workspaceId, req.session.userId);
+    if (!canManageWorkspace(role)) {
+      return res.status(403).json({ message: 'Only admin can update overdue settings.' });
+    }
+    const { enabled, intervalMinutes, officeHoursStart, officeHoursEnd } = req.body ?? {};
+    const update = {};
+    if (typeof enabled === 'boolean') update.overdueNotificationsEnabled = enabled;
+    if (Number.isFinite(Number(intervalMinutes))) {
+      const minutes = Math.max(1, Math.min(1440, Math.round(Number(intervalMinutes))));
+      update.overdueNotificationIntervalMinutes = minutes;
+    }
+    // Normalise office-hours bounds. Start is 0–23, end is 1–24 (24 = midnight
+    // of the next day). Valid windows: start !== end after modding 24.
+    const clampStart = (v) => {
+      const n = Math.round(Number(v));
+      if (!Number.isFinite(n)) return null;
+      return Math.max(0, Math.min(23, n));
+    };
+    const clampEnd = (v) => {
+      const n = Math.round(Number(v));
+      if (!Number.isFinite(n)) return null;
+      return Math.max(1, Math.min(24, n));
+    };
+    const startClean = officeHoursStart !== undefined ? clampStart(officeHoursStart) : null;
+    const endClean = officeHoursEnd !== undefined ? clampEnd(officeHoursEnd) : null;
+    if (startClean !== null) update.officeHoursStart = startClean;
+    if (endClean !== null) update.officeHoursEnd = endClean;
+    if (
+      startClean !== null &&
+      endClean !== null &&
+      startClean === endClean % 24
+    ) {
+      return res
+        .status(400)
+        .json({ message: 'Office hours start and end cannot be the same.' });
+    }
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ message: 'Nothing to update.' });
+    }
+    const workspace = await Workspace.findByIdAndUpdate(workspaceId, { $set: update }, { new: true }).lean();
+    if (!workspace) return res.status(404).json({ message: 'Workspace not found' });
+    res.json(serializeOverdueSettings(workspace));
+  });
+
+  /**
+   * Walks every task that is not yet complete and has a due date, and returns
+   * the ones whose list or space has been deleted (i.e. the task is an orphan
+   * the scheduler can never notify because it can't resolve a workspace). The
+   * admin UI uses this to show a "Clean up" button.
+   */
+  async function findOrphanTasks() {
+    const tasks = await Task.find({
+      dueDate: { $ne: null },
+      status: { $ne: 'complete' },
+    })
+      .select({ _id: 1, title: 1, dueDate: 1, listId: 1, status: 1, createdBy: 1 })
+      .lean();
+    if (tasks.length === 0) return [];
+    const listIds = [...new Set(tasks.map((t) => t.listId).filter(Boolean))];
+    const lists = await List.find({ _id: { $in: listIds } })
+      .select({ _id: 1, spaceId: 1 })
+      .lean();
+    const listMap = new Map(lists.map((l) => [l._id, l]));
+    const spaceIds = [...new Set(lists.map((l) => l.spaceId).filter(Boolean))];
+    const spaces = await Space.find({ _id: { $in: spaceIds } })
+      .select({ _id: 1, workspaceId: 1 })
+      .lean();
+    const spaceMap = new Map(spaces.map((s) => [s._id, s]));
+
+    const orphans = [];
+    for (const task of tasks) {
+      const list = task.listId ? listMap.get(task.listId) : null;
+      if (!list) {
+        orphans.push({ ...task, reason: 'list-missing' });
+        continue;
+      }
+      const space = list.spaceId ? spaceMap.get(list.spaceId) : null;
+      if (!space) {
+        orphans.push({ ...task, reason: 'space-missing', listId: task.listId });
+        continue;
+      }
+      if (!space.workspaceId) {
+        orphans.push({ ...task, reason: 'space-has-no-workspace', listId: task.listId });
+      }
+    }
+    return orphans;
+  }
+
+  /**
+   * Admin-only: list every orphan task in the system (task exists but its
+   * list/space chain is broken, so notifications can't be routed). Only admins
+   * of the given workspace can call this; the result spans the whole DB
+   * because orphan tasks by definition have no resolvable workspace.
+   */
+  router.get(
+    '/workspaces/:workspaceId/maintenance/orphan-tasks',
+    requireAuth,
+    async (req, res) => {
+      const { workspaceId } = req.params;
+      const role = await getRole(workspaceId, req.session.userId);
+      if (!canManageWorkspace(role)) {
+        return res.status(403).json({ message: 'Only admin can inspect orphan tasks.' });
+      }
+      const orphans = await findOrphanTasks();
+      res.json({
+        count: orphans.length,
+        tasks: orphans.map((t) => ({
+          id: t._id,
+          title: t.title,
+          status: t.status,
+          dueDate: t.dueDate ? new Date(t.dueDate).toISOString() : null,
+          listId: t.listId || null,
+          reason: t.reason,
+        })),
+      });
+    },
+  );
+
+  /**
+   * Admin-only: delete every orphan task + its assignee rows so the scheduler
+   * stops skipping them. This is destructive but safe — orphan tasks have no
+   * parent list/space so they're already unreachable from the UI.
+   */
+  router.delete(
+    '/workspaces/:workspaceId/maintenance/orphan-tasks',
+    requireAuth,
+    async (req, res) => {
+      const { workspaceId } = req.params;
+      const role = await getRole(workspaceId, req.session.userId);
+      if (!canManageWorkspace(role)) {
+        return res.status(403).json({ message: 'Only admin can delete orphan tasks.' });
+      }
+      const orphans = await findOrphanTasks();
+      if (orphans.length === 0) return res.json({ deleted: 0 });
+      const ids = orphans.map((t) => t._id);
+      await TaskAssignee.deleteMany({ taskId: { $in: ids } });
+      await Notification.deleteMany({ taskId: { $in: ids } });
+      const result = await Task.deleteMany({ _id: { $in: ids } });
+      res.json({ deleted: result.deletedCount || 0 });
+    },
+  );
+
   router.patch('/workspaces/:workspaceId/members/:memberId/role', requireAuth, async (req, res) => {
     const { workspaceId, memberId } = req.params;
     const { role } = req.body ?? {};
@@ -2249,16 +2460,47 @@ export function buildRoutes({ realtime } = {}) {
     // Employees can shuffle task status inside their own team space.
 
     const previousStatus = task.status;
-    await Task.updateOne({ _id: taskId }, { $set: { status } });
+    // When a task transitions to "complete" we also clear the overdue-
+    // notification flags so any stale "lastOverdueNotifiedAt" doesn't cause
+    // odd behaviour if it's later reopened. When transitioning away from
+    // "complete" we reset them too so reminders resume cleanly for the
+    // re-opened task.
+    const statusUpdate = { status };
+    if (status === 'complete' || previousStatus === 'complete') {
+      statusUpdate.lastOverdueNotifiedAt = null;
+      statusUpdate.dueSoonNotifiedAt = null;
+    }
+    await Task.updateOne({ _id: taskId }, { $set: statusUpdate });
     const assignees = await TaskAssignee.find({ taskId }).lean();
-    await createNotifications({
-      userIds: assignees.map((row) => row.userId),
-      workspaceId: space.workspaceId,
-      taskId,
-      type: 'task_status_changed',
-      message: `Task status updated to ${status}: ${task.title}`,
-      realtime: rt,
-    });
+
+    // When transitioning to "complete", send a dedicated celebratory ping to
+    // assignees + creator (excluding the actor) and use a clearer message
+    // than the generic "status updated to X". For every other status change
+    // we keep the existing behaviour so nothing else regresses.
+    const isCompletion = status === 'complete' && previousStatus !== 'complete';
+    if (isCompletion) {
+      const completedByName = currentUser?.displayName || currentUser?.email || 'Someone';
+      const recipientIds = [
+        ...new Set([...assignees.map((r) => r.userId), task.createdBy].filter(Boolean)),
+      ].filter((id) => id !== req.session.userId);
+      await createNotifications({
+        userIds: recipientIds,
+        workspaceId: space.workspaceId,
+        taskId,
+        type: 'task_status_changed',
+        message: `✅ Task completed by ${completedByName}: "${task.title}"`,
+        realtime: rt,
+      });
+    } else {
+      await createNotifications({
+        userIds: assignees.map((row) => row.userId),
+        workspaceId: space.workspaceId,
+        taskId,
+        type: 'task_status_changed',
+        message: `Task status updated to ${status}: ${task.title}`,
+        realtime: rt,
+      });
+    }
 
     // Email on transition to "complete" only — skip duplicates / other updates.
     if (status === 'complete' && previousStatus !== 'complete') {
@@ -2355,10 +2597,31 @@ export function buildRoutes({ realtime } = {}) {
         return res.status(400).json({ message: 'Invalid status for this list' });
       }
       updates.status = status;
+      // Same hygiene as PATCH /tasks/:id/status — reset the overdue flags on
+      // any transition in/out of 'complete' so reminders resume cleanly if
+      // the task is later reopened.
+      if (status === 'complete' || task.status === 'complete') {
+        updates.lastOverdueNotifiedAt = null;
+        updates.dueSoonNotifiedAt = null;
+      }
     }
     if (typeof priority === 'string') updates.priority = priority;
     if (typeof startDate !== 'undefined') updates.startDate = startDate ? new Date(startDate) : null;
-    if (typeof endDate !== 'undefined') updates.dueDate = endDate ? new Date(endDate) : null;
+    if (typeof endDate !== 'undefined') {
+      const nextDue = endDate ? new Date(endDate) : null;
+      updates.dueDate = nextDue;
+      // If the due date actually moved (or was cleared / set), reset the
+      // overdue + due-soon notification flags so the scheduler re-evaluates
+      // the task against the new date. Without this, pushing a date out by
+      // a week would leave `dueSoonNotifiedAt` set and the next "due
+      // tomorrow" reminder would never fire.
+      const prevDueMs = task.dueDate ? new Date(task.dueDate).getTime() : null;
+      const nextDueMs = nextDue ? nextDue.getTime() : null;
+      if (prevDueMs !== nextDueMs) {
+        updates.dueSoonNotifiedAt = null;
+        updates.lastOverdueNotifiedAt = null;
+      }
+    }
 
     // Checklist: replace entire array when provided. Normalize items.
     if (Array.isArray(checklist)) {

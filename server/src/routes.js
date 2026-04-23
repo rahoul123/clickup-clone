@@ -455,7 +455,62 @@ function serializeComment(comment, userMap = {}) {
         read_at: r.readAt ? new Date(r.readAt).toISOString() : undefined,
         name: userMap[r.userId] ?? 'Unknown user',
       })),
+    is_activity: Boolean(comment.isActivity),
   };
+}
+
+async function createTaskActivityEntry({ taskId, userId, content }) {
+  if (!taskId || !userId || !content) return;
+  const since = new Date(Date.now() - 2000);
+  const existing = await TaskComment.findOne({
+    taskId,
+    userId,
+    content,
+    isActivity: true,
+    createdAt: { $gte: since },
+  }).lean();
+  if (existing) return;
+  await TaskComment.create({
+    _id: randomUUID(),
+    taskId,
+    userId,
+    content,
+    attachments: [],
+    parentCommentId: null,
+    isActivity: true,
+  }).catch(() => {});
+}
+
+const TASK_STATUS_LABELS = {
+  todo: 'To Do',
+  in_progress: 'In Progress',
+  hold: 'Hold',
+  revision: 'Revision',
+  complete: 'Complete',
+};
+
+const TASK_PRIORITY_LABELS = {
+  urgent: 'Urgent',
+  high: 'High',
+  normal: 'Normal',
+  low: 'Low',
+};
+
+function labelTaskStatus(value) {
+  if (!value) return 'None';
+  return TASK_STATUS_LABELS[value] ?? value;
+}
+
+function labelTaskPriority(value) {
+  if (!value) return 'None';
+  return TASK_PRIORITY_LABELS[value] ?? value;
+}
+
+function labelTaskDueDate(value) {
+  if (!value) return 'None';
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return 'None';
+  return date.toLocaleDateString('en-GB');
 }
 
 async function hydrateTasks(listId) {
@@ -2352,6 +2407,7 @@ export function buildRoutes({ realtime } = {}) {
       startDate: startDate ? new Date(startDate) : null,
       dueDate: endDate ? new Date(endDate) : null,
       createdBy: req.session.userId,
+      isBeingCreated: true,
       parentTaskId: safeParentId,
     });
 
@@ -2360,6 +2416,7 @@ export function buildRoutes({ realtime } = {}) {
     const normalizeIds = (arr) =>
       [...new Set(arr.map((id) => String(id).trim()).filter((id) => workspaceMemberIds.has(id)))];
     const assignedUserIds = normalizeIds(assigneeIds);
+    const actorName = currentUser?.displayName || currentUser?.email || 'Someone';
 
     if (assignedUserIds.length > 0) {
       await TaskAssignee.insertMany(
@@ -2374,16 +2431,47 @@ export function buildRoutes({ realtime } = {}) {
     const assigneeSet = new Set(assignedUserIds);
     const notifyOnlyFiltered = normalizeIds(notifyOnlyUserIds).filter((id) => !assigneeSet.has(id));
 
-    if (assignedUserIds.length > 0) {
-      await createNotifications({
-        userIds: assignedUserIds,
-        workspaceId: space.workspaceId,
-        taskId: task._id,
-        type: 'task_created',
-        message: `New task created: ${task.title}`,
-        realtime: rt,
-      });
+    // Mark creation complete, then send exactly one creation notification.
+    await Task.updateOne({ _id: task._id }, { $set: { isBeingCreated: false } });
 
+    await createNotifications({
+      userIds: [req.session.userId],
+      workspaceId: space.workspaceId,
+      taskId: task._id,
+      type: 'task_created',
+      message: `${actorName} created task ${task.title}`,
+      realtime: rt,
+    });
+
+    // Activity timeline entries for task detail panel (not bell notifications).
+    const assigneeUsers = assignedUserIds.length
+      ? await User.find({ _id: { $in: assignedUserIds } }).lean()
+      : [];
+    const assigneeNames = assigneeUsers.map((u) => u.displayName || u.email || 'Unknown user');
+    const creationActivityMessages = [`${actorName} created this task`];
+    if (task.priority) {
+      creationActivityMessages.push(`${actorName} set priority to ${labelTaskPriority(task.priority)}`);
+    }
+    if (task.dueDate) {
+      creationActivityMessages.push(`${actorName} set the due date to ${labelTaskDueDate(task.dueDate)}`);
+    }
+    if (assigneeNames.length > 0) {
+      creationActivityMessages.push(`${actorName} assigned to: ${assigneeNames.join(', ')}`);
+    }
+    await TaskComment.insertMany(
+      creationActivityMessages.map((content) => ({
+        _id: randomUUID(),
+        taskId: task._id,
+        userId: req.session.userId,
+        content,
+        attachments: [],
+        parentCommentId: null,
+        isActivity: true,
+      })),
+      { ordered: false }
+    ).catch(() => {});
+
+    if (assignedUserIds.length > 0) {
       // Email assignees (exclude the creator so they don't email themselves).
       const emailRecipients = assignedUserIds.filter((id) => id !== req.session.userId);
       if (emailRecipients.length > 0) {
@@ -2412,16 +2500,7 @@ export function buildRoutes({ realtime } = {}) {
       }
     }
 
-    if (notifyOnlyFiltered.length > 0) {
-      await createNotifications({
-        userIds: notifyOnlyFiltered,
-        workspaceId: space.workspaceId,
-        taskId: task._id,
-        type: 'task_created',
-        message: `You were notified about this task: ${task.title}`,
-        realtime: rt,
-      });
-    }
+    // notifyOnly users are ignored for creation bell notifications by design.
 
     const dto = taskToDTO(task.toObject(), assignedUserIds);
     rt.broadcast('task:created', { task: dto, list_id: listId });
@@ -2460,6 +2539,9 @@ export function buildRoutes({ realtime } = {}) {
     // Employees can shuffle task status inside their own team space.
 
     const previousStatus = task.status;
+    if (task.isBeingCreated) {
+      return res.json({ ok: true });
+    }
     // When a task transitions to "complete" we also clear the overdue-
     // notification flags so any stale "lastOverdueNotifiedAt" doesn't cause
     // odd behaviour if it's later reopened. When transitioning away from
@@ -2473,34 +2555,22 @@ export function buildRoutes({ realtime } = {}) {
     await Task.updateOne({ _id: taskId }, { $set: statusUpdate });
     const assignees = await TaskAssignee.find({ taskId }).lean();
 
-    // When transitioning to "complete", send a dedicated celebratory ping to
-    // assignees + creator (excluding the actor) and use a clearer message
-    // than the generic "status updated to X". For every other status change
-    // we keep the existing behaviour so nothing else regresses.
-    const isCompletion = status === 'complete' && previousStatus !== 'complete';
-    if (isCompletion) {
-      const completedByName = currentUser?.displayName || currentUser?.email || 'Someone';
-      const recipientIds = [
-        ...new Set([...assignees.map((r) => r.userId), task.createdBy].filter(Boolean)),
-      ].filter((id) => id !== req.session.userId);
-      await createNotifications({
-        userIds: recipientIds,
-        workspaceId: space.workspaceId,
-        taskId,
-        type: 'task_status_changed',
-        message: `✅ Task completed by ${completedByName}: "${task.title}"`,
-        realtime: rt,
-      });
-    } else {
-      await createNotifications({
-        userIds: assignees.map((row) => row.userId),
-        workspaceId: space.workspaceId,
-        taskId,
-        type: 'task_status_changed',
-        message: `Task status updated to ${status}: ${task.title}`,
-        realtime: rt,
-      });
-    }
+    const actorName = currentUser?.displayName || currentUser?.email || 'Someone';
+    await createNotifications({
+      userIds: [...new Set(assignees.map((row) => row.userId).filter(Boolean))].filter(
+        (id) => id !== req.session.userId
+      ),
+      workspaceId: space.workspaceId,
+      taskId,
+      type: 'task_status_changed',
+      message: `${actorName} changed status to ${labelTaskStatus(status)} in task ${task.title}`,
+      realtime: rt,
+    });
+    await createTaskActivityEntry({
+      taskId,
+      userId: req.session.userId,
+      content: `${actorName} changed status to ${labelTaskStatus(status)} in task ${task.title}`,
+    });
 
     // Email on transition to "complete" only — skip duplicates / other updates.
     if (status === 'complete' && previousStatus !== 'complete') {
@@ -2588,6 +2658,9 @@ export function buildRoutes({ realtime } = {}) {
       const canTouch = task.createdBy === req.session.userId || Boolean(isAssigned);
       if (!canTouch) return res.status(403).json({ message: 'Employees can update only their own/assigned tasks' });
     }
+    const previousAssigneeRows = await TaskAssignee.find({ taskId }).lean();
+    const previousAssigneeIds = [...new Set(previousAssigneeRows.map((row) => row.userId).filter(Boolean))];
+    const skipNotificationsForCreationFlow = Boolean(task.isBeingCreated);
 
     const updates = {};
     if (typeof title === 'string') updates.title = title.trim() || task.title;
@@ -2690,6 +2763,79 @@ export function buildRoutes({ realtime } = {}) {
 
     const refreshed = await Task.findById(taskId).lean();
     const assignees = await TaskAssignee.find({ taskId }).lean();
+    const nextAssigneeIds = [...new Set(assignees.map((row) => row.userId).filter(Boolean))];
+
+    const actorName = currentUser?.displayName || currentUser?.email || 'Someone';
+    const changedMessages = [];
+    if (typeof title === 'string' && title.trim() && title.trim() !== task.title) {
+      changedMessages.push(`${actorName} renamed task to ${title.trim()}`);
+    }
+    if (typeof description === 'string' && description !== (task.description ?? '')) {
+      changedMessages.push(`${actorName} updated description in task ${task.title}`);
+    }
+    if (typeof status === 'string' && status !== task.status) {
+      changedMessages.push(
+        `${actorName} changed status to ${labelTaskStatus(status)} in task ${task.title}`
+      );
+    }
+    if (typeof priority === 'string' && priority !== task.priority) {
+      changedMessages.push(
+        `${actorName} changed priority from ${labelTaskPriority(task.priority)} to ${labelTaskPriority(priority)} in task ${task.title}`
+      );
+    }
+    if (typeof endDate !== 'undefined') {
+      const nextDueLabel = labelTaskDueDate(refreshed?.dueDate);
+      const previousDueLabel = labelTaskDueDate(task.dueDate);
+      if (previousDueLabel !== nextDueLabel) {
+        changedMessages.push(
+          `${actorName} updated due date to ${nextDueLabel} in task ${task.title}`
+        );
+      }
+    }
+    const prevSet = new Set(previousAssigneeIds);
+    const nextSet = new Set(nextAssigneeIds);
+    const assigneeChanged =
+      previousAssigneeIds.length !== nextAssigneeIds.length
+      || previousAssigneeIds.some((id) => !nextSet.has(id))
+      || nextAssigneeIds.some((id) => !prevSet.has(id));
+    if (assigneeChanged) {
+      const assigneeUserIds = [...new Set([...previousAssigneeIds, ...nextAssigneeIds])];
+      const assigneeUsers = assigneeUserIds.length
+        ? await User.find({ _id: { $in: assigneeUserIds } }).lean()
+        : [];
+      const userNameById = Object.fromEntries(
+        assigneeUsers.map((u) => [u._id, u.displayName || u.email || 'Unknown user'])
+      );
+      const addedIds = nextAssigneeIds.filter((id) => !prevSet.has(id));
+      const addedNames = addedIds.map((id) => userNameById[id] ?? 'Unknown user');
+
+      if (addedIds.length > 0) {
+        changedMessages.push(
+          `${actorName} added ${addedNames.join(', ')} as ${addedIds.length > 1 ? 'assignees' : 'assignee'} in task ${task.title}`
+        );
+      }
+    }
+    if (!skipNotificationsForCreationFlow && changedMessages.length > 0 && nextAssigneeIds.length > 0) {
+      for (const message of changedMessages) {
+        await createNotifications({
+          userIds: nextAssigneeIds.filter((id) => id !== req.session.userId),
+          workspaceId: space.workspaceId,
+          taskId,
+          type: 'task_status_changed',
+          message,
+          realtime: rt,
+        });
+      }
+    }
+    if (!skipNotificationsForCreationFlow && changedMessages.length > 0) {
+      for (const message of changedMessages) {
+        await createTaskActivityEntry({
+          taskId,
+          userId: req.session.userId,
+          content: message,
+        });
+      }
+    }
 
     // Email on transition to "complete" from the full-edit dialog too.
     if (typeof status === 'string' && status === 'complete' && task.status !== 'complete') {
@@ -2848,8 +2994,12 @@ export function buildRoutes({ realtime } = {}) {
       users.map((u) => [u._id, u.displayName || u.email || 'Unknown user'])
     );
 
+    const serializedComments = comments.map((comment) => serializeComment(comment, userMap));
+
     res.json({
-      comments: comments.map((comment) => serializeComment(comment, userMap)),
+      comments: serializedComments.sort(
+        (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      ),
     });
   });
 
@@ -2904,6 +3054,23 @@ export function buildRoutes({ realtime } = {}) {
       : {};
 
     const dto = serializeComment(comment.toObject(), userMap);
+    if (!task.isBeingCreated) {
+      const actorName = author?.displayName || author?.email || 'Someone';
+      const taskAssignees = await TaskAssignee.find({ taskId }).lean();
+      const recipients = [...new Set(taskAssignees.map((a) => a.userId).filter(Boolean))].filter(
+        (id) => id !== req.session.userId
+      );
+      if (recipients.length > 0) {
+        await createNotifications({
+          userIds: recipients,
+          workspaceId: space.workspaceId,
+          taskId,
+          type: 'task_status_changed',
+          message: `${actorName} commented on task ${task.title}`,
+          realtime: rt,
+        });
+      }
+    }
     rt.broadcast('comment:created', { task_id: taskId, comment: dto });
     res.json({ comment: dto });
   });
@@ -2954,6 +3121,69 @@ export function buildRoutes({ realtime } = {}) {
     const dto = serializeComment(doc.toObject(), userMap);
     rt.broadcast('comment:updated', { task_id: taskId, comment: dto });
     res.json({ comment: dto });
+  });
+
+  router.patch('/tasks/:taskId/comments/:commentId', requireAuth, async (req, res) => {
+    const { taskId, commentId } = req.params;
+    const content = String(req.body?.content || '').trim();
+    if (!content) return res.status(400).json({ message: 'content required' });
+
+    const task = await Task.findById(taskId).lean();
+    if (!task) return res.status(404).json({ message: 'Task not found' });
+    const list = await List.findById(task.listId).lean();
+    if (!list) return res.status(404).json({ message: 'List not found' });
+    const space = await Space.findById(list.spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+    const role = await getRole(space.workspaceId, req.session.userId);
+    if (!canUpdateTask(role)) return res.status(403).json({ message: 'No permission' });
+
+    const comment = await TaskComment.findOne({ _id: commentId, taskId });
+    if (!comment) return res.status(404).json({ message: 'Comment not found' });
+    if (comment.userId !== req.session.userId) {
+      return res.status(403).json({ message: 'Only the author can edit this comment' });
+    }
+
+    comment.content = content;
+    await comment.save();
+
+    const participantIds = [
+      comment.userId,
+      ...(comment.readBy || []).map((r) => r.userId),
+      ...(comment.reactions || []).map((r) => r.userId),
+    ];
+    const users = participantIds.length
+      ? await User.find({ _id: { $in: [...new Set(participantIds)] } }).lean()
+      : [];
+    const userMap = Object.fromEntries(
+      users.map((u) => [u._id, u.displayName || u.email || 'Unknown user'])
+    );
+    const dto = serializeComment(comment.toObject(), userMap);
+    rt.broadcast('comment:updated', { task_id: taskId, comment: dto });
+    res.json({ comment: dto });
+  });
+
+  router.delete('/tasks/:taskId/comments/:commentId', requireAuth, async (req, res) => {
+    const { taskId, commentId } = req.params;
+
+    const task = await Task.findById(taskId).lean();
+    if (!task) return res.status(404).json({ message: 'Task not found' });
+    const list = await List.findById(task.listId).lean();
+    if (!list) return res.status(404).json({ message: 'List not found' });
+    const space = await Space.findById(list.spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+    const role = await getRole(space.workspaceId, req.session.userId);
+    if (!canUpdateTask(role)) return res.status(403).json({ message: 'No permission' });
+
+    const comment = await TaskComment.findOne({ _id: commentId, taskId }).lean();
+    if (!comment) return res.status(404).json({ message: 'Comment not found' });
+    if (comment.userId !== req.session.userId) {
+      return res.status(403).json({ message: 'Only the author can delete this comment' });
+    }
+
+    await TaskComment.deleteOne({ _id: commentId, taskId });
+    await TaskComment.deleteMany({ taskId, parentCommentId: commentId });
+    rt.broadcast('comment:deleted', { task_id: taskId, comment_id: commentId });
+    res.json({ ok: true });
   });
 
   /** Record that the current user has seen these comments (read receipts). Skips the viewer's own messages. */

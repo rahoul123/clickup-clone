@@ -91,7 +91,7 @@ const App = () => (
       <TooltipProvider>
         <div className="h-full min-h-0 w-full overflow-hidden bg-background text-foreground">
         <Toaster />
-        <Sonner position="bottom-left" richColors closeButton />
+        <Sonner position="bottom-right" richColors closeButton offset={24} />
         <BrowserRouter>
           <AuthProvider>
             <RealtimeProvider>

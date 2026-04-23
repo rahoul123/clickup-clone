@@ -67,7 +67,24 @@ const Index = () => {
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [activeReminder, setActiveReminder] = useState<Reminder | null>(null);
   const seenNotificationIdsRef = useRef<Set<string>>(new Set());
+  const suppressNotificationToastTaskIdsRef = useRef<Set<string>>(new Set());
+  const recentToastByMessageRef = useRef<Map<string, number>>(new Map());
   const initializedNotificationsRef = useRef(false);
+
+  const showDedupedToast = useCallback(
+    (message: string, variant: 'default' | 'success' | 'error' = 'default') => {
+      const text = String(message || '').trim();
+      if (!text) return;
+      const now = Date.now();
+      const lastShownAt = recentToastByMessageRef.current.get(text) ?? 0;
+      if (now - lastShownAt < 2000) return;
+      recentToastByMessageRef.current.set(text, now);
+      if (variant === 'success') toast.success(text);
+      else if (variant === 'error') toast.error(text);
+      else toast(text);
+    },
+    []
+  );
 
   const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null;
   const activeListEntity = lists.find((list) => list.id === activeList) ?? null;
@@ -382,7 +399,10 @@ const Index = () => {
 
       if (initializedNotificationsRef.current && newUnread.length > 0) {
         for (const item of newUnread.slice(0, 3)) {
-          toast(item.message);
+          // Task-create success toast is handled explicitly in createTask().
+          // Skip the generic bell toast to prevent duplicate popups.
+          if (item.type === 'task_created') continue;
+          showDedupedToast(item.message);
           if (typeof document !== 'undefined' && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
             // Browser-level popup for background/inactive tab
             new Notification('Collab Creek', { body: item.message, tag: item.id });
@@ -439,10 +459,20 @@ const Index = () => {
     setNotifications((prev) =>
       prev.some((n) => n.id === notification.id) ? prev : [notification, ...prev],
     );
+    // Mark realtime-delivered notifications as seen by the local toast layer
+    // so the next polling tick doesn't re-toast the same item.
+    seenNotificationIdsRef.current.add(notification.id);
+    initializedNotificationsRef.current = true;
     if (!notification.read) {
       setNotificationUnreadCount((prev) => prev + 1);
     }
-    toast(notification.message);
+    const suppressForLocallyCreatedTask =
+      Boolean(notification.taskId) &&
+      suppressNotificationToastTaskIdsRef.current.has(notification.taskId);
+    const skipTaskCreatedBellToast = notification.type === 'task_created';
+    if (!suppressForLocallyCreatedTask && !skipTaskCreatedBellToast) {
+      showDedupedToast(notification.message);
+    }
     if (
       typeof document !== 'undefined' &&
       document.hidden &&
@@ -900,7 +930,11 @@ const Index = () => {
         ...prev,
       ];
     });
-    toast.success(`Task "${data.title}" created.`);
+    showDedupedToast(`Task "${data.title}" created successfully`, 'success');
+    suppressNotificationToastTaskIdsRef.current.add(data.id);
+    window.setTimeout(() => {
+      suppressNotificationToastTaskIdsRef.current.delete(data.id);
+    }, 10000);
 
     // Persist any files picked via the "Upload file" flow as the first comment attachment.
     if (payload.attachments && payload.attachments.length > 0) {

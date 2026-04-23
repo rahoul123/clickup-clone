@@ -169,6 +169,8 @@ const taskSchema = new Schema(
     startDate: { type: Date, default: null },
     dueDate: { type: Date, default: null },
     createdBy: { type: String, required: true },
+    /** True only during create flow to suppress creation-time notifications. */
+    isBeingCreated: { type: Boolean, default: false, index: true },
     /** Parent task id for subtasks (null for top-level tasks). */
     parentTaskId: { type: String, default: null, index: true },
     /** Lightweight inline checklist (e.g. "Review copy", "Publish"). */
@@ -296,6 +298,8 @@ const taskCommentSchema = new Schema(
     },
     /** When non-null, this comment is a threaded reply to the referenced comment. */
     parentCommentId: { type: String, default: null, index: true },
+    /** System-generated activity row shown in task activity feed (not a chat message). */
+    isActivity: { type: Boolean, default: false, index: true },
   },
   { timestamps: true }
 );

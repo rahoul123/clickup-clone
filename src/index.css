@@ -139,6 +139,21 @@
     background-color: hsl(var(--muted-foreground) / 0.3);
     border-radius: 3px;
   }
+
+  @keyframes bell-ring {
+    0% { transform: rotate(0deg); }
+    15% { transform: rotate(15deg); }
+    30% { transform: rotate(-12deg); }
+    45% { transform: rotate(9deg); }
+    60% { transform: rotate(-6deg); }
+    75% { transform: rotate(3deg); }
+    100% { transform: rotate(0deg); }
+  }
+
+  .bell-ring-once {
+    transform-origin: top center;
+    animation: bell-ring 700ms ease-in-out 1;
+  }
 }
 
 /* ---------- Dark-mode theming for native form controls ---------- */

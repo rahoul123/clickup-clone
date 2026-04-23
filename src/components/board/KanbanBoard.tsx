@@ -218,6 +218,7 @@ export function KanbanBoard({
       created_at: string;
       author_name?: string;
       read_by?: Array<{ user_id: string; name?: string; read_at?: string }>;
+      is_activity?: boolean;
     }>
   >([]);
   const [loadingComments, setLoadingComments] = useState(false);
@@ -473,6 +474,30 @@ export function KanbanBoard({
       );
     } catch (e) {
       console.error('Failed to toggle reaction', e);
+    }
+  };
+
+  const updateTaskComment = async (commentId: string, content: string) => {
+    if (!selectedTask) return;
+    try {
+      const { comment } = await api.app.updateTaskComment(selectedTask.id, commentId, { content });
+      setTaskComments((prev) => prev.map((c) => (c.id === commentId ? { ...c, ...comment } : c)));
+    } catch (e) {
+      console.error('Failed to update comment', e);
+      throw e;
+    }
+  };
+
+  const deleteTaskComment = async (commentId: string) => {
+    if (!selectedTask) return;
+    try {
+      await api.app.deleteTaskComment(selectedTask.id, commentId);
+      setTaskComments((prev) =>
+        prev.filter((c) => c.id !== commentId && c.parent_comment_id !== commentId)
+      );
+    } catch (e) {
+      console.error('Failed to delete comment', e);
+      throw e;
     }
   };
 
@@ -1049,7 +1074,19 @@ export function KanbanBoard({
                 <span>Priority</span>
               </div>
               {(tasksByStatus[columnKey] ?? []).map((task) => (
-                <div key={task.id} className="grid grid-cols-[2fr_1fr_1fr_1fr] gap-2 px-3 py-2 text-sm border-b border-border/60 last:border-b-0">
+                <div
+                  key={task.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => void openTaskDetails(task)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      void openTaskDetails(task);
+                    }
+                  }}
+                  className="grid grid-cols-[2fr_1fr_1fr_1fr] gap-2 px-3 py-2 text-sm border-b border-border/60 last:border-b-0 cursor-pointer hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-inset"
+                >
                   <span>{task.title}</span>
                   <span className="text-muted-foreground">{task.assignee_ids[0] ? assigneeNameById[task.assignee_ids[0]] : '-'}</span>
                   <span className="text-muted-foreground">
@@ -1102,6 +1139,8 @@ export function KanbanBoard({
           loadingComments={loadingComments}
           onSendComment={sendTaskComment}
           onToggleReaction={toggleTaskCommentReaction}
+          onEditComment={updateTaskComment}
+          onDeleteComment={deleteTaskComment}
           statusOptions={statusOptions}
           onUpdateTask={async (payload) => {
             // Capture the id at call time so a late-arriving response can't

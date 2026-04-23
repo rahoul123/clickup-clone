@@ -209,6 +209,13 @@ export const api = {
         parentCommentId?: string;
       }
     ) => request(`/tasks/${taskId}/comments`, { method: 'POST', body: JSON.stringify(payload) }),
+    updateTaskComment: (
+      taskId: string,
+      commentId: string,
+      payload: { content: string }
+    ) => request(`/tasks/${taskId}/comments/${commentId}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+    deleteTaskComment: (taskId: string, commentId: string) =>
+      request(`/tasks/${taskId}/comments/${commentId}`, { method: 'DELETE' }),
     markTaskCommentsRead: (taskId: string, payload: { commentIds: string[] }) =>
       request(`/tasks/${taskId}/comments/mark-read`, {
         method: 'POST',

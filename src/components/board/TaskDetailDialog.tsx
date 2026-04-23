@@ -7,7 +7,7 @@ import {
   Tag, ChevronRight, Plus, ListChecks, Link, Paperclip,
   Smile, AtSign, Video, Mic, Image as ImageIcon, Send, BrainCircuit, Check, Search,
   Copy, Lock, Globe, Upload, FileText, Download, Play, Save, Trash2, ExternalLink, ChevronDown,
-  UserPlus, CheckSquare, Calendar as CalendarIcon, Flag as FlagIcon, Box, MoreVertical
+  UserPlus, CheckSquare, Calendar as CalendarIcon, Flag as FlagIcon, Box, MoreVertical, Bookmark, Pencil
 } from 'lucide-react';
 import type { Task, TaskPriority, CommentAttachment, ChecklistItem } from '@/types';
 
@@ -25,6 +25,8 @@ interface TaskCommentView {
   parent_comment_id?: string | null;
   /** Emoji reactions (one entry per (emoji, user) pair). */
   reactions?: Array<{ emoji: string; user_id: string; user_name?: string }>;
+  /** Synthetic feed item generated from task activity notifications. */
+  is_activity?: boolean;
 }
 
 interface TaskDetailDialogProps {
@@ -40,6 +42,8 @@ interface TaskDetailDialogProps {
   ) => Promise<void>;
   /** Toggle an emoji reaction for the current user on an existing comment. */
   onToggleReaction?: (commentId: string, emoji: string) => Promise<void> | void;
+  onEditComment?: (commentId: string, content: string) => Promise<void> | void;
+  onDeleteComment?: (commentId: string) => Promise<void> | void;
   /** When set, status dropdown matches board columns (including custom). */
   statusOptions?: { value: string; label: string }[];
   onUpdateTask: (payload: {
@@ -111,6 +115,13 @@ const PRIORITY_COLORS: Record<TaskPriority, string> = {
   low: 'text-gray-400',
 };
 
+const PRIORITY_FLAG_STYLES: Record<string, string> = {
+  urgent: 'text-red-400',
+  high: 'text-amber-400',
+  normal: 'text-blue-400',
+  low: 'text-slate-400',
+};
+
 /** Quick-pick emojis shown in the reaction popover below each comment. */
 const REACTION_EMOJIS = ['👍', '❤️', '😄', '🎉', '👏', '🚀', '🔥', '✅'] as const;
 
@@ -131,6 +142,8 @@ export function TaskDetailDialog({
   onClose,
   onSendComment,
   onToggleReaction,
+  onEditComment,
+  onDeleteComment,
   statusOptions,
   onUpdateTask,
   onCreateReminder,
@@ -187,6 +200,8 @@ export function TaskDetailDialog({
   const [reactionPickerFor, setReactionPickerFor] = useState<string | null>(null);
   /** In-flight submission flag for the reply composer. */
   const [sendingReply, setSendingReply] = useState(false);
+  const [activityExpanded, setActivityExpanded] = useState(false);
+  const activityScrollRef = useRef<HTMLDivElement | null>(null);
 
   // --- Subtasks / Checklist / Relate items ---
   const [subtasksOpen, setSubtasksOpen] = useState(true);
@@ -232,6 +247,7 @@ export function TaskDetailDialog({
   >({});
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const attachTaskFileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const assigneeDropdownRef = useRef<HTMLDivElement | null>(null);
   const mentionPickerRef = useRef<HTMLDivElement | null>(null);
@@ -249,6 +265,48 @@ export function TaskDetailDialog({
     }
     return base;
   }, [statusOptions, task.status]);
+
+  const activityItems = useMemo(
+    () => comments.filter((item) => item.is_activity && !item.parent_comment_id),
+    [comments]
+  );
+  const isCreationHiddenActivity = (item: TaskCommentView) => {
+    const text = (item.content || '').toLowerCase();
+    if (!item.is_activity) return false;
+    if (text.includes('created this task')) return false;
+    if (text.includes('set priority to')) return false;
+    return text.includes('set the due date to') || text.includes('assigned to:');
+  };
+  const hiddenCreationActivityIds = useMemo(
+    () =>
+      activityExpanded
+        ? new Set<string>()
+        : new Set(activityItems.filter((item) => isCreationHiddenActivity(item)).map((item) => item.id)),
+    [activityExpanded, activityItems]
+  );
+  const hiddenActivityCount = useMemo(
+    () => activityItems.filter((item) => isCreationHiddenActivity(item)).length,
+    [activityItems]
+  );
+
+  const conversationComments = useMemo(
+    () => comments.filter((item) => !item.is_activity),
+    [comments]
+  );
+
+  const scrollActivityToBottom = () => {
+    const container = activityScrollRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+  };
+
+  useEffect(() => {
+    if (loadingComments) return;
+    const id = window.requestAnimationFrame(() => {
+      scrollActivityToBottom();
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [loadingComments, comments, activityExpanded]);
 
   const saveDebounceRef = useRef<number | null>(null);
   const skipAutoSaveRef = useRef(false);
@@ -398,14 +456,31 @@ export function TaskDetailDialog({
     saveDebounceRef.current = window.setTimeout(async () => {
       setSaving(true);
       try {
-        await onUpdateTask({
-          title,
-          description,
-          status,
-          priority,
-          assigneeIds,
-          startDate: startDate || undefined,
-          endDate: endDate || undefined,
+        const latest = taskRef.current;
+        const payload: {
+          title?: string;
+          description?: string;
+          status?: string;
+          priority?: TaskPriority;
+          assigneeIds?: string[];
+          startDate?: string;
+          endDate?: string;
+        } = {};
+
+        if (title !== latest.title) payload.title = title;
+        if (description !== (latest.description ?? '')) payload.description = description;
+        if (status !== latest.status) payload.status = status;
+        if (priority !== latest.priority) payload.priority = priority;
+        if (JSON.stringify(assigneeIds) !== JSON.stringify(latest.assignee_ids)) payload.assigneeIds = assigneeIds;
+        if (startDate !== (latest.start_date ? latest.start_date.slice(0, 10) : '')) payload.startDate = startDate;
+        if (endDate !== (latest.due_date ? latest.due_date.slice(0, 10) : '')) payload.endDate = endDate;
+
+        if (Object.keys(payload).length === 0) return;
+        await onUpdateTask(payload);
+      } catch (error) {
+        toast({
+          title: 'Task update failed',
+          description: error instanceof Error ? error.message : 'Please retry.',
         });
       } finally {
         setSaving(false);
@@ -445,6 +520,9 @@ export function TaskDetailDialog({
       await onSendComment(text, payloadAttachments.length > 0 ? payloadAttachments : undefined);
       setCommentText('');
       setAttachments([]);
+      window.setTimeout(() => {
+        scrollActivityToBottom();
+      }, 0);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to send comment';
       toast({
@@ -471,6 +549,56 @@ export function TaskDetailDialog({
 
   const handleImageAttachmentClick = () => {
     imageInputRef.current?.click();
+  };
+
+  const handleAttachFilesFromTaskPanel = async (files: File[]) => {
+    if (files.length === 0) return;
+    const oversize = files.find((file) => file.size > MAX_ATTACHMENT_SIZE_BYTES);
+    if (oversize) {
+      toast({
+        title: 'File too large',
+        description: `${oversize.name} is larger than 4 MB.`,
+      });
+      return;
+    }
+    try {
+      const payloadAttachments = await Promise.all(
+        files.map(async (file) => ({
+          filename: file.name,
+          mimeType: file.type || 'application/octet-stream',
+          dataUrl: await readFileAsDataUrl(file),
+        }))
+      );
+      await onSendComment(
+        `📎 Attached ${payloadAttachments.length} file${payloadAttachments.length > 1 ? 's' : ''}`,
+        payloadAttachments
+      );
+      toast({
+        title: 'Attachment added',
+        description: `${payloadAttachments.length} file${payloadAttachments.length > 1 ? 's' : ''} uploaded.`,
+      });
+    } catch (error) {
+      toast({
+        title: 'Attachment failed',
+        description: error instanceof Error ? error.message : 'Could not upload attachment.',
+      });
+    }
+  };
+
+  const handleCreateDocumentFromTaskPanel = async () => {
+    const rawName = window.prompt('Document name');
+    const name = String(rawName || '').trim();
+    if (!name) return;
+    const content = window.prompt('Document content') ?? '';
+    try {
+      const file = new File([content], `${name}.txt`, { type: 'text/plain' });
+      await handleAttachFilesFromTaskPanel([file]);
+    } catch (error) {
+      toast({
+        title: 'Document creation failed',
+        description: error instanceof Error ? error.message : 'Could not create document.',
+      });
+    }
   };
 
   const insertMention = (member: { id: string; label: string }) => {
@@ -688,9 +816,12 @@ export function TaskDetailDialog({
   }, [showMentionPicker]);
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 dark:bg-black/70 backdrop-blur-[2px] flex items-center justify-center p-4" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 bg-black/25 dark:bg-black/45 backdrop-blur-[1px] flex items-stretch justify-end"
+      onClick={onClose}
+    >
       <div
-        className="flex flex-col h-[88vh] w-[min(96vw,1220px)] bg-gray-50 dark:bg-slate-900 text-gray-800 dark:text-slate-200 font-sans overflow-hidden rounded-lg shadow-2xl dark:shadow-black/60 ring-1 ring-black/5 dark:ring-white/10"
+        className="flex h-full w-[min(94vw,1080px)] flex-col bg-gray-50 dark:bg-slate-900 text-gray-800 dark:text-slate-200 font-sans overflow-hidden shadow-2xl dark:shadow-black/60 ring-1 ring-black/5 dark:ring-white/10 transform transition-transform duration-200 ease-out animate-in slide-in-from-right"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-5 px-4 py-2 bg-white dark:bg-slate-900 border-b border-gray-200 dark:border-slate-700 text-xs">
@@ -1602,7 +1733,16 @@ export function TaskDetailDialog({
                     <Paperclip size={14} className="text-gray-400 dark:text-slate-500" />
                     <span>Attach file</span>
                   </button>
-                  {activePopup === 'attach' && <AttachDropdown onClose={() => setActivePopup(null)} />}
+                  {activePopup === 'attach' && (
+                    <AttachDropdown
+                      onClose={() => setActivePopup(null)}
+                      onUploadFile={() => attachTaskFileInputRef.current?.click()}
+                      onNewDocument={() => {
+                        void handleCreateDocumentFromTaskPanel();
+                      }}
+                      onCloudImport={() => attachTaskFileInputRef.current?.click()}
+                    />
+                  )}
                 </div>
               </div>
             </div>
@@ -1626,7 +1766,7 @@ export function TaskDetailDialog({
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto">
+            <div ref={activityScrollRef} className="flex-1 overflow-y-auto">
               {loadingComments && (
                 <div className="flex items-center justify-center h-32 text-sm text-gray-400 dark:text-slate-500 font-medium">
                   <div className="animate-spin mr-2">⊙</div> Loading comments...
@@ -1641,64 +1781,100 @@ export function TaskDetailDialog({
                   <p className="text-xs text-gray-400 dark:text-slate-500">Start the discussion by adding a comment below</p>
                 </div>
               )}
-              <div className="space-y-4 p-5">
-                {(() => {
-                  // Group comments into { parent, replies[] } threads. Replies stay
-                  // chronologically ordered; any reply whose parent is missing
-                  // degrades gracefully into a top-level comment.
-                  const topLevel = comments.filter((c) => !c.parent_comment_id);
-                  const repliesByParent: Record<string, TaskCommentView[]> = {};
-                  for (const c of comments) {
-                    if (c.parent_comment_id) {
-                      (repliesByParent[c.parent_comment_id] ||= []).push(c);
-                    }
-                  }
-                  const orphanParents = new Set(topLevel.map((c) => c.id));
-                  const orphans = comments.filter(
-                    (c) => c.parent_comment_id && !orphanParents.has(c.parent_comment_id),
-                  );
-                  const renderList = [...topLevel, ...orphans];
+              {!loadingComments && comments.length > 0 && (
+                <div className="min-h-full flex flex-col justify-end">
+                  <div className="space-y-4 p-5">
+                    {(() => {
+                      // Keep one chronological feed so activity rows and comments
+                      // appear in true time order (older on top, latest at bottom).
+                      const topLevel = conversationComments.filter((c) => !c.parent_comment_id);
+                      const repliesByParent: Record<string, TaskCommentView[]> = {};
+                      for (const c of conversationComments) {
+                        if (c.parent_comment_id) {
+                          (repliesByParent[c.parent_comment_id] ||= []).push(c);
+                        }
+                      }
+                      const orphanParents = new Set(topLevel.map((c) => c.id));
+                      const orphans = conversationComments.filter(
+                        (c) => c.parent_comment_id && !orphanParents.has(c.parent_comment_id),
+                      );
+                      const renderableCommentIds = new Set([...topLevel, ...orphans].map((c) => c.id));
+                      const renderList = comments
+                        .filter((item) => {
+                          if (item.is_activity) return !hiddenCreationActivityIds.has(item.id);
+                          return renderableCommentIds.has(item.id);
+                        })
+                        .sort(
+                          (a, b) =>
+                            new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+                        );
 
-                  const submitReply = async (parentId: string) => {
-                    const text = replyText.trim();
-                    if (!text) return;
-                    setSendingReply(true);
-                    try {
-                      await onSendComment(text, undefined, parentId);
-                      setReplyText('');
-                      setReplyingTo(null);
-                    } catch (err) {
-                      toast({
-                        title: 'Reply failed',
-                        description: err instanceof Error ? err.message : 'Please retry.',
-                      });
-                    } finally {
-                      setSendingReply(false);
-                    }
-                  };
+                      const submitReply = async (parentId: string) => {
+                        const text = replyText.trim();
+                        if (!text) return;
+                        setSendingReply(true);
+                        try {
+                          await onSendComment(text, undefined, parentId);
+                          setReplyText('');
+                          setReplyingTo(null);
+                        } catch (err) {
+                          toast({
+                            title: 'Reply failed',
+                            description: err instanceof Error ? err.message : 'Please retry.',
+                          });
+                        } finally {
+                          setSendingReply(false);
+                        }
+                      };
 
-                  return renderList.map((comment) => (
-                    <CommentBlock
-                      key={comment.id}
-                      comment={comment}
-                      replies={repliesByParent[comment.id] || []}
-                      currentUserId={currentUserId}
-                      reactionPickerFor={reactionPickerFor}
-                      setReactionPickerFor={setReactionPickerFor}
-                      onToggleReaction={onToggleReaction}
-                      replyingTo={replyingTo}
-                      setReplyingTo={(id) => {
-                        setReplyingTo(id);
-                        setReplyText('');
-                      }}
-                      replyText={replyText}
-                      setReplyText={setReplyText}
-                      sendingReply={sendingReply}
-                      onSubmitReply={submitReply}
-                    />
-                  ));
-                })()}
-              </div>
+                      return (
+                        <>
+                          {hiddenActivityCount > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => setActivityExpanded((v) => !v)}
+                              className="w-full flex items-center gap-1.5 py-1 text-xs text-gray-400 dark:text-slate-500 hover:text-gray-200 dark:hover:text-slate-300 transition-colors"
+                            >
+                              <ChevronRight size={12} className={activityExpanded ? 'rotate-90' : ''} />
+                              <span>{activityExpanded ? 'Hide' : 'Show more'}</span>
+                            </button>
+                          )}
+                          {renderList.map((comment) =>
+                            comment.is_activity ? (
+                              <ActivityRow
+                                key={comment.id}
+                                content={comment.content}
+                                createdAt={comment.created_at}
+                              />
+                            ) : (
+                              <CommentBlock
+                                key={comment.id}
+                                comment={comment}
+                                replies={repliesByParent[comment.id] || []}
+                                currentUserId={currentUserId}
+                                reactionPickerFor={reactionPickerFor}
+                                setReactionPickerFor={setReactionPickerFor}
+                                onToggleReaction={onToggleReaction}
+                                onEditComment={onEditComment}
+                                onDeleteComment={onDeleteComment}
+                                replyingTo={replyingTo}
+                                setReplyingTo={(id) => {
+                                  setReplyingTo(id);
+                                  setReplyText('');
+                                }}
+                                replyText={replyText}
+                                setReplyText={setReplyText}
+                                sendingReply={sendingReply}
+                                onSubmitReply={submitReply}
+                              />
+                            )
+                          )}
+                        </>
+                      );
+                    })()}
+                  </div>
+                </div>
+              )}
             </div>
 
             <form className="border-t border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3 shadow-lg" onSubmit={handleSubmit}>
@@ -1712,6 +1888,13 @@ export function TaskDetailDialog({
                       handleCommentInput(el.value, el.selectionStart ?? el.value.length);
                     }}
                     onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        if (!sending && (commentText.trim() || attachments.length > 0)) {
+                          void handleSubmit();
+                        }
+                        return;
+                      }
                       if (!inlineMention || inlineMentionMatches.length === 0) return;
                       if (e.key === 'ArrowDown') {
                         e.preventDefault();
@@ -1721,7 +1904,7 @@ export function TaskDetailDialog({
                         setInlineMentionIndex((i) =>
                           (i - 1 + inlineMentionMatches.length) % inlineMentionMatches.length,
                         );
-                      } else if (e.key === 'Enter' || e.key === 'Tab') {
+                      } else if (e.key === 'Tab') {
                         e.preventDefault();
                         applyInlineMention(inlineMentionMatches[inlineMentionIndex]);
                       } else if (e.key === 'Escape') {
@@ -1923,6 +2106,17 @@ export function TaskDetailDialog({
                 multiple
                 accept="image/*"
                 onChange={handleFileSelect}
+                className="hidden"
+              />
+              <input
+                ref={attachTaskFileInputRef}
+                type="file"
+                multiple
+                onChange={(e) => {
+                  const files = e.currentTarget.files ? Array.from(e.currentTarget.files) : [];
+                  void handleAttachFilesFromTaskPanel(files);
+                  e.currentTarget.value = '';
+                }}
                 className="hidden"
               />
             </form>
@@ -2358,6 +2552,53 @@ const ActionButton = ({ icon, text }: { icon: React.ReactNode; text: string }) =
   </button>
 );
 
+const formatRelativeActivityTime = (value: string) => {
+  const ts = new Date(value).getTime();
+  if (Number.isNaN(ts)) return '';
+  const diffMs = Date.now() - ts;
+  const mins = Math.max(1, Math.floor(diffMs / 60000));
+  if (mins < 60) return `${mins} mins`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} hr${hours > 1 ? 's' : ''}`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days > 1 ? 's' : ''}`;
+};
+
+const PriorityValue = ({ value }: { value: string }) => {
+  const key = value.trim().toLowerCase();
+  return (
+    <span className="inline-flex items-center gap-1">
+      <Flag size={11} className={PRIORITY_FLAG_STYLES[key] ?? 'text-slate-400'} />
+      <span>{value}</span>
+    </span>
+  );
+};
+
+const ActivityText = ({ content }: { content: string }) => {
+  const match = content.match(/^(.*changed priority from )(.+?)( to )(.+)$/i);
+  if (!match) return <span>{content}</span>;
+  return (
+    <span>
+      {match[1]}
+      <PriorityValue value={match[2]} />
+      {match[3]}
+      <PriorityValue value={match[4]} />
+    </span>
+  );
+};
+
+const ActivityRow = ({ content, createdAt }: { content: string; createdAt: string }) => (
+  <div className="flex items-start justify-between gap-3 py-1 text-xs leading-5">
+    <div className="min-w-0 flex items-start gap-2">
+      <span className="mt-[2px] text-slate-500">•</span>
+      <p className="text-slate-200 font-normal break-words">
+        <ActivityText content={content} />
+      </p>
+    </div>
+    <span className="shrink-0 text-[11px] text-slate-500">{formatRelativeActivityTime(createdAt)}</span>
+  </div>
+);
+
 /**
  * One comment bubble in the Activity panel. Handles:
  *  - Avatar + author name + timestamp
@@ -2375,6 +2616,8 @@ const CommentBlock = ({
   reactionPickerFor,
   setReactionPickerFor,
   onToggleReaction,
+  onEditComment,
+  onDeleteComment,
   replyingTo,
   setReplyingTo,
   replyText,
@@ -2389,6 +2632,8 @@ const CommentBlock = ({
   reactionPickerFor: string | null;
   setReactionPickerFor: (id: string | null) => void;
   onToggleReaction?: (commentId: string, emoji: string) => Promise<void> | void;
+  onEditComment?: (commentId: string, content: string) => Promise<void> | void;
+  onDeleteComment?: (commentId: string) => Promise<void> | void;
   replyingTo: string | null;
   setReplyingTo: (id: string | null) => void;
   replyText: string;
@@ -2412,6 +2657,68 @@ const CommentBlock = ({
   const hasReactions = Object.keys(reactionGroups).length > 0;
   const isReplyOpen = replyingTo === comment.id;
   const isPickerOpen = reactionPickerFor === comment.id;
+  const isActivityEntry = Boolean(comment.is_activity);
+  const isAuthor = Boolean(currentUserId && comment.user_id === currentUserId);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editingText, setEditingText] = useState(comment.content || '');
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setEditingText(comment.content || '');
+  }, [comment.id, comment.content]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (!menuRef.current?.contains(target)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [menuOpen]);
+
+  const submitEdit = async () => {
+    const next = editingText.trim();
+    if (!next || next === (comment.content || '').trim()) {
+      setEditing(false);
+      setEditingText(comment.content || '');
+      return;
+    }
+    if (!isAuthor || !onEditComment) return;
+    setSavingEdit(true);
+    try {
+      await onEditComment(comment.id, next);
+      setEditing(false);
+    } catch (error) {
+      toast({
+        title: 'Edit failed',
+        description: error instanceof Error ? error.message : 'Please retry.',
+      });
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!isAuthor || !onDeleteComment) return;
+    const ok = window.confirm('Delete this comment?');
+    if (!ok) return;
+    setDeleting(true);
+    try {
+      await onDeleteComment(comment.id);
+      setMenuOpen(false);
+    } catch (error) {
+      toast({
+        title: 'Delete failed',
+        description: error instanceof Error ? error.message : 'Please retry.',
+      });
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   return (
     <div className={`group ${isReply ? 'pl-8 border-l-2 border-gray-100 dark:border-slate-800/70 ml-4' : ''}`}>
@@ -2423,7 +2730,7 @@ const CommentBlock = ({
             {(comment.author_name || 'U').charAt(0).toUpperCase()}
           </div>
         </div>
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 relative">
           <div className="flex items-center justify-between mb-1">
             <p className="text-sm font-semibold text-gray-900 dark:text-slate-100">
               {comment.author_name || 'Anonymous'}
@@ -2438,10 +2745,118 @@ const CommentBlock = ({
             </time>
           </div>
 
+          {!isActivityEntry && (
+            <div className="absolute right-0 top-0 z-20 flex items-center gap-1 rounded-md bg-white/90 dark:bg-slate-900/90 px-1 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button type="button" className="p-1 text-gray-400 hover:text-purple-500" title="AI actions">
+                <BrainCircuit size={14} />
+              </button>
+              <button type="button" className="p-1 text-gray-400 hover:text-purple-500" title="Bookmark">
+                <Bookmark size={14} />
+              </button>
+              {isAuthor && (
+                <button
+                  type="button"
+                  className="p-1 text-gray-400 hover:text-purple-500"
+                  title="Edit comment"
+                  onClick={() => {
+                    setEditing(true);
+                    setMenuOpen(false);
+                  }}
+                >
+                  <Pencil size={14} />
+                </button>
+              )}
+              <button
+                type="button"
+                className="p-1 text-gray-400 hover:text-purple-500"
+                title="Reply"
+                onClick={() => setReplyingTo(comment.id)}
+              >
+                <MessageSquare size={14} />
+              </button>
+              <div className="relative" ref={menuRef}>
+                <button
+                  type="button"
+                  className="p-1 text-gray-400 hover:text-purple-500"
+                  title="More options"
+                  onClick={() => setMenuOpen((v) => !v)}
+                >
+                  <MoreHorizontal size={14} />
+                </button>
+                {menuOpen && (
+                  <div className="absolute right-0 top-7 z-30 w-56 rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl py-1 text-sm">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard?.writeText(window.location.href);
+                        setMenuOpen(false);
+                      }}
+                      className="w-full px-3 py-2 text-left text-gray-700 dark:text-slate-200 hover:bg-gray-50 dark:hover:bg-slate-800"
+                    >
+                      Copy URL
+                    </button>
+                    <button type="button" className="w-full px-3 py-2 text-left text-gray-700 dark:text-slate-200 hover:bg-gray-50 dark:hover:bg-slate-800">Create Task</button>
+                    <button type="button" className="w-full px-3 py-2 text-left text-gray-700 dark:text-slate-200 hover:bg-gray-50 dark:hover:bg-slate-800">Create task with AI</button>
+                    <button type="button" className="w-full px-3 py-2 text-left text-gray-700 dark:text-slate-200 hover:bg-gray-50 dark:hover:bg-slate-800">Create subtask(s) with AI</button>
+                    <button type="button" className="w-full px-3 py-2 text-left text-gray-700 dark:text-slate-200 hover:bg-gray-50 dark:hover:bg-slate-800 inline-flex items-center justify-between">
+                      <span>Remind me in Inbox</span>
+                      <ChevronRight size={13} />
+                    </button>
+                    <button type="button" className="w-full px-3 py-2 text-left text-gray-700 dark:text-slate-200 hover:bg-gray-50 dark:hover:bg-slate-800">Add to description</button>
+                    <div className="my-1 border-t border-gray-200 dark:border-slate-700" />
+                    <button type="button" className="w-full px-3 py-2 text-left text-gray-700 dark:text-slate-200 hover:bg-gray-50 dark:hover:bg-slate-800">Don't notify me about replies</button>
+                    {isAuthor && <div className="my-1 border-t border-gray-200 dark:border-slate-700" />}
+                    {isAuthor && (
+                      <button
+                        type="button"
+                        onClick={() => void confirmDelete()}
+                        disabled={deleting}
+                        className="w-full px-3 py-2 text-left text-red-500 hover:bg-red-50 dark:hover:bg-red-950/20 disabled:opacity-50"
+                      >
+                        Delete comment
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="bg-white dark:bg-slate-900 border border-gray-100 dark:border-slate-800 rounded-lg p-3 shadow-xs hover:shadow-sm dark:hover:shadow-black/40 transition-shadow">
-            <p className="text-sm text-gray-700 dark:text-slate-300 leading-relaxed break-words whitespace-pre-wrap">
-              {comment.content || '📎 Image attached'}
-            </p>
+            {editing ? (
+              <div className="space-y-2">
+                <textarea
+                  value={editingText}
+                  onChange={(e) => setEditingText(e.target.value)}
+                  rows={3}
+                  className="w-full resize-none rounded-md border border-gray-200 dark:border-slate-700 bg-transparent px-2 py-1.5 text-sm text-gray-700 dark:text-slate-200 outline-none focus:ring-2 focus:ring-purple-400/30"
+                />
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void submitEdit()}
+                    disabled={savingEdit || !editingText.trim()}
+                    className="rounded-md bg-purple-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-purple-700 disabled:opacity-50"
+                  >
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditing(false);
+                      setEditingText(comment.content || '');
+                    }}
+                    className="rounded-md border border-gray-200 dark:border-slate-700 px-2.5 py-1 text-xs text-gray-600 dark:text-slate-300"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-gray-700 dark:text-slate-300 leading-relaxed break-words whitespace-pre-wrap">
+                {comment.content || '📎 Image attached'}
+              </p>
+            )}
             {comment.attachments?.length ? (
               <div className="mt-3 grid gap-2">
                 {comment.attachments.map((attachment, idx) => (
@@ -2468,7 +2883,7 @@ const CommentBlock = ({
           </div>
 
           {/* Reaction chips */}
-          {hasReactions && (
+          {hasReactions && !isActivityEntry && (
             <div className="flex flex-wrap gap-1.5 mt-2">
               {Object.entries(reactionGroups).map(([emoji, info]) => (
                 <button
@@ -2489,7 +2904,7 @@ const CommentBlock = ({
             </div>
           )}
 
-          {comment.read_by && comment.read_by.length > 0 && (
+          {comment.read_by && comment.read_by.length > 0 && !isActivityEntry && (
             <p className="mt-1.5 text-[11px] leading-snug text-gray-500 dark:text-slate-400">
               <span className="font-medium text-gray-400 dark:text-slate-500">Seen by </span>
               {comment.read_by.map((r) => r.name || r.user_id).join(', ')}
@@ -2497,66 +2912,68 @@ const CommentBlock = ({
           )}
 
           {/* Action row — always visible so emoji/reply are discoverable. */}
-          <div className="relative flex items-center gap-3 mt-2">
-            <button
-              type="button"
-              onClick={() => setReactionPickerFor(isPickerOpen ? null : comment.id)}
-              className="inline-flex items-center gap-1 text-xs text-gray-400 dark:text-slate-500 hover:text-purple-600 dark:hover:text-purple-400 transition-colors font-medium"
-              title="Add reaction"
-            >
-              <Smile size={13} />
-              <span>React</span>
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                isReplyOpen ? setReplyingTo(null) : setReplyingTo(comment.id)
-              }
-              className={`inline-flex items-center gap-1 text-xs transition-colors font-medium ${
-                isReplyOpen
-                  ? 'text-purple-600 dark:text-purple-400'
-                  : 'text-gray-400 dark:text-slate-500 hover:text-purple-600 dark:hover:text-purple-400'
-              }`}
-              title="Reply"
-            >
-              <MessageSquare size={13} />
-              <span>Reply</span>
-            </button>
+          {!isActivityEntry && (
+            <div className="relative flex items-center gap-3 mt-2">
+              <button
+                type="button"
+                onClick={() => setReactionPickerFor(isPickerOpen ? null : comment.id)}
+                className="inline-flex items-center gap-1 text-xs text-gray-400 dark:text-slate-500 hover:text-purple-600 dark:hover:text-purple-400 transition-colors font-medium"
+                title="Add reaction"
+              >
+                <Smile size={13} />
+                <span>React</span>
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  isReplyOpen ? setReplyingTo(null) : setReplyingTo(comment.id)
+                }
+                className={`inline-flex items-center gap-1 text-xs transition-colors font-medium ${
+                  isReplyOpen
+                    ? 'text-purple-600 dark:text-purple-400'
+                    : 'text-gray-400 dark:text-slate-500 hover:text-purple-600 dark:hover:text-purple-400'
+                }`}
+                title="Reply"
+              >
+                <MessageSquare size={13} />
+                <span>Reply</span>
+              </button>
 
-            {/* Emoji quick-picker */}
-            {isPickerOpen && (
-              <>
-                <div
-                  className="fixed inset-0 z-40"
-                  onClick={() => setReactionPickerFor(null)}
-                />
-                <div className="absolute left-0 top-6 z-50 flex gap-1 p-1.5 rounded-full border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg">
-                  {REACTION_EMOJIS.map((emoji) => {
-                    const mine = reactionGroups[emoji]?.mine;
-                    return (
-                      <button
-                        key={emoji}
-                        type="button"
-                        onClick={() => {
-                          void onToggleReaction?.(comment.id, emoji);
-                          setReactionPickerFor(null);
-                        }}
-                        className={`w-8 h-8 rounded-full hover:bg-gray-100 dark:hover:bg-slate-800 transition text-[17px] leading-none flex items-center justify-center ${
-                          mine ? 'bg-purple-50 dark:bg-purple-900/30' : ''
-                        }`}
-                        title={mine ? 'Remove reaction' : `React with ${emoji}`}
-                      >
-                        {emoji}
-                      </button>
-                    );
-                  })}
-                </div>
-              </>
-            )}
-          </div>
+              {/* Emoji quick-picker */}
+              {isPickerOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-40"
+                    onClick={() => setReactionPickerFor(null)}
+                  />
+                  <div className="absolute left-0 top-6 z-50 flex gap-1 p-1.5 rounded-full border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg">
+                    {REACTION_EMOJIS.map((emoji) => {
+                      const mine = reactionGroups[emoji]?.mine;
+                      return (
+                        <button
+                          key={emoji}
+                          type="button"
+                          onClick={() => {
+                            void onToggleReaction?.(comment.id, emoji);
+                            setReactionPickerFor(null);
+                          }}
+                          className={`w-8 h-8 rounded-full hover:bg-gray-100 dark:hover:bg-slate-800 transition text-[17px] leading-none flex items-center justify-center ${
+                            mine ? 'bg-purple-50 dark:bg-purple-900/30' : ''
+                          }`}
+                          title={mine ? 'Remove reaction' : `React with ${emoji}`}
+                        >
+                          {emoji}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Inline reply composer */}
-          {isReplyOpen && (
+          {isReplyOpen && !isActivityEntry && (
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -2601,7 +3018,7 @@ const CommentBlock = ({
           )}
 
           {/* Nested replies — rendered as a flat second level to match Slack/Linear. */}
-          {replies.length > 0 && (
+          {replies.length > 0 && !isActivityEntry && (
             <div className="mt-3 space-y-3">
               {replies.map((reply) => (
                 <CommentBlock
@@ -2612,6 +3029,8 @@ const CommentBlock = ({
                   reactionPickerFor={reactionPickerFor}
                   setReactionPickerFor={setReactionPickerFor}
                   onToggleReaction={onToggleReaction}
+                  onEditComment={onEditComment}
+                  onDeleteComment={onDeleteComment}
                   replyingTo={replyingTo}
                   setReplyingTo={setReplyingTo}
                   replyText={replyText}
@@ -3734,18 +4153,54 @@ const TimeTrackPopup = ({ onClose }: { onClose: () => void }) => (
   </div>
 );
 
-const AttachDropdown = ({ onClose }: { onClose: () => void }) => (
+const AttachDropdown = ({
+  onClose,
+  onUploadFile,
+  onNewDocument,
+  onCloudImport,
+}: {
+  onClose: () => void;
+  onUploadFile: () => void;
+  onNewDocument: () => void;
+  onCloudImport: () => void;
+}) => (
   <div className="absolute bottom-full left-0 mb-2 w-48 bg-white dark:bg-slate-900 shadow-xl border rounded-lg z-20 py-1 flex flex-col">
     <div className="px-3 py-2 text-[10px] text-gray-400 dark:text-slate-500 uppercase font-bold border-b mb-1">Upload from</div>
+    <button
+      type="button"
+      className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-800 cursor-pointer text-xs text-gray-700 dark:text-slate-300 text-left"
+      onClick={() => {
+        onUploadFile();
+        onClose();
+      }}
+    >
+      <Upload size={14} /> <span>Upload file</span>
+    </button>
+    <button
+      type="button"
+      className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-800 cursor-pointer text-xs text-gray-700 dark:text-slate-300 text-left"
+      onClick={() => {
+        onNewDocument();
+        onClose();
+      }}
+    >
+      <FileText size={14} /> <span>New Document</span>
+    </button>
     {[
-      { icon: <Upload size={14} />, label: 'Upload file' },
-      { icon: <FileText size={14} />, label: 'New Document' },
       { icon: <Download size={14} />, label: 'Dropbox' },
       { icon: <Globe size={14} />, label: 'Google Drive' },
     ].map((item, i) => (
-      <div key={i} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-800 cursor-pointer text-xs text-gray-700 dark:text-slate-300" onClick={onClose}>
+      <button
+        type="button"
+        key={i}
+        className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-800 cursor-pointer text-xs text-gray-700 dark:text-slate-300 text-left"
+        onClick={() => {
+          onCloudImport();
+          onClose();
+        }}
+      >
         {item.icon} <span>{item.label}</span>
-      </div>
+      </button>
     ))}
   </div>
 );

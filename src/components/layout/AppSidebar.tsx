@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Home,
-  Bell,
+  BellRing,
   FileText,
   BarChart3,
   Timer,
@@ -106,7 +106,7 @@ interface ListRowProps {
 
 const navItems = [
   { id: 'home', name: 'Home', icon: <Home className="w-4 h-4" />, type: 'nav' as const },
-  { id: 'notifications', name: 'Notifications', icon: <Bell className="w-4 h-4" />, type: 'nav' as const },
+  { id: 'notifications', name: 'Notifications', icon: <BellRing className="w-4 h-4" />, type: 'nav' as const },
   { id: 'docs', name: 'Docs', icon: <FileText className="w-4 h-4" />, type: 'nav' as const },
   { id: 'dashboards', name: 'Dashboards', icon: <BarChart3 className="w-4 h-4" />, type: 'nav' as const },
   { id: 'timesheets', name: 'Timesheets', icon: <Timer className="w-4 h-4" />, type: 'nav' as const },
@@ -258,6 +258,8 @@ export function AppSidebar({
   onExportReport,
   canExportReport,
 }: AppSidebarProps) {
+  const [bellRingOnce, setBellRingOnce] = useState(false);
+  const prevNotificationCountRef = useRef(notificationCount);
   const allSpaceIds = workspaceSections.flatMap((s) =>
     s.spaces.flatMap((sp) => {
       if (sp.isMasterFolder) {
@@ -602,6 +604,16 @@ export function AppSidebar({
   useEffect(() => {
     setExpandedItems(new Set(workspaceSections.flatMap((s) => s.spaces.map((sp) => sp.id))));
   }, [workspaceSections]);
+
+  useEffect(() => {
+    if (notificationCount > prevNotificationCountRef.current) {
+      setBellRingOnce(true);
+      const timer = window.setTimeout(() => setBellRingOnce(false), 800);
+      prevNotificationCountRef.current = notificationCount;
+      return () => window.clearTimeout(timer);
+    }
+    prevNotificationCountRef.current = notificationCount;
+  }, [notificationCount]);
 
   const toggleExpand = (id: string) => {
     setExpandedItems((prev) => {
@@ -1115,13 +1127,19 @@ export function AppSidebar({
                 : 'text-sidebar-foreground hover:bg-sidebar-accent/70'
             )}
           >
-            {item.icon}
-            <span>{item.name}</span>
-            {item.id === 'notifications' && notificationCount > 0 && (
-              <span className="ml-auto text-[10px] font-semibold bg-primary text-primary-foreground rounded-full px-1.5 py-0.5">
-                {notificationCount}
+            {item.id === 'notifications' ? (
+              <span className="relative inline-flex h-4 w-4 items-center justify-center">
+                <BellRing className={cn('h-4 w-4', bellRingOnce && 'bell-ring-once')} />
+                {notificationCount > 0 && (
+                  <span className="absolute -right-2 -top-2 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-red-500 px-1 text-[9px] font-bold leading-none text-white">
+                    {notificationCount > 9 ? '9+' : notificationCount}
+                  </span>
+                )}
               </span>
+            ) : (
+              item.icon
             )}
+            <span>{item.name}</span>
           </button>
         ))}
       </div>

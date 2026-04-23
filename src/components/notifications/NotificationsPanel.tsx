@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { formatDistanceToNow, parseISO } from 'date-fns';
 import {
-  Bell,
+  BellRing,
   CheckCircle2,
   Inbox,
   Sparkles,
@@ -77,13 +77,13 @@ export function NotificationsPanel({
   };
 
   return (
-    <main className="min-h-0 flex-1 overflow-hidden bg-gradient-to-br from-background via-background to-primary/[0.04] p-6">
+    <main className="min-h-0 flex-1 overflow-hidden bg-gradient-to-br from-background via-background to-primary/[0.05] p-6">
       <div className="mx-auto flex h-full max-w-4xl flex-col">
-        <Card className="flex h-full min-h-0 flex-col border-border/70 bg-card/90 shadow-sm">
+        <Card className="flex h-full min-h-0 flex-col border-border/60 bg-card/80 backdrop-blur-md shadow-[0_12px_40px_-24px_hsl(var(--foreground)/0.45)]">
           {/* Header */}
           <CardHeader className="shrink-0 pb-4">
-            <div className="mb-2 inline-flex w-fit items-center gap-2 rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
-              <Bell className="h-3.5 w-3.5" />
+            <div className="mb-2 inline-flex w-fit items-center gap-2 rounded-full border border-primary/20 bg-primary/8 px-2.5 py-1 text-xs font-medium text-primary">
+              <BellRing className="h-3.5 w-3.5" />
               Notifications
             </div>
             <div className="flex items-center justify-between gap-3">
@@ -174,7 +174,7 @@ export function NotificationsPanel({
                 </p>
               </div>
             ) : (
-              <ul className="space-y-2">
+              <ul className="space-y-2.5">
                 {pageItems.map((item) => {
                   const isOverdue = item.type === 'task_overdue';
                   const isDueSoon = item.type === 'task_due_soon';
@@ -183,14 +183,14 @@ export function NotificationsPanel({
                     <button
                       type="button"
                       className={cn(
-                        'group w-full rounded-xl border px-3 py-3 text-left transition-all hover:-translate-y-0.5 hover:shadow-sm',
+                        'group w-full rounded-2xl border px-3.5 py-3.5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_8px_24px_-18px_hsl(var(--foreground)/0.45)]',
                         item.read
-                          ? 'border-border/70 bg-background/80 hover:bg-muted/50'
+                          ? 'border-border/60 bg-background/70 hover:bg-muted/50'
                           : isOverdue
                           ? 'border-red-300/60 bg-red-50/60 shadow-sm hover:bg-red-50 dark:border-red-900/60 dark:bg-red-950/20 dark:hover:bg-red-950/30'
                           : isDueSoon
                           ? 'border-amber-300/60 bg-amber-50/60 shadow-sm hover:bg-amber-50 dark:border-amber-900/60 dark:bg-amber-950/20 dark:hover:bg-amber-950/30'
-                          : 'border-primary/30 bg-primary/[0.06] shadow-sm hover:bg-primary/[0.10]',
+                          : 'border-primary/25 bg-primary/[0.07] shadow-sm hover:bg-primary/[0.11]',
                       )}
                       onClick={() => {
                         if (!item.read) onMarkRead(item.id);
@@ -200,14 +200,14 @@ export function NotificationsPanel({
                       <div className="flex items-start gap-3">
                         <div
                           className={cn(
-                            'mt-0.5 flex h-7 w-7 items-center justify-center rounded-full flex-shrink-0',
+                            'mt-0.5 flex h-8 w-8 items-center justify-center rounded-xl flex-shrink-0',
                             item.read
                               ? 'bg-muted text-muted-foreground'
                               : isOverdue
                               ? 'bg-red-100 text-red-600 ring-1 ring-red-200 dark:bg-red-950/50 dark:text-red-300 dark:ring-red-900/70'
                               : isDueSoon
                               ? 'bg-amber-100 text-amber-600 ring-1 ring-amber-200 dark:bg-amber-950/50 dark:text-amber-300 dark:ring-amber-900/70'
-                              : 'bg-primary/15 text-primary ring-1 ring-primary/20',
+                              : 'bg-primary/12 text-primary ring-1 ring-primary/20',
                           )}
                         >
                           {item.read ? (
@@ -217,7 +217,7 @@ export function NotificationsPanel({
                           ) : isDueSoon ? (
                             <Clock className="h-4 w-4" />
                           ) : (
-                            <Bell className="h-4 w-4" />
+                            <BellRing className="h-4 w-4" />
                           )}
                         </div>
                         <div className="min-w-0 flex-1">

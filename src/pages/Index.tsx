@@ -40,7 +40,7 @@ const Index = () => {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [memberOptions, setMemberOptions] = useState<{ id: string; label: string }[]>([]);
   const [teamMembers, setTeamMembers] = useState<
-    Array<{ id: string; label: string; role: 'admin' | 'manager' | 'team_lead' | 'employee' | 'guest' }>
+    Array<{ id: string; label: string; role: 'super_admin' | 'admin' | 'manager' | 'team_lead' | 'employee' | 'guest' }>
   >([]);
   const [notificationUnreadCount, setNotificationUnreadCount] = useState(0);
   const [rolesByWorkspaceId, setRolesByWorkspaceId] = useState<Record<string, AppRole>>({});
@@ -113,7 +113,7 @@ const Index = () => {
     // click handler can short-circuit with a friendly message.
     const isAccessLocked = (l: (typeof lists)[number], wsRole: AppRole): boolean => {
       if (!l.is_restricted) return false;
-      if (wsRole === 'admin') return false;
+      if (wsRole === 'admin' || wsRole === 'super_admin') return false;
       if (myUserId && l.created_by === myUserId) return false;
       const allowed = Array.isArray(l.allowed_user_ids) ? l.allowed_user_ids : [];
       return !(myUserId && allowed.includes(myUserId));
@@ -122,7 +122,7 @@ const Index = () => {
     // Used to gate the "Edit access" button in the sidebar so non-eligible
     // users don't see a control that would just return 403 anyway.
     const canEditAccess = (l: (typeof lists)[number], wsRole: AppRole): boolean => {
-      if (wsRole === 'admin') return true;
+      if (wsRole === 'admin' || wsRole === 'super_admin') return true;
       return Boolean(myUserId && l.created_by === myUserId);
     };
     // Fallback to createdAt so legacy rows (position === 0 / undefined) still
@@ -134,7 +134,7 @@ const Index = () => {
     };
     return workspaces.map((ws) => {
       const wsRole = rolesByWorkspaceId[ws.id] ?? 'employee';
-      const isAdmin = wsRole === 'admin';
+      const isAdmin = wsRole === 'admin' || wsRole === 'super_admin';
       const wsSpaces = spaces.filter((s) => s.workspace_id === ws.id);
       const master = wsSpaces.find((s) => s.is_master_team_space);
       if (master) {
@@ -282,15 +282,15 @@ const Index = () => {
     return out;
   }, []);
 
-  const canManageWorkspace = activeRole === 'admin';
-  const canInviteMembers = activeRole === 'admin';
-  const canCreateSpaces = activeRole === 'admin';
+  const canManageWorkspace = activeRole === 'admin' || activeRole === 'super_admin';
+  const canInviteMembers = activeRole === 'admin' || activeRole === 'super_admin';
+  const canCreateSpaces = activeRole === 'admin' || activeRole === 'super_admin';
   /** Kanban column (group) add/edit/rename/delete — admin only. */
-  const canManageStructure = activeRole === 'admin';
+  const canManageStructure = activeRole === 'admin' || activeRole === 'super_admin';
   /** Folder/list create & delete — admin / manager / team lead. */
   const canManageLists =
-    activeRole === 'admin' || activeRole === 'manager' || activeRole === 'team_lead';
-  const canDeleteSpaces = activeRole === 'admin';
+    activeRole === 'admin' || activeRole === 'super_admin' || activeRole === 'manager' || activeRole === 'team_lead';
+  const canDeleteSpaces = activeRole === 'admin' || activeRole === 'super_admin';
   const canCreateTasks = activeRole !== 'guest';
   const userDisplayLabel = user?.displayName?.trim() || user?.email || 'User';
   // Lookup table shared with dialogs/panels that need to show user display names
@@ -852,7 +852,7 @@ const Index = () => {
 
   const inviteMember = async (
     email: string,
-    role: 'employee' | 'team_lead' | 'manager' | 'admin',
+    role: 'employee' | 'team_lead' | 'manager',
     department: string
   ) => {
     if (!activeWorkspaceId) return;
@@ -867,7 +867,23 @@ const Index = () => {
     await bootstrapWorkspace();
   };
 
-  const updateMemberRole = async (memberId: string, role: 'employee' | 'team_lead' | 'manager' | 'admin') => {
+  const createPrivilegedMember = async (payload: {
+    email: string;
+    password: string;
+    displayName?: string;
+    role: 'admin' | 'super_admin';
+  }) => {
+    if (!activeWorkspaceId) return;
+    if (!canManageWorkspace) {
+      window.alert('Only admin can create privileged users.');
+      return;
+    }
+    await api.app.createPrivilegedMember(activeWorkspaceId, payload);
+    await bootstrapWorkspace();
+    window.alert(`${payload.role === 'super_admin' ? 'Super admin' : 'Admin'} account created successfully.`);
+  };
+
+  const updateMemberRole = async (memberId: string, role: 'employee' | 'team_lead' | 'manager' | 'admin' | 'super_admin') => {
     if (!activeWorkspaceId) return;
     if (!canManageWorkspace) {
       window.alert('Only admin can change roles.');
@@ -1388,6 +1404,12 @@ const Index = () => {
         onInvite={(email, role, department) =>
           inviteMember(email, role, department).catch((error) => console.error('Failed to invite member', error))
         }
+        onCreatePrivilegedMember={(payload) =>
+          createPrivilegedMember(payload).catch((error) => {
+            console.error('Failed to create privileged member', error);
+            window.alert((error as Error)?.message || 'Failed to create privileged account.');
+          })
+        }
         canManageWorkspace={canManageWorkspace}
         canInviteMembers={canInviteMembers}
         canCreateSpaces={canCreateSpaces}
@@ -1403,7 +1425,7 @@ const Index = () => {
         onExportReport={(workspaceId) => setExportReportWorkspaceId(workspaceId)}
         canExportReport={(workspaceId) => {
           const r = rolesByWorkspaceId[workspaceId] ?? 'employee';
-          return r === 'admin' || r === 'manager' || r === 'team_lead';
+          return r === 'super_admin' || r === 'admin' || r === 'manager' || r === 'team_lead';
         }}
       />
       <ReminderDetailDialog
@@ -1432,9 +1454,9 @@ const Index = () => {
         spaceNameById={spaceNameByIdExport}
         listNameById={listNameByIdExport}
         fetchTasksForListIds={fetchTasksForExportLists}
-        viewerIsAdmin={exportRole === 'admin'}
+        viewerIsAdmin={exportRole === 'admin' || exportRole === 'super_admin'}
         scopeAllLabel={
-          exportRole === 'admin'
+          exportRole === 'admin' || exportRole === 'super_admin'
             ? 'All departments (Team Space)'
             : 'All my department team spaces'
         }
@@ -1465,7 +1487,7 @@ const Index = () => {
             />
           </div>
           <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-background px-2 py-1 shadow-sm">
-            {activeRole === 'admin' && activeWorkspaceId && (
+            {(activeRole === 'admin' || activeRole === 'super_admin') && activeWorkspaceId && (
               <button
                 type="button"
                 onClick={() => setOverdueSettingsOpen(true)}

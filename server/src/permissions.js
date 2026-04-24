@@ -17,22 +17,22 @@ export async function getRole(workspaceId, userId) {
 
 export function canManageWorkspace(role) {
   const resolved = normalizeRole(role);
-  return resolved === 'admin';
+  return resolved === 'admin' || resolved === 'super_admin';
 }
 
 export function canInviteMembers(role) {
   const resolved = normalizeRole(role);
-  return resolved === 'admin';
+  return resolved === 'admin' || resolved === 'super_admin';
 }
 
 export function canManageStructure(role) {
   const resolved = normalizeRole(role);
-  return resolved === 'admin';
+  return resolved === 'admin' || resolved === 'super_admin';
 }
 
 export function canCreateSpace(role) {
   const resolved = normalizeRole(role);
-  return resolved === 'admin';
+  return resolved === 'admin' || resolved === 'super_admin';
 }
 
 export function canCreateList(role) {
@@ -42,7 +42,7 @@ export function canCreateList(role) {
 
 export function canDeleteSpace(role) {
   const resolved = normalizeRole(role);
-  return resolved === 'admin';
+  return resolved === 'admin' || resolved === 'super_admin';
 }
 
 export function canDeleteList(role) {
@@ -64,7 +64,7 @@ export function canViewWorkspaceByDepartment(userDepartment, workspaceDepartment
   const resolved = normalizeRole(role);
   if (!resolved || resolved === 'guest') return false;
   if (!workspaceDepartment) return true;
-  if (resolved === 'admin') return true;
+  if (resolved === 'admin' || resolved === 'super_admin') return true;
   const userNorm = String(userDepartment || '')
     .toLowerCase()
     .replace(/\s+/g, '')

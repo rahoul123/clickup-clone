@@ -245,7 +245,7 @@ function canAccessSpaceByDepartment({
   spaceName,
   isDepartmentMain = false,
 }) {
-  if (role === 'admin') return true;
+  if (isAdminRole(role)) return true;
 
   const userNorm = normalizeDepartment(userDepartment);
   if (!userNorm) return false;
@@ -317,9 +317,15 @@ function canAccessRestrictedList(list, userId, role) {
 
 function normalizeRoleForRestriction(role) {
   if (!role) return null;
+  if (role === 'super_admin') return 'admin';
   if (role === 'owner') return 'admin';
   if (role === 'member') return 'employee';
   return role;
+}
+
+function isAdminRole(role) {
+  const normalized = normalizeRoleForRestriction(role);
+  return normalized === 'admin';
 }
 
 /**
@@ -965,7 +971,7 @@ export function buildRoutes({ realtime } = {}) {
 
     // Team Members page (role/department governance) — respects dept scoping.
     const teamMembersVisibleUsers = users.filter((u) => {
-      if (role === 'admin') return true;
+      if (isAdminRole(role)) return true;
       const memberRole = roleByUserId[u._id] ?? 'employee';
       if (role === 'manager') {
         if (!isSameDepartment(u.department, req.currentUser?.department)) return u._id === userId;
@@ -1103,7 +1109,7 @@ export function buildRoutes({ realtime } = {}) {
     const rawTasks = await hydrateTasksForListIds(listIds);
     const requestedWorkspaceId = String(req.query?.workspaceId || '').trim();
 
-    const roleRank = { guest: 0, employee: 1, team_lead: 2, manager: 3, admin: 4 };
+    const roleRank = { guest: 0, employee: 1, team_lead: 2, manager: 3, admin: 4, super_admin: 5 };
     let viewerRole = null;
     if (requestedWorkspaceId && visibleWorkspaces.some((w) => w._id === requestedWorkspaceId)) {
       viewerRole = await getRole(requestedWorkspaceId, userId);
@@ -1172,7 +1178,7 @@ export function buildRoutes({ realtime } = {}) {
         if (status === 'complete') monthlyMap[m].completed += 1;
         if (monthlyMap[m][status] !== undefined) monthlyMap[m][status] += 1;
 
-        if (viewerRole === 'admin') {
+        if (isAdminRole(viewerRole)) {
           const ctx = listContextById[task.list_id];
           const spaceKey = ctx?.space_id ? `${ctx.workspace_id}:${ctx.space_id}` : 'unknown:unknown';
           if (!spaceMonthlyMap[spaceKey]) {
@@ -1252,7 +1258,7 @@ export function buildRoutes({ realtime } = {}) {
 
     const totalTasks = scopedTasks.length;
     const completionRate = totalTasks ? Math.round((completed / totalTasks) * 100) : 0;
-    const scope = viewerRole === 'admin' ? 'organization' : viewerRole === 'employee' ? 'self' : 'team';
+    const scope = isAdminRole(viewerRole) ? 'organization' : viewerRole === 'employee' ? 'self' : 'team';
 
     res.json({
       scope,
@@ -1270,7 +1276,7 @@ export function buildRoutes({ realtime } = {}) {
       priorityBreakdown,
       currentUserPerformance,
       teamPerformance,
-      spaceMonthly: viewerRole === 'admin' ? Object.values(spaceMonthlyMap) : [],
+      spaceMonthly: isAdminRole(viewerRole) ? Object.values(spaceMonthlyMap) : [],
     });
   });
 
@@ -1409,7 +1415,7 @@ export function buildRoutes({ realtime } = {}) {
     if (!canCreateList(role)) return res.status(403).json({ message: 'Only admin/manager/team lead can create folders/lists' });
 
     // Non-admins can only create lists inside their OWN department's spaces.
-    if (role !== 'admin') {
+    if (!isAdminRole(role)) {
       const currentUser = await User.findById(req.session.userId).lean();
       const workspace = await Workspace.findById(space.workspaceId).lean();
       const userNorm = normalizeDepartment(currentUser?.department ?? null);
@@ -1807,12 +1813,12 @@ export function buildRoutes({ realtime } = {}) {
     if (!canDeleteList(role)) return res.status(403).json({ message: 'Only admin/manager/team lead can delete lists' });
 
     // Shared cross-team list is admin-only infrastructure.
-    if (list.isSharedMainList && role !== 'admin') {
+    if (list.isSharedMainList && !isAdminRole(role)) {
       return res.status(403).json({ message: 'Only admin can delete the shared cross-team list.' });
     }
 
     // Non-admins can only delete lists inside their OWN department.
-    if (role !== 'admin') {
+    if (!isAdminRole(role)) {
       const currentUser = await User.findById(req.session.userId).lean();
       const workspace = await Workspace.findById(space.workspaceId).lean();
       const userNorm = normalizeDepartment(currentUser?.department ?? null);
@@ -1974,7 +1980,7 @@ export function buildRoutes({ realtime } = {}) {
     if (!space) return res.status(404).json({ message: 'Space not found' });
 
     const role = await getRole(space.workspaceId, req.session.userId);
-    const isAdmin = role === 'admin';
+    const isAdmin = isAdminRole(role);
     const isCreator = list.createdBy === req.session.userId;
     if (!isAdmin && !isCreator && !canDeleteList(role)) {
       return res.status(403).json({ message: 'Not allowed to archive this list.' });
@@ -1999,7 +2005,7 @@ export function buildRoutes({ realtime } = {}) {
     if (!space) return res.status(404).json({ message: 'Space not found' });
 
     const role = await getRole(space.workspaceId, req.session.userId);
-    const isAdmin = role === 'admin';
+    const isAdmin = isAdminRole(role);
     const isCreator = list.createdBy === req.session.userId;
     if (!isAdmin && !isCreator && !canDeleteList(role)) {
       return res.status(403).json({ message: 'Not allowed to restore this list.' });
@@ -2064,7 +2070,7 @@ export function buildRoutes({ realtime } = {}) {
   router.post('/workspaces/:workspaceId/invite', requireAuth, async (req, res) => {
     const { workspaceId } = req.params;
     const { email, role, department } = req.body ?? {};
-    const targetRole = ['employee', 'team_lead', 'manager', 'admin'].includes(role) ? role : 'employee';
+    const targetRole = ['employee', 'team_lead', 'manager'].includes(role) ? role : 'employee';
     const normalizedEmail = String(email || '').toLowerCase().trim();
     if (!normalizedEmail) return res.status(400).json({ message: 'Valid email required' });
     const currentRole = await getRole(workspaceId, req.session.userId);
@@ -2111,7 +2117,7 @@ export function buildRoutes({ realtime } = {}) {
           : 'Invite saved. SMTP not configured or email failed; role will still apply on signup.',
       });
     }
-    if (targetRole !== 'admin') {
+    if (targetRole !== 'admin' && targetRole !== 'super_admin') {
       if (user.department && user.department !== inviteDepartment) {
         return res.status(403).json({ message: `User department mismatch. Expected ${inviteDepartment}.` });
       }
@@ -2152,6 +2158,51 @@ export function buildRoutes({ realtime } = {}) {
         ? 'Invite email sent successfully.'
         : 'Invite applied for existing user, but email delivery failed.',
     });
+  });
+
+  router.post('/workspaces/:workspaceId/members/create-privileged', requireAuth, async (req, res) => {
+    const { workspaceId } = req.params;
+    const { email, password, displayName, role } = req.body ?? {};
+    const targetRole = role === 'super_admin' ? 'super_admin' : role === 'admin' ? 'admin' : null;
+    if (!targetRole) return res.status(400).json({ message: 'Role must be admin or super_admin' });
+
+    const normalizedEmail = String(email || '').toLowerCase().trim();
+    const safePassword = String(password || '');
+    if (!normalizedEmail) return res.status(400).json({ message: 'Valid email required' });
+    if (safePassword.length < 8) return res.status(400).json({ message: 'Password must be at least 8 characters' });
+
+    const currentRole = await getRole(workspaceId, req.session.userId);
+    if (!canManageWorkspace(currentRole)) {
+      return res.status(403).json({ message: 'Only admin can create privileged users' });
+    }
+
+    const workspace = await Workspace.findById(workspaceId).lean();
+    if (!workspace) return res.status(404).json({ message: 'Workspace not found' });
+
+    const exists = await User.findOne({ email: normalizedEmail }).lean();
+    if (exists) return res.status(409).json({ message: 'Email already in use' });
+
+    const user = await registerUser({
+      email: normalizedEmail,
+      password: safePassword,
+      displayName: String(displayName || '').trim() || undefined,
+    });
+
+    await User.updateOne({ _id: user._id }, { $set: { department: null } });
+
+    await WorkspaceMember.updateOne(
+      { workspaceId, userId: user._id },
+      { $set: { invitedBy: req.session.userId } },
+      { upsert: true }
+    );
+    await UserRole.updateOne(
+      { workspaceId, userId: user._id },
+      { $set: { role: targetRole } },
+      { upsert: true }
+    );
+
+    const created = await User.findById(user._id).lean();
+    return res.json({ ok: true, user: toSafeUser(created), role: targetRole });
   });
 
   /**
@@ -2327,7 +2378,7 @@ export function buildRoutes({ realtime } = {}) {
   router.patch('/workspaces/:workspaceId/members/:memberId/role', requireAuth, async (req, res) => {
     const { workspaceId, memberId } = req.params;
     const { role } = req.body ?? {};
-    const nextRole = ['employee', 'team_lead', 'manager', 'admin'].includes(role) ? role : null;
+    const nextRole = ['employee', 'team_lead', 'manager', 'admin', 'super_admin'].includes(role) ? role : null;
     if (!nextRole) return res.status(400).json({ message: 'Invalid role' });
 
     const currentRole = await getRole(workspaceId, req.session.userId);
@@ -2335,6 +2386,15 @@ export function buildRoutes({ realtime } = {}) {
 
     const memberExists = await WorkspaceMember.findOne({ workspaceId, userId: memberId }).lean();
     if (!memberExists) return res.status(404).json({ message: 'Member not found in workspace' });
+
+    const targetCurrentRole = await getRole(workspaceId, memberId);
+    if (normalizeRoleForRestriction(targetCurrentRole) === 'admin' && targetCurrentRole === 'super_admin') {
+      return res.status(403).json({ message: 'Super admin role is locked and cannot be changed.' });
+    }
+
+    if (req.session.userId === memberId && currentRole === 'super_admin' && nextRole !== 'super_admin') {
+      return res.status(403).json({ message: 'Super admin cannot downgrade their own role.' });
+    }
 
     if (nextRole === 'team_lead') {
       const targetUser = await User.findById(memberId).lean();
@@ -3232,7 +3292,7 @@ export function buildRoutes({ realtime } = {}) {
     if (!space) return false;
     const role = await getRole(space.workspaceId, userId);
     if (!role) return false;
-    if (role === 'admin') return true;
+    if (isAdminRole(role)) return true;
     const workspace = await Workspace.findById(space.workspaceId).lean();
     const user = await User.findById(userId).lean();
     const isMain = await isDepartmentMainSpace(space);
@@ -3392,7 +3452,7 @@ export function buildRoutes({ realtime } = {}) {
 
     const role = await getRole(space.workspaceId, req.session.userId);
     const isOwner = message.userId === req.session.userId;
-    const isAdmin = role === 'admin';
+    const isAdmin = isAdminRole(role);
     if (!isOwner && !isAdmin) {
       return res.status(403).json({ message: 'Only the author or an admin can delete this message' });
     }

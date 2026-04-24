@@ -58,7 +58,7 @@ const userRoleSchema = new Schema(
     userId: { type: String, required: true, index: true },
     role: {
       type: String,
-      enum: ['admin', 'manager', 'team_lead', 'employee', 'guest', 'owner', 'member'],
+      enum: ['super_admin', 'admin', 'manager', 'team_lead', 'employee', 'guest', 'owner', 'member'],
       default: 'employee',
     },
   },

@@ -201,7 +201,13 @@ interface AppSidebarProps {
     payload: { name?: string; color?: string | null; icon?: string | null }
   ) => Promise<void> | void;
   onDeleteList: (listId: string, listName: string) => Promise<void> | void;
-  onInvite: (email: string, role: 'employee' | 'team_lead' | 'manager' | 'admin', department: string) => Promise<void> | void;
+  onInvite: (email: string, role: 'employee' | 'team_lead' | 'manager', department: string) => Promise<void> | void;
+  onCreatePrivilegedMember?: (payload: {
+    email: string;
+    password: string;
+    displayName?: string;
+    role: 'admin' | 'super_admin';
+  }) => Promise<void> | void;
   canManageWorkspace: boolean;
   canInviteMembers: boolean;
   canCreateSpaces: boolean;
@@ -245,6 +251,7 @@ export function AppSidebar({
   onUpdateSpaceDetails,
   onDeleteList,
   onInvite,
+  onCreatePrivilegedMember,
   memberOptions = [],
   currentUserId = null,
   canManageWorkspace,
@@ -271,8 +278,13 @@ export function AppSidebar({
   const [expandedItems, setExpandedItems] = useState<Set<string>>(() => new Set(allSpaceIds));
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole] = useState<'employee' | 'team_lead' | 'manager' | 'admin'>('employee');
+  const [inviteRole, setInviteRole] = useState<'employee' | 'team_lead' | 'manager'>('employee');
   const [inviteDepartment, setInviteDepartment] = useState('');
+  const [showCreatePrivilegedModal, setShowCreatePrivilegedModal] = useState(false);
+  const [createPrivilegedName, setCreatePrivilegedName] = useState('');
+  const [createPrivilegedEmail, setCreatePrivilegedEmail] = useState('');
+  const [createPrivilegedPassword, setCreatePrivilegedPassword] = useState('');
+  const [createPrivilegedRole, setCreatePrivilegedRole] = useState<'admin' | 'super_admin'>('admin');
 
   const [promptState, setPromptState] = useState<{
     title: string;
@@ -1098,6 +1110,20 @@ export function AppSidebar({
           >
             <Users className="w-3 h-3" /> Invite
           </button>
+          <button
+            disabled={!canManageWorkspace || !onCreatePrivilegedMember}
+            onClick={() => {
+              if (!canManageWorkspace || !onCreatePrivilegedMember) return;
+              setCreatePrivilegedName('');
+              setCreatePrivilegedEmail('');
+              setCreatePrivilegedPassword('');
+              setCreatePrivilegedRole('admin');
+              setShowCreatePrivilegedModal(true);
+            }}
+            className="flex flex-1 items-center justify-center gap-1 rounded-md border border-sidebar-border bg-sidebar-accent/40 px-2 py-1 text-[11px] text-sidebar-foreground transition-colors hover:bg-sidebar-accent disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Users className="w-3 h-3" /> Create Admin
+          </button>
         </div>
       </div>
 
@@ -1271,7 +1297,7 @@ export function AppSidebar({
               <label className="text-xs text-muted-foreground">Role</label>
               <select
                 value={inviteRole}
-                onChange={(e) => setInviteRole(e.target.value as 'employee' | 'team_lead' | 'manager' | 'admin')}
+                onChange={(e) => setInviteRole(e.target.value as 'employee' | 'team_lead' | 'manager')}
                 className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
               >
                 {/* `employee` is the backend role key; UI copy is "Team Member"
@@ -1279,7 +1305,6 @@ export function AppSidebar({
                 <option value="employee">Team Member</option>
                 <option value="team_lead">Team Lead</option>
                 <option value="manager">Manager</option>
-                <option value="admin">Admin</option>
               </select>
             </div>
           </div>
@@ -1299,6 +1324,82 @@ export function AppSidebar({
               className="h-9 px-4 rounded-md bg-primary text-primary-foreground text-sm font-medium"
             >
               Send Invite
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    {showCreatePrivilegedModal && (
+      <div className="fixed inset-0 z-[80] bg-black/30 flex items-center justify-center p-4">
+        <div className="w-full max-w-md rounded-xl border border-border bg-background shadow-2xl">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+            <h3 className="text-sm font-semibold">Create Admin / Super Admin</h3>
+            <button type="button" onClick={() => setShowCreatePrivilegedModal(false)} className="text-muted-foreground hover:text-foreground">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="p-4 space-y-3">
+            <div>
+              <label className="text-xs text-muted-foreground">Display name</label>
+              <input
+                value={createPrivilegedName}
+                onChange={(e) => setCreatePrivilegedName(e.target.value)}
+                placeholder="Full name"
+                className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">Email</label>
+              <input
+                value={createPrivilegedEmail}
+                onChange={(e) => setCreatePrivilegedEmail(e.target.value)}
+                placeholder="admin@company.com"
+                className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">Password</label>
+              <input
+                type="password"
+                value={createPrivilegedPassword}
+                onChange={(e) => setCreatePrivilegedPassword(e.target.value)}
+                placeholder="Minimum 8 characters"
+                className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">Role</label>
+              <select
+                value={createPrivilegedRole}
+                onChange={(e) => setCreatePrivilegedRole(e.target.value as 'admin' | 'super_admin')}
+                className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+              >
+                <option value="admin">Admin</option>
+                <option value="super_admin">Super Admin</option>
+              </select>
+            </div>
+          </div>
+          <div className="px-4 py-3 border-t border-border flex justify-end gap-2">
+            <button type="button" onClick={() => setShowCreatePrivilegedModal(false)} className="h-9 px-3 rounded-md border border-input text-sm">
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const email = createPrivilegedEmail.trim();
+                const password = createPrivilegedPassword;
+                if (!onCreatePrivilegedMember || !email || !password) return;
+                onCreatePrivilegedMember({
+                  email,
+                  password,
+                  displayName: createPrivilegedName.trim() || undefined,
+                  role: createPrivilegedRole,
+                });
+                setShowCreatePrivilegedModal(false);
+              }}
+              className="h-9 px-4 rounded-md bg-primary text-primary-foreground text-sm font-medium"
+            >
+              Create Account
             </button>
           </div>
         </div>

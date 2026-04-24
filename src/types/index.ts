@@ -1,6 +1,6 @@
 export type TaskStatus = 'todo' | 'in_progress' | 'hold' | 'revision' | 'complete';
 export type TaskPriority = 'urgent' | 'high' | 'normal' | 'low';
-export type AppRole = 'admin' | 'manager' | 'team_lead' | 'employee' | 'guest';
+export type AppRole = 'super_admin' | 'admin' | 'manager' | 'team_lead' | 'employee' | 'guest';
 
 export interface Workspace {
   id: string;

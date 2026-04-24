@@ -4,13 +4,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 interface TeamMember {
   id: string;
   label: string;
-  role: 'admin' | 'manager' | 'team_lead' | 'employee' | 'guest';
+  role: 'super_admin' | 'admin' | 'manager' | 'team_lead' | 'employee' | 'guest';
 }
 
 interface TeamMembersPageProps {
   members: TeamMember[];
   canManageWorkspace: boolean;
-  onUpdateMemberRole: (memberId: string, role: 'employee' | 'team_lead' | 'manager' | 'admin') => void;
+  onUpdateMemberRole: (memberId: string, role: 'employee' | 'team_lead' | 'manager' | 'admin' | 'super_admin') => void;
 }
 
 export function TeamMembersPage({ members, canManageWorkspace, onUpdateMemberRole }: TeamMembersPageProps) {
@@ -39,14 +39,15 @@ export function TeamMembersPage({ members, canManageWorkspace, onUpdateMemberRol
                     <div className="min-w-0">
                       <p className="truncate text-sm font-medium text-foreground">{member.label}</p>
                     </div>
-                    {canManageWorkspace ? (
+                    {canManageWorkspace && member.role !== 'super_admin' ? (
                       <select
                         value={member.role}
                         onChange={(e) =>
-                          onUpdateMemberRole(member.id, e.target.value as 'employee' | 'team_lead' | 'manager' | 'admin')
+                          onUpdateMemberRole(member.id, e.target.value as 'employee' | 'team_lead' | 'manager' | 'admin' | 'super_admin')
                         }
                         className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground"
                       >
+                        <option value="super_admin">Super Admin</option>
                         {/* `employee` is the backend role key; the UI copy is "Team Member"
                            because "Employee" read oddly to staff ("we're all employees"). */}
                         <option value="employee">Team Member</option>
@@ -56,7 +57,9 @@ export function TeamMembersPage({ members, canManageWorkspace, onUpdateMemberRol
                       </select>
                     ) : (
                       <span className="rounded-full bg-muted px-2 py-0.5 text-xs capitalize text-muted-foreground">
-                        {member.role === 'team_lead'
+                        {member.role === 'super_admin'
+                          ? 'super admin'
+                          : member.role === 'team_lead'
                           ? 'team lead'
                           : member.role === 'employee'
                             ? 'team member'

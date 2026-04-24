@@ -128,10 +128,19 @@ export const api = {
     inviteMember: (
       workspaceId: string,
       email: string,
-      role: 'employee' | 'team_lead' | 'manager' | 'admin',
+      role: 'employee' | 'team_lead' | 'manager',
       department: string
     ) => request(`/workspaces/${workspaceId}/invite`, { method: 'POST', body: JSON.stringify({ email, role, department }) }),
-    updateMemberRole: (workspaceId: string, memberId: string, role: 'employee' | 'team_lead' | 'manager' | 'admin') =>
+    createPrivilegedMember: (
+      workspaceId: string,
+      payload: {
+        email: string;
+        password: string;
+        displayName?: string;
+        role: 'admin' | 'super_admin';
+      }
+    ) => request(`/workspaces/${workspaceId}/members/create-privileged`, { method: 'POST', body: JSON.stringify(payload) }),
+    updateMemberRole: (workspaceId: string, memberId: string, role: 'employee' | 'team_lead' | 'manager' | 'admin' | 'super_admin') =>
       request(`/workspaces/${workspaceId}/members/${memberId}/role`, { method: 'PATCH', body: JSON.stringify({ role }) }),
     getOverdueSettings: (workspaceId: string) =>
       request(`/workspaces/${workspaceId}/settings/overdue`),

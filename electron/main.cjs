@@ -57,16 +57,16 @@ let backendProc = null;
 let mainWindow = null;
 
 /**
- * Absolute paths to the bundled server folder + optional .env, taking into
+ * Absolute paths to the bundled backend folder + optional .env, taking into
  * account electron-builder's extraResources layout.
  *
- * Dev layout:       {repoRoot}/collab-creek/server/...
- * Packaged layout:  {process.resourcesPath}/server/...
+ * Dev layout:       {repoRoot}/collab-creek/backend/...
+ * Packaged layout:  {process.resourcesPath}/backend/...
  */
 function resolveServerPaths() {
   const serverDir = isDev
-    ? path.resolve(__dirname, '..', 'server')
-    : path.join(process.resourcesPath, 'server');
+    ? path.resolve(__dirname, '..', 'backend')
+    : path.join(process.resourcesPath, 'backend');
   const envFile = isDev
     ? path.resolve(__dirname, '..', '.env')
     : path.join(process.resourcesPath, '.env');

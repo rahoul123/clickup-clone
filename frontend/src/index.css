@@ -1,0 +1,242 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 220 20% 15%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 20% 15%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 20% 15%;
+
+    --primary: 262 52% 47%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 220 20% 15%;
+
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 46%;
+
+    --accent: 220 14% 96%;
+    --accent-foreground: 220 20% 15%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 142 71% 45%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+
+    --info: 217 91% 60%;
+    --info-foreground: 0 0% 100%;
+
+    --hold: 0 84% 60%;
+    --hold-foreground: 0 0% 100%;
+
+    --revision: 25 95% 53%;
+    --revision-foreground: 0 0% 100%;
+
+    --complete: 142 71% 45%;
+    --complete-foreground: 0 0% 100%;
+
+    --in-progress: 217 91% 60%;
+    --in-progress-foreground: 0 0% 100%;
+
+    --todo: 220 9% 46%;
+    --todo-foreground: 0 0% 100%;
+
+    --urgent: 0 84% 60%;
+    --high: 25 95% 53%;
+    --normal: 217 91% 60%;
+    --low: 220 9% 46%;
+
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 262 52% 47%;
+
+    --radius: 0.5rem;
+
+    --sidebar-background: 220 20% 15%;
+    --sidebar-foreground: 220 14% 80%;
+    --sidebar-primary: 262 52% 47%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 20% 20%;
+    --sidebar-accent-foreground: 220 14% 90%;
+    --sidebar-border: 220 20% 22%;
+    --sidebar-ring: 262 52% 47%;
+    --sidebar-muted: 220 14% 40%;
+  }
+
+  .dark {
+    --background: 220 20% 10%;
+    --foreground: 220 14% 90%;
+    --card: 220 20% 13%;
+    --card-foreground: 220 14% 90%;
+    --popover: 220 20% 13%;
+    --popover-foreground: 220 14% 90%;
+    --primary: 262 52% 55%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 20% 18%;
+    --secondary-foreground: 220 14% 90%;
+    --muted: 220 20% 18%;
+    --muted-foreground: 220 14% 55%;
+    --accent: 220 20% 18%;
+    --accent-foreground: 220 14% 90%;
+    --destructive: 0 62% 30%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 20% 22%;
+    --input: 220 20% 22%;
+    --ring: 262 52% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+  }
+
+  #root {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--muted-foreground) / 0.3);
+    border-radius: 3px;
+  }
+
+  @keyframes bell-ring {
+    0% { transform: rotate(0deg); }
+    15% { transform: rotate(15deg); }
+    30% { transform: rotate(-12deg); }
+    45% { transform: rotate(9deg); }
+    60% { transform: rotate(-6deg); }
+    75% { transform: rotate(3deg); }
+    100% { transform: rotate(0deg); }
+  }
+
+  .bell-ring-once {
+    transform-origin: top center;
+    animation: bell-ring 700ms ease-in-out 1;
+  }
+}
+
+/* ---------- Dark-mode theming for native form controls ---------- */
+@layer base {
+  .dark select option,
+  .dark select optgroup {
+    background-color: rgb(30 41 59); /* slate-800 */
+    color: rgb(226 232 240);          /* slate-200 */
+  }
+
+  /* Native date/time inputs: force dark color-scheme so the browser picks
+     the light variant of its internal icons + placeholder text. */
+  .dark input[type="date"],
+  .dark input[type="datetime-local"],
+  .dark input[type="time"],
+  .dark input[type="month"],
+  .dark input[type="week"] {
+    color-scheme: dark;
+  }
+
+  /* Make the native calendar picker indicator clearly visible in dark mode.
+     Chromium renders it as a dark glyph by default which disappears on
+     near-black backgrounds — replace it entirely with a crisp white SVG
+     so it's unambiguously readable regardless of browser/theme quirks. */
+  .dark input[type="date"]::-webkit-calendar-picker-indicator,
+  .dark input[type="datetime-local"]::-webkit-calendar-picker-indicator,
+  .dark input[type="time"]::-webkit-calendar-picker-indicator,
+  .dark input[type="month"]::-webkit-calendar-picker-indicator,
+  .dark input[type="week"]::-webkit-calendar-picker-indicator {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4' width='18' height='18' rx='2' ry='2'/><line x1='16' y1='2' x2='16' y2='6'/><line x1='8' y1='2' x2='8' y2='6'/><line x1='3' y1='10' x2='21' y2='10'/></svg>");
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: 16px 16px;
+    width: 22px;
+    height: 22px;
+    filter: none;
+    opacity: 0.95;
+    cursor: pointer;
+    padding: 2px;
+    border-radius: 4px;
+    transition: background-color 120ms ease, opacity 120ms ease;
+  }
+
+  .dark input[type="date"]::-webkit-calendar-picker-indicator:hover,
+  .dark input[type="datetime-local"]::-webkit-calendar-picker-indicator:hover,
+  .dark input[type="time"]::-webkit-calendar-picker-indicator:hover,
+  .dark input[type="month"]::-webkit-calendar-picker-indicator:hover,
+  .dark input[type="week"]::-webkit-calendar-picker-indicator:hover {
+    background-color: hsl(var(--muted) / 0.6);
+    opacity: 1;
+  }
+
+  /* Spinner chrome on number inputs + inner date parts in dark mode */
+  .dark input[type="date"]::-webkit-datetime-edit-text,
+  .dark input[type="date"]::-webkit-datetime-edit-month-field,
+  .dark input[type="date"]::-webkit-datetime-edit-day-field,
+  .dark input[type="date"]::-webkit-datetime-edit-year-field,
+  .dark input[type="datetime-local"]::-webkit-datetime-edit-text,
+  .dark input[type="datetime-local"]::-webkit-datetime-edit-month-field,
+  .dark input[type="datetime-local"]::-webkit-datetime-edit-day-field,
+  .dark input[type="datetime-local"]::-webkit-datetime-edit-year-field,
+  .dark input[type="time"]::-webkit-datetime-edit-hour-field,
+  .dark input[type="time"]::-webkit-datetime-edit-minute-field,
+  .dark input[type="time"]::-webkit-datetime-edit-ampm-field {
+    color: hsl(var(--foreground));
+  }
+
+  /* Placeholder (like "mm/dd/yyyy") inside empty date fields */
+  .dark input[type="date"]::-webkit-datetime-edit,
+  .dark input[type="datetime-local"]::-webkit-datetime-edit,
+  .dark input[type="time"]::-webkit-datetime-edit {
+    color: hsl(var(--foreground));
+  }
+
+  /* Remove white Chrome autofill in dark mode */
+  .dark input:-webkit-autofill,
+  .dark input:-webkit-autofill:hover,
+  .dark input:-webkit-autofill:focus,
+  .dark textarea:-webkit-autofill,
+  .dark select:-webkit-autofill {
+    -webkit-text-fill-color: rgb(226 232 240) !important;
+    -webkit-box-shadow: 0 0 0px 1000px rgb(15 23 42) inset !important;
+    caret-color: rgb(226 232 240);
+    transition: background-color 9999s ease-in-out 0s;
+  }
+}

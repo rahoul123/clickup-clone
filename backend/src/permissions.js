@@ -11,7 +11,7 @@ function normalizeRole(role) {
 }
 
 export async function getRole(workspaceId, userId) {
-  const role = await UserRole.findOne({ workspaceId, userId }).lean();
+  const role = await UserRole.findOne({ workspaceId, userId, isDeleted: { $ne: true } }).lean();
   return normalizeRole(role?.role ?? null);
 }
 
@@ -37,7 +37,7 @@ export function canCreateSpace(role) {
 
 export function canCreateList(role) {
   const resolved = normalizeRole(role);
-  return resolved === 'admin' || resolved === 'manager' || resolved === 'team_lead';
+  return resolved === 'admin' || resolved === 'super_admin' || resolved === 'manager' || resolved === 'team_lead';
 }
 
 export function canDeleteSpace(role) {
@@ -47,7 +47,7 @@ export function canDeleteSpace(role) {
 
 export function canDeleteList(role) {
   const resolved = normalizeRole(role);
-  return resolved === 'admin' || resolved === 'manager' || resolved === 'team_lead';
+  return resolved === 'admin' || resolved === 'super_admin';
 }
 
 export function canCreateTasks(role) {

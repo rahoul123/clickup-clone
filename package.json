@@ -2,7 +2,7 @@
   "name": "digitechio-desktop",
   "productName": "DigitechIO",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.0.0",
   "description": "DigitechIO collaboration workspace desktop app",
   "author": {
     "name": "DigitechIO"

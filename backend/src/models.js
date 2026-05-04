@@ -10,6 +10,9 @@ const userSchema = new Schema(
     passwordHash: { type: String, required: true },
     avatarUrl: { type: String, default: null },
     department: { type: String, default: null, index: true },
+    /** SHA-256 hex of one-time reset token while a reset is pending */
+    passwordResetTokenHash: { type: String, default: null },
+    passwordResetExpiresAt: { type: Date, default: null },
   },
   { timestamps: true }
 );
@@ -61,6 +64,10 @@ const userRoleSchema = new Schema(
       enum: ['super_admin', 'admin', 'manager', 'team_lead', 'employee', 'guest', 'owner', 'member'],
       default: 'employee',
     },
+    /** Soft-delete flag used for temporarily disabling a workspace role. */
+    isDeleted: { type: Boolean, default: false, index: true },
+    deletedAt: { type: Date, default: null },
+    deletedBy: { type: String, default: null },
   },
   { timestamps: true }
 );

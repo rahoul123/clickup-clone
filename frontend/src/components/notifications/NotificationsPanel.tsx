@@ -89,13 +89,13 @@ export function NotificationsPanel({
             <div className="flex items-center justify-between gap-3">
               <div>
                 <CardTitle className="text-2xl tracking-tight">Activity Center</CardTitle>
-                <CardDescription className="mt-1">
+                <CardDescription className="mt-1 text-gray-600 dark:text-slate-400">
                   Task create / update alerts from your team spaces.
                 </CardDescription>
               </div>
               <div className="rounded-xl border border-border/70 bg-background px-3 py-2 text-right shadow-sm">
-                <p className="text-[11px] text-muted-foreground">Unread</p>
-                <p className="text-lg font-semibold text-foreground">{unreadCount}</p>
+                <p className="text-[11px] text-gray-600 dark:text-slate-400">Unread</p>
+                <p className="text-lg font-semibold text-gray-900 dark:text-slate-100">{unreadCount}</p>
               </div>
             </div>
 
@@ -115,7 +115,7 @@ export function NotificationsPanel({
                       'px-3 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-1.5',
                       filter === tab.id
                         ? 'bg-primary text-primary-foreground shadow-sm'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-muted',
+                        : 'text-gray-600 dark:text-slate-400 hover:text-gray-900 dark:hover:text-slate-100 hover:bg-muted',
                     )}
                   >
                     {tab.label}
@@ -124,7 +124,7 @@ export function NotificationsPanel({
                         'inline-flex items-center justify-center min-w-[20px] h-4 rounded-full px-1.5 text-[10px] font-semibold',
                         filter === tab.id
                           ? 'bg-primary-foreground/20 text-primary-foreground'
-                          : 'bg-muted text-muted-foreground',
+                          : 'bg-muted text-gray-600 dark:text-slate-400',
                       )}
                     >
                       {tab.count}
@@ -137,7 +137,7 @@ export function NotificationsPanel({
                 type="button"
                 onClick={handleMarkAllRead}
                 disabled={unreadCount === 0 || markingAll}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-border/70 bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border/70 bg-background px-3 py-1.5 text-xs font-medium text-gray-800 dark:text-slate-200 hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 {markingAll ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -152,7 +152,7 @@ export function NotificationsPanel({
           {/* List — scrollable inner area */}
           <CardContent className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
             {loading ? (
-              <div className="flex items-center justify-center py-16 text-sm text-muted-foreground">
+                <div className="flex items-center justify-center py-16 text-sm text-gray-600 dark:text-slate-400">
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading notifications…
               </div>
             ) : filtered.length === 0 ? (
@@ -229,7 +229,7 @@ export function NotificationsPanel({
                           >
                             {item.message}
                           </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
+                          <p className="mt-1 text-xs text-gray-600 dark:text-slate-400">
                             {formatDistanceToNow(parseISO(item.createdAt), { addSuffix: true })}
                           </p>
                         </div>

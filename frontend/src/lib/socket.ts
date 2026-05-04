@@ -11,14 +11,17 @@ import { io, type Socket } from 'socket.io-client';
  */
 let socketInstance: Socket | null = null;
 
-function resolveEndpoint(): string | undefined {
-  const base = import.meta.env.VITE_API_BASE_URL as string | undefined;
-  if (!base) return undefined;
+/** Must match `API_BASE_URL` in `api.ts` so dev hits the API port, not the Vite port. */
+const API_BASE_FOR_SOCKET =
+  (import.meta.env.VITE_API_BASE_URL as string | undefined) ||
+  (import.meta.env.DEV ? 'http://localhost:4000/api' : '/api');
+
+function resolveSocketOrigin(): string {
   // Strip the trailing `/api` so socket.io hits the server root where the
   // websocket endpoint lives (default `/socket.io/`). For relative bases
   // like `/api`, we just return `/` so the client uses same-origin.
-  if (base.startsWith('http')) {
-    return base.replace(/\/api\/?$/, '');
+  if (API_BASE_FOR_SOCKET.startsWith('http')) {
+    return API_BASE_FOR_SOCKET.replace(/\/api\/?$/, '');
   }
   return '/';
 }
@@ -30,7 +33,7 @@ export function connectSocket(): Socket {
     return socketInstance;
   }
 
-  const endpoint = resolveEndpoint();
+  const endpoint = resolveSocketOrigin();
   socketInstance = io(endpoint, {
     // Cookies carry the express-session id so the server can identify us.
     withCredentials: true,

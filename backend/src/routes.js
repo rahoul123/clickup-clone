@@ -1,7 +1,7 @@
 import { Router } from 'express';
-import { randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { attachUser, loginUser, registerUser, requireAuth, toSafeUser } from './auth.js';
-import { sendInviteEmail, sendTaskAssignedEmail, sendTaskCompletedEmail } from './mailer.js';
+import { sendInviteEmail, sendPasswordResetEmail, sendTaskAssignedEmail, sendTaskCompletedEmail } from './mailer.js';
 import {
   List,
   Notification,
@@ -252,9 +252,16 @@ function canAccessSpaceByDepartment({
 
   if (isDepartmentMain) {
     const mainSpaceDept = normalizeDepartment(spaceDepartment);
-    if (mainSpaceDept) return isDepartmentMatch(userNorm, mainSpaceDept);
     const mainSpaceName = normalizeDepartment(spaceName);
-    if (mainSpaceName) return mainSpaceName === userNorm || mainSpaceName.includes(userNorm) || userNorm.includes(mainSpaceName);
+    if (mainSpaceDept && isDepartmentMatch(userNorm, mainSpaceDept)) return true;
+    if (mainSpaceName) {
+      const nameMatch =
+        mainSpaceName === userNorm ||
+        mainSpaceName.includes(userNorm) ||
+        userNorm.includes(mainSpaceName);
+      if (nameMatch) return true;
+    }
+    return false;
   }
 
   const explicitSpaceNorm = normalizeDepartment(spaceDepartment);
@@ -278,28 +285,6 @@ async function ensureSharedMainList(space, userId) {
     createdBy: userId,
   });
   return list.toObject ? list.toObject() : list;
-}
-
-async function findTeamLeadForDepartment(workspaceId, department, excludeUserId = null) {
-  const departmentNorm = normalizeDepartment(department);
-  if (!departmentNorm) return null;
-
-  const teamLeadRows = await UserRole.find({ workspaceId, role: 'team_lead' }).lean();
-  if (!teamLeadRows.length) return null;
-
-  const userIds = teamLeadRows.map((row) => row.userId);
-  const users = await User.find({ _id: { $in: userIds } }).lean();
-  const userById = Object.fromEntries(users.map((u) => [u._id, u]));
-
-  for (const row of teamLeadRows) {
-    if (excludeUserId && row.userId === excludeUserId) continue;
-    const candidate = userById[row.userId];
-    if (!candidate) continue;
-    if (normalizeDepartment(candidate.department) === departmentNorm) {
-      return candidate;
-    }
-  }
-  return null;
 }
 
 /**
@@ -761,6 +746,13 @@ export function buildRoutes({ realtime } = {}) {
     toUsers: (userIds, event, payload) => realtime?.toUsers?.(userIds, event, payload),
   };
 
+  const broadcastNavigationChange = (payload = {}) => {
+    rt.broadcast('navigation:changed', {
+      ...payload,
+      at: new Date().toISOString(),
+    });
+  };
+
   router.get('/health', (_req, res) => res.json({ ok: true }));
 
   router.get('/public/departments', async (_req, res) => {
@@ -934,8 +926,98 @@ export function buildRoutes({ realtime } = {}) {
     res.json({ ok: true });
   });
 
-  router.post('/auth/forgot-password', (_req, res) => {
-    res.json({ ok: true, message: 'Password reset email flow disabled in local migration.' });
+  router.post('/auth/forgot-password', async (req, res) => {
+    const { email } = req.body ?? {};
+    const normalized = String(email || '')
+      .trim()
+      .toLowerCase();
+    const genericOk = () => res.json({ ok: true });
+
+    if (!normalized) {
+      return res.status(400).json({ message: 'Email required' });
+    }
+
+    try {
+      const user = await User.findOne({ email: normalized }).lean();
+      if (!user) return genericOk();
+
+      const rawToken = randomBytes(32).toString('hex');
+      const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+      const passwordResetExpiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+      await User.updateOne(
+        { _id: user._id },
+        {
+          $set: {
+            passwordResetTokenHash: tokenHash,
+            passwordResetExpiresAt,
+          },
+        }
+      );
+
+      const mailResult = await sendPasswordResetEmail({
+        to: normalized,
+        userId: user._id,
+        resetToken: rawToken,
+      });
+
+      if (!mailResult.sent) {
+        const keepTokenForLocalDev =
+          process.env.NODE_ENV !== 'production' && mailResult.reason === 'SMTP not configured';
+        if (!keepTokenForLocalDev) {
+          await User.updateOne(
+            { _id: user._id },
+            { $unset: { passwordResetTokenHash: '', passwordResetExpiresAt: '' } }
+          );
+        }
+      }
+      return genericOk();
+    } catch (error) {
+      console.error('[auth/forgot-password]', error);
+      return res.status(500).json({ message: 'Unable to process password reset request' });
+    }
+  });
+
+  router.post('/auth/complete-password-reset', async (req, res) => {
+    const { uid, token, password } = req.body ?? {};
+    const safeUid = typeof uid === 'string' ? uid.trim() : '';
+    const safeToken = typeof token === 'string' ? token.trim() : '';
+
+    const badReq = () => res.status(400).json({ message: 'Invalid or expired reset link' });
+
+    if (!safeUid || !safeToken || !password || String(password).length < 6) {
+      return badReq();
+    }
+
+    try {
+      const user = await User.findById(safeUid);
+      if (!user?.passwordResetTokenHash || !user.passwordResetExpiresAt) return badReq();
+      if (user.passwordResetExpiresAt.getTime() < Date.now()) return badReq();
+
+      const incoming = createHash('sha256').update(safeToken).digest();
+      let storedBuf;
+      try {
+        storedBuf = Buffer.from(String(user.passwordResetTokenHash).trim(), 'hex');
+      } catch {
+        return badReq();
+      }
+      if (storedBuf.length !== incoming.length || !timingSafeEqual(storedBuf, incoming)) return badReq();
+
+      const bcrypt = (await import('bcryptjs')).default;
+      const passwordHash = await bcrypt.hash(String(password), 10);
+      await User.updateOne(
+        { _id: user._id },
+        {
+          $set: { passwordHash },
+          $unset: { passwordResetTokenHash: '', passwordResetExpiresAt: '' },
+        }
+      );
+
+      res.json({ ok: true });
+    } catch (error) {
+      console.error('[auth/complete-password-reset]', error);
+      res.status(500).json({ message: 'Could not reset password' });
+    }
   });
 
   router.post('/auth/reset-password', requireAuth, async (req, res) => {
@@ -966,8 +1048,21 @@ export function buildRoutes({ realtime } = {}) {
 
     const workspaceMemberRows = await WorkspaceMember.find({ workspaceId: activeWorkspace._id }).lean();
     const workspaceRoleRows = await UserRole.find({ workspaceId: activeWorkspace._id }).lean();
-    const roleByUserId = Object.fromEntries(workspaceRoleRows.map((row) => [row.userId, row.role]));
+    const roleMetaByUserId = Object.fromEntries(
+      workspaceRoleRows.map((row) => [
+        row.userId,
+        {
+          role: row.role,
+          isDeleted: Boolean(row.isDeleted),
+          deletedAt: row.deletedAt || null,
+        },
+      ])
+    );
+    const roleByUserId = Object.fromEntries(
+      Object.entries(roleMetaByUserId).map(([userId, meta]) => [userId, meta.role])
+    );
     const users = await User.find({ _id: { $in: workspaceMemberRows.map((m) => m.userId) } }).lean();
+    const activeUsers = users.filter((u) => !roleMetaByUserId[u._id]?.isDeleted);
 
     // Team Members page (role/department governance) — respects dept scoping.
     const teamMembersVisibleUsers = users.filter((u) => {
@@ -992,7 +1087,7 @@ export function buildRoutes({ realtime } = {}) {
       const memberDept = normalizeDepartment(u.department);
       return Boolean(memberDept && isDepartmentMatch(selfDeptNorm, memberDept));
     };
-    const assigneeCandidates = [...users].sort((a, b) => {
+    const assigneeCandidates = [...activeUsers].sort((a, b) => {
       const aOwn = isOwnDept(a) ? 0 : 1;
       const bOwn = isOwnDept(b) ? 0 : 1;
       if (aOwn !== bOwn) return aOwn - bOwn;
@@ -1021,6 +1116,10 @@ export function buildRoutes({ realtime } = {}) {
       id: u._id,
       label: formatMemberLabel(u),
       role: roleByUserId[u._id] ?? 'employee',
+      is_deleted: Boolean(roleMetaByUserId[u._id]?.isDeleted),
+      deleted_at: roleMetaByUserId[u._id]?.deletedAt
+        ? new Date(roleMetaByUserId[u._id].deletedAt).toISOString()
+        : null,
     }));
 
     const rolesByWorkspaceId = {};
@@ -1374,6 +1473,7 @@ export function buildRoutes({ realtime } = {}) {
     await User.updateOne({ _id: req.session.userId }, { $set: { department } });
     await WorkspaceMember.create({ workspaceId: workspace._id, userId: req.session.userId });
     await UserRole.create({ workspaceId: workspace._id, userId: req.session.userId, role: 'admin' });
+    broadcastNavigationChange({ type: 'workspace:created', workspace_id: workspace._id });
     res.json({
       workspace: {
         id: workspace._id,
@@ -1402,6 +1502,7 @@ export function buildRoutes({ realtime } = {}) {
       department: String(department || workspace.department || '').trim() || null,
       createdBy: req.session.userId,
     });
+    broadcastNavigationChange({ type: 'space:created', workspace_id: workspaceId, space_id: space._id });
     res.json({
       space: serializeSpace(space.toObject()),
     });
@@ -1467,6 +1568,12 @@ export function buildRoutes({ realtime } = {}) {
       allowedUserIds: safeAllowedUserIds,
       position: nextPosition,
     });
+    broadcastNavigationChange({
+      type: 'list:created',
+      workspace_id: space.workspaceId,
+      space_id: spaceId,
+      list_id: list._id,
+    });
     res.json({
       list: serializeList(list.toObject()),
     });
@@ -1515,6 +1622,7 @@ export function buildRoutes({ realtime } = {}) {
     list.allowedUserIds = nextAllowed;
     await list.save();
 
+    broadcastNavigationChange({ type: 'list:access:updated', workspace_id: space.workspaceId, list_id: listId });
     res.json({ list: serializeList(list.toObject()) });
   });
 
@@ -1727,6 +1835,7 @@ export function buildRoutes({ realtime } = {}) {
 
     await List.updateOne({ _id: listId }, { $set });
     const updated = await List.findById(listId).lean();
+    broadcastNavigationChange({ type: 'list:updated', workspace_id: space.workspaceId, list_id: listId });
     res.json({ list: serializeList(updated) });
   });
 
@@ -1767,6 +1876,7 @@ export function buildRoutes({ realtime } = {}) {
 
     await Space.updateOne({ _id: spaceId }, { $set: updates });
     const fresh = await Space.findById(spaceId).lean();
+    broadcastNavigationChange({ type: 'space:updated', workspace_id: space.workspaceId, space_id: spaceId });
     res.json({ space: serializeSpace(fresh) });
   });
 
@@ -1799,6 +1909,7 @@ export function buildRoutes({ realtime } = {}) {
     await Task.deleteMany({ listId: { $in: listIds } });
     await Space.deleteOne({ _id: spaceId });
 
+    broadcastNavigationChange({ type: 'space:deleted', workspace_id: space.workspaceId, space_id: spaceId });
     res.json({ ok: true });
   });
 
@@ -1810,14 +1921,15 @@ export function buildRoutes({ realtime } = {}) {
     if (!space) return res.status(404).json({ message: 'Space not found' });
 
     const role = await getRole(space.workspaceId, req.session.userId);
-    if (!canDeleteList(role)) return res.status(403).json({ message: 'Only admin/manager/team lead can delete lists' });
+    if (!canDeleteList(role)) return res.status(403).json({ message: 'Only admin can delete lists' });
 
     // Shared cross-team list is admin-only infrastructure.
     if (list.isSharedMainList && !isAdminRole(role)) {
       return res.status(403).json({ message: 'Only admin can delete the shared cross-team list.' });
     }
 
-    // Non-admins can only delete lists inside their OWN department.
+    // Safety net: non-admins should never reach here, but keep department scope
+    // guard in case role rules change again in the future.
     if (!isAdminRole(role)) {
       const currentUser = await User.findById(req.session.userId).lean();
       const workspace = await Workspace.findById(space.workspaceId).lean();
@@ -1849,6 +1961,7 @@ export function buildRoutes({ realtime } = {}) {
     await List.deleteOne({ _id: listId });
     await UserListFavorite.deleteMany({ listId });
 
+    broadcastNavigationChange({ type: 'list:deleted', workspace_id: space.workspaceId, list_id: listId });
     res.json({ ok: true });
   });
 
@@ -1921,6 +2034,12 @@ export function buildRoutes({ realtime } = {}) {
       await Task.insertMany(cloned);
     }
 
+    broadcastNavigationChange({
+      type: 'list:duplicated',
+      workspace_id: space.workspaceId,
+      space_id: source.spaceId,
+      list_id: newListId,
+    });
     res.json({ list: serializeList(copy.toObject(), { favoriteIds: new Set() }) });
   });
 
@@ -1964,13 +2083,13 @@ export function buildRoutes({ realtime } = {}) {
       await List.bulkWrite(ops);
     }
 
+    broadcastNavigationChange({ type: 'lists:reordered', workspace_id: space.workspaceId, space_id: spaceId });
     res.json({ ok: true });
   });
 
   /**
    * Soft-archive a list so the sidebar + default navigation drop it. Tasks
-   * and associated state are preserved; users can restore from the "Archived
-   * lists" panel. Admins or the list creator may archive.
+   * and associated state are preserved; only admins may archive/recover.
    */
   router.post('/lists/:listId/archive', requireAuth, async (req, res) => {
     const { listId } = req.params;
@@ -1981,9 +2100,8 @@ export function buildRoutes({ realtime } = {}) {
 
     const role = await getRole(space.workspaceId, req.session.userId);
     const isAdmin = isAdminRole(role);
-    const isCreator = list.createdBy === req.session.userId;
-    if (!isAdmin && !isCreator && !canDeleteList(role)) {
-      return res.status(403).json({ message: 'Not allowed to archive this list.' });
+    if (!isAdmin || !canDeleteList(role)) {
+      return res.status(403).json({ message: 'Only admin can archive lists.' });
     }
     if (list.isSharedMainList && !isAdmin) {
       return res.status(403).json({ message: 'Only admin can archive the shared cross-team list.' });
@@ -1993,6 +2111,7 @@ export function buildRoutes({ realtime } = {}) {
       list.archivedAt = new Date();
       await list.save();
     }
+    broadcastNavigationChange({ type: 'list:archived', workspace_id: space.workspaceId, list_id: listId });
     res.json({ list: serializeList(list.toObject(), { favoriteIds: new Set() }) });
   });
 
@@ -2006,9 +2125,8 @@ export function buildRoutes({ realtime } = {}) {
 
     const role = await getRole(space.workspaceId, req.session.userId);
     const isAdmin = isAdminRole(role);
-    const isCreator = list.createdBy === req.session.userId;
-    if (!isAdmin && !isCreator && !canDeleteList(role)) {
-      return res.status(403).json({ message: 'Not allowed to restore this list.' });
+    if (!isAdmin || !canDeleteList(role)) {
+      return res.status(403).json({ message: 'Only admin can restore archived lists.' });
     }
 
     if (list.archivedAt) {
@@ -2020,6 +2138,7 @@ export function buildRoutes({ realtime } = {}) {
       list.position = (lastActive?.position ?? 0) + 1;
       await list.save();
     }
+    broadcastNavigationChange({ type: 'list:unarchived', workspace_id: space.workspaceId, list_id: listId });
     res.json({ list: serializeList(list.toObject(), { favoriteIds: new Set() }) });
   });
 
@@ -2079,15 +2198,6 @@ export function buildRoutes({ realtime } = {}) {
     const workspace = await Workspace.findById(workspaceId).lean();
     if (!workspace) return res.status(404).json({ message: 'Workspace not found' });
     const inviteDepartment = String(department || '').trim() || workspace.department;
-    if (targetRole === 'team_lead') {
-      const existingTeamLead = await findTeamLeadForDepartment(workspaceId, inviteDepartment, user?._id ?? null);
-      if (existingTeamLead) {
-        return res.status(409).json({
-          message: `Department already has a team lead (${existingTeamLead.displayName || existingTeamLead.email}).`,
-        });
-      }
-    }
-
     if (!user) {
       await WorkspaceInvite.updateOne(
         { workspaceId, email: normalizedEmail },
@@ -2150,6 +2260,7 @@ export function buildRoutes({ realtime } = {}) {
       role: targetRole,
       department: inviteDepartment,
     }).catch(() => ({ sent: false, reason: 'Failed to send email' }));
+    broadcastNavigationChange({ type: 'workspace:members:updated', workspace_id: workspaceId });
     res.json({
       ok: true,
       pending: false,
@@ -2202,6 +2313,7 @@ export function buildRoutes({ realtime } = {}) {
     );
 
     const created = await User.findById(user._id).lean();
+    broadcastNavigationChange({ type: 'workspace:members:updated', workspace_id: workspaceId });
     return res.json({ ok: true, user: toSafeUser(created), role: targetRole });
   });
 
@@ -2387,8 +2499,9 @@ export function buildRoutes({ realtime } = {}) {
     const memberExists = await WorkspaceMember.findOne({ workspaceId, userId: memberId }).lean();
     if (!memberExists) return res.status(404).json({ message: 'Member not found in workspace' });
 
-    const targetCurrentRole = await getRole(workspaceId, memberId);
-    if (normalizeRoleForRestriction(targetCurrentRole) === 'admin' && targetCurrentRole === 'super_admin') {
+    const targetRoleRow = await UserRole.findOne({ workspaceId, userId: memberId }).lean();
+    const targetCurrentRole = targetRoleRow?.role ?? null;
+    if (targetCurrentRole === 'super_admin') {
       return res.status(403).json({ message: 'Super admin role is locked and cannot be changed.' });
     }
 
@@ -2401,16 +2514,115 @@ export function buildRoutes({ realtime } = {}) {
       if (!targetUser?.department) {
         return res.status(400).json({ message: 'Team lead must have a department assigned.' });
       }
-      const existingTeamLead = await findTeamLeadForDepartment(workspaceId, targetUser.department, memberId);
-      if (existingTeamLead) {
-        return res.status(409).json({
-          message: `Department already has a team lead (${existingTeamLead.displayName || existingTeamLead.email}).`,
-        });
-      }
     }
 
     await UserRole.updateOne({ workspaceId, userId: memberId }, { $set: { role: nextRole } }, { upsert: true });
+    broadcastNavigationChange({ type: 'workspace:members:updated', workspace_id: workspaceId });
     res.json({ ok: true });
+  });
+
+  /**
+   * Remove a workspace member entirely (except super-admin).
+   * This is used when a teammate leaves the company.
+   */
+  router.delete('/workspaces/:workspaceId/members/:memberId', requireAuth, async (req, res) => {
+    const { workspaceId, memberId } = req.params;
+    const actorRole = await getRole(workspaceId, req.session.userId);
+    if (!canManageWorkspace(actorRole)) {
+      return res.status(403).json({ message: 'Only admin can remove members.' });
+    }
+    if (memberId === req.session.userId) {
+      return res.status(400).json({ message: 'You cannot remove your own account from this workspace.' });
+    }
+
+    const memberExists = await WorkspaceMember.findOne({ workspaceId, userId: memberId }).lean();
+    if (!memberExists) return res.status(404).json({ message: 'Member not found in workspace.' });
+
+    const roleRow = await UserRole.findOne({ workspaceId, userId: memberId }).lean();
+    if (roleRow?.role === 'super_admin') {
+      return res.status(403).json({ message: 'Super admin cannot be removed from this action.' });
+    }
+
+    await WorkspaceMember.deleteOne({ workspaceId, userId: memberId });
+    await UserRole.deleteOne({ workspaceId, userId: memberId });
+    broadcastNavigationChange({ type: 'workspace:members:updated', workspace_id: workspaceId });
+    return res.json({ ok: true });
+  });
+
+  /**
+   * Soft-delete a super-admin role without losing audit history.
+   * Only admin/super_admin can do this.
+   */
+  router.delete('/workspaces/:workspaceId/members/:memberId/super-admin', requireAuth, async (req, res) => {
+    const { workspaceId, memberId } = req.params;
+    const actorRole = await getRole(workspaceId, req.session.userId);
+    if (!canManageWorkspace(actorRole)) {
+      return res.status(403).json({ message: 'Only admin can delete super admin.' });
+    }
+
+    const roleRow = await UserRole.findOne({ workspaceId, userId: memberId }).lean();
+    if (!roleRow || roleRow.role !== 'super_admin') {
+      return res.status(404).json({ message: 'Super admin not found in workspace.' });
+    }
+    if (roleRow.isDeleted) {
+      return res.status(409).json({ message: 'Super admin is already deleted.' });
+    }
+
+    // Hard safety: never allow deleting the final active super-admin, otherwise
+    // the workspace can lock itself out from privileged recovery actions.
+    const activeSuperAdminCount = await UserRole.countDocuments({
+      workspaceId,
+      role: 'super_admin',
+      isDeleted: { $ne: true },
+    });
+    if (activeSuperAdminCount <= 1) {
+      return res.status(409).json({
+        message: 'Cannot delete the last active super admin. Create or recover another super admin first.',
+      });
+    }
+
+    await UserRole.updateOne(
+      { workspaceId, userId: memberId },
+      {
+        $set: {
+          isDeleted: true,
+          deletedAt: new Date(),
+          deletedBy: req.session.userId,
+        },
+      }
+    );
+    broadcastNavigationChange({ type: 'workspace:members:updated', workspace_id: workspaceId });
+    return res.json({ ok: true });
+  });
+
+  /** Restore a previously soft-deleted super-admin role. */
+  router.post('/workspaces/:workspaceId/members/:memberId/super-admin/recover', requireAuth, async (req, res) => {
+    const { workspaceId, memberId } = req.params;
+    const actorRole = await getRole(workspaceId, req.session.userId);
+    if (!canManageWorkspace(actorRole)) {
+      return res.status(403).json({ message: 'Only admin can recover super admin.' });
+    }
+
+    const roleRow = await UserRole.findOne({ workspaceId, userId: memberId }).lean();
+    if (!roleRow || roleRow.role !== 'super_admin') {
+      return res.status(404).json({ message: 'Super admin not found in workspace.' });
+    }
+    if (!roleRow.isDeleted) {
+      return res.status(409).json({ message: 'Super admin is already active.' });
+    }
+
+    await UserRole.updateOne(
+      { workspaceId, userId: memberId },
+      {
+        $set: {
+          isDeleted: false,
+          deletedAt: null,
+          deletedBy: null,
+        },
+      }
+    );
+    broadcastNavigationChange({ type: 'workspace:members:updated', workspace_id: workspaceId });
+    return res.json({ ok: true });
   });
 
   router.post('/tasks', requireAuth, async (req, res) => {
@@ -2502,6 +2714,16 @@ export function buildRoutes({ realtime } = {}) {
       message: `${actorName} created task ${task.title}`,
       realtime: rt,
     });
+    if (assignedUserIds.length > 0) {
+      await createNotifications({
+        userIds: assignedUserIds.filter((id) => id !== req.session.userId),
+        workspaceId: space.workspaceId,
+        taskId: task._id,
+        type: 'task_created',
+        message: `${actorName} assigned you task ${task.title}`,
+        realtime: rt,
+      });
+    }
 
     // Activity timeline entries for task detail panel (not bell notifications).
     const assigneeUsers = assignedUserIds.length
@@ -3117,9 +3339,16 @@ export function buildRoutes({ realtime } = {}) {
     if (!task.isBeingCreated) {
       const actorName = author?.displayName || author?.email || 'Someone';
       const taskAssignees = await TaskAssignee.find({ taskId }).lean();
-      const recipients = [...new Set(taskAssignees.map((a) => a.userId).filter(Boolean))].filter(
-        (id) => id !== req.session.userId
-      );
+      const recipientPool = new Set(taskAssignees.map((a) => a.userId).filter(Boolean));
+      // For replies, also notify the original comment author even if they are
+      // not currently assigned to the task.
+      if (normalizedParentId) {
+        const parentRoot = await TaskComment.findOne({ _id: normalizedParentId, taskId })
+          .select({ userId: 1 })
+          .lean();
+        if (parentRoot?.userId) recipientPool.add(parentRoot.userId);
+      }
+      const recipients = [...recipientPool].filter((id) => id !== req.session.userId);
       if (recipients.length > 0) {
         await createNotifications({
           userIds: recipients,

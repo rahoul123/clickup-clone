@@ -25,8 +25,16 @@ const ForgotPassword = () => {
     return (
       <div className="flex min-h-full items-center justify-center overflow-y-auto bg-background px-4">
         <div className="w-full max-w-sm text-center">
-          <h1 className="text-2xl font-bold text-foreground">Reset flow disabled</h1>
-          <p className="text-sm text-muted-foreground mt-2">For now, password reset requires login from app settings. Request noted for backend mail support.</p>
+          <h1 className="text-2xl font-bold text-foreground">Check your email</h1>
+          <p className="text-sm text-muted-foreground mt-2">
+            If an account exists for that address, we sent a password reset link. Open it within one hour to choose a new
+            password.
+          </p>
+          {import.meta.env.DEV && (
+            <p className="text-xs text-muted-foreground mt-3">
+              Dev tip: without SMTP, the backend logs a one-time reset URL in the terminal.
+            </p>
+          )}
           <Link to="/login" className="inline-block mt-6 text-sm text-primary hover:underline">Back to login</Link>
         </div>
       </div>

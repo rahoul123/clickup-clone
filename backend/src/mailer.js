@@ -81,6 +81,42 @@ function taskLink(taskId) {
   return `${appBaseUrl}/?task=${encodeURIComponent(taskId)}`;
 }
 
+/** Password reset mail with one-time token link (SMTP required for production sends). */
+export async function sendPasswordResetEmail({ to, userId, resetToken }) {
+  const appBaseUrl = process.env.APP_BASE_URL || process.env.CLIENT_ORIGIN || 'http://localhost:8080';
+  const resetUrl = `${appBaseUrl}/reset-password?uid=${encodeURIComponent(userId)}&token=${encodeURIComponent(resetToken)}`;
+
+  const transporter = getTransporter();
+  if (!transporter) {
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn('[dev] SMTP not configured — use this temporary password reset link:');
+      console.warn(resetUrl);
+    }
+    return { sent: false, reason: 'SMTP not configured' };
+  }
+
+  const from = process.env.SMTP_FROM || process.env.SMTP_USER;
+  try {
+    await transporter.sendMail({
+      from,
+      to,
+      subject: 'Reset your Collab Creek password',
+      html: `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #111827;">
+      <h2 style="margin: 0 0 12px;">Password reset</h2>
+      <p style="margin: 0 0 16px;">We received a request to reset your password. This link expires in one hour.</p>
+      ${buttonHtml('Choose a new password', resetUrl)}
+      <p style="margin-top:16px;font-size:12px;color:#6b7280;">If you did not request this, you can safely ignore this message.</p>
+    </div>
+  `,
+    });
+  } catch (err) {
+    console.error('[mailer] Password reset send failed:', err.message || err);
+    return { sent: false, reason: 'send failed' };
+  }
+  return { sent: true };
+}
+
 /**
  * Sent when a user is assigned to a newly-created task. Never sent on
  * progress/description updates — only on the initial assignment.

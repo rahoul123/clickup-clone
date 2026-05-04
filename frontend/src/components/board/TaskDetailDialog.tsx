@@ -1833,7 +1833,7 @@ export function TaskDetailDialog({
                             <button
                               type="button"
                               onClick={() => setActivityExpanded((v) => !v)}
-                              className="w-full flex items-center gap-1.5 py-1 text-xs text-gray-400 dark:text-slate-500 hover:text-gray-200 dark:hover:text-slate-300 transition-colors"
+                              className="w-full flex items-center gap-1.5 py-1 text-xs text-gray-500 dark:text-slate-500 hover:text-gray-700 dark:hover:text-slate-300 transition-colors"
                             >
                               <ChevronRight size={12} className={activityExpanded ? 'rotate-90' : ''} />
                               <span>{activityExpanded ? 'Hide' : 'Show more'}</span>
@@ -1851,6 +1851,7 @@ export function TaskDetailDialog({
                                 key={comment.id}
                                 comment={comment}
                                 replies={repliesByParent[comment.id] || []}
+                                memberOptions={memberOptions}
                                 currentUserId={currentUserId}
                                 reactionPickerFor={reactionPickerFor}
                                 setReactionPickerFor={setReactionPickerFor}
@@ -2590,12 +2591,12 @@ const ActivityText = ({ content }: { content: string }) => {
 const ActivityRow = ({ content, createdAt }: { content: string; createdAt: string }) => (
   <div className="flex items-start justify-between gap-3 py-1 text-xs leading-5">
     <div className="min-w-0 flex items-start gap-2">
-      <span className="mt-[2px] text-slate-500">•</span>
-      <p className="text-slate-200 font-normal break-words">
+      <span className="mt-[2px] text-gray-500 dark:text-slate-500">•</span>
+      <p className="text-gray-700 dark:text-slate-200 font-normal break-words">
         <ActivityText content={content} />
       </p>
     </div>
-    <span className="shrink-0 text-[11px] text-slate-500">{formatRelativeActivityTime(createdAt)}</span>
+    <span className="shrink-0 text-[11px] text-gray-500 dark:text-slate-500">{formatRelativeActivityTime(createdAt)}</span>
   </div>
 );
 
@@ -2612,6 +2613,7 @@ const ActivityRow = ({ content, createdAt }: { content: string; createdAt: strin
 const CommentBlock = ({
   comment,
   replies,
+  memberOptions,
   currentUserId,
   reactionPickerFor,
   setReactionPickerFor,
@@ -2628,6 +2630,7 @@ const CommentBlock = ({
 }: {
   comment: TaskCommentView;
   replies: TaskCommentView[];
+  memberOptions: { id: string; label: string }[];
   currentUserId?: string;
   reactionPickerFor: string | null;
   setReactionPickerFor: (id: string | null) => void;
@@ -2665,6 +2668,62 @@ const CommentBlock = ({
   const [savingEdit, setSavingEdit] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [replyInlineMention, setReplyInlineMention] = useState<{ start: number; query: string } | null>(null);
+  const [replyInlineMentionIndex, setReplyInlineMentionIndex] = useState(0);
+
+  const replyInlineMentionMatches = useMemo(() => {
+    if (!replyInlineMention) return [] as typeof memberOptions;
+    const q = replyInlineMention.query.trim().toLowerCase();
+    if (!q) return memberOptions.slice(0, 8);
+    return memberOptions.filter((m) => m.label.toLowerCase().includes(q)).slice(0, 8);
+  }, [replyInlineMention, memberOptions]);
+
+  const handleReplyInput = (value: string, caret: number) => {
+    setReplyText(value);
+    let i = caret - 1;
+    let foundAt = -1;
+    while (i >= 0) {
+      const ch = value[i];
+      if (ch === '@') {
+        const prev = i === 0 ? ' ' : value[i - 1];
+        if (/[\s\n]/.test(prev) || i === 0) foundAt = i;
+        break;
+      }
+      if (/\s/.test(ch)) break;
+      i -= 1;
+    }
+    if (foundAt >= 0) {
+      const query = value.slice(foundAt + 1, caret);
+      if (/^[\w.\-]*$/.test(query)) {
+        setReplyInlineMention({ start: foundAt, query });
+        setReplyInlineMentionIndex(0);
+        return;
+      }
+    }
+    setReplyInlineMention(null);
+  };
+
+  const applyReplyMention = (member: { id: string; label: string }) => {
+    if (!replyInlineMention) return;
+    const displayName = member.label.replace(/\s*\(.*?\)\s*$/, '').trim() || member.label;
+    const token = `@${displayName.replace(/\s+/g, '_')} `;
+    const before = replyText.slice(0, replyInlineMention.start);
+    const afterStart = replyInlineMention.start + 1 + replyInlineMention.query.length;
+    const after = replyText.slice(afterStart);
+    const next = `${before}${token}${after}`;
+    setReplyText(next);
+    setReplyInlineMention(null);
+    setReplyInlineMentionIndex(0);
+    window.setTimeout(() => {
+      const pos = (before + token).length;
+      const el = replyTextareaRef.current;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(pos, pos);
+      }
+    }, 0);
+  };
 
   useEffect(() => {
     setEditingText(comment.content || '');
@@ -2981,22 +3040,75 @@ const CommentBlock = ({
               }}
               className="mt-2 flex items-start gap-2 rounded-lg border border-purple-300 dark:border-purple-700 bg-purple-50/40 dark:bg-purple-900/15 p-2"
             >
-              <textarea
-                autoFocus
-                rows={2}
-                value={replyText}
-                onChange={(e) => setReplyText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Escape') {
-                    setReplyingTo(null);
-                  } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                    e.preventDefault();
-                    onSubmitReply(comment.id);
+              <div className="relative flex-1">
+                <textarea
+                  ref={replyTextareaRef}
+                  autoFocus
+                  rows={2}
+                  value={replyText}
+                  onChange={(e) =>
+                    handleReplyInput(
+                      e.target.value,
+                      e.target.selectionStart ?? e.target.value.length,
+                    )
                   }
-                }}
-                placeholder={`Reply to ${comment.author_name || 'this comment'}...`}
-                className="flex-1 resize-none bg-transparent text-[13px] outline-none text-gray-700 dark:text-slate-200 placeholder:text-gray-400 dark:placeholder:text-slate-500"
-              />
+                  onKeyDown={(e) => {
+                    if (replyInlineMention && replyInlineMentionMatches.length > 0) {
+                      if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        setReplyInlineMentionIndex((i) => (i + 1) % replyInlineMentionMatches.length);
+                        return;
+                      }
+                      if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        setReplyInlineMentionIndex(
+                          (i) => (i - 1 + replyInlineMentionMatches.length) % replyInlineMentionMatches.length,
+                        );
+                        return;
+                      }
+                      if (e.key === 'Tab') {
+                        e.preventDefault();
+                        applyReplyMention(replyInlineMentionMatches[replyInlineMentionIndex]);
+                        return;
+                      }
+                    }
+                    if (e.key === 'Escape') {
+                      if (replyInlineMention) setReplyInlineMention(null);
+                      else setReplyingTo(null);
+                    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault();
+                      onSubmitReply(comment.id);
+                    }
+                  }}
+                  onBlur={() => {
+                    window.setTimeout(() => setReplyInlineMention(null), 120);
+                  }}
+                  placeholder={`Reply to ${comment.author_name || 'this comment'}...`}
+                  className="flex-1 resize-none bg-transparent text-[13px] outline-none text-gray-700 dark:text-slate-200 placeholder:text-gray-400 dark:placeholder:text-slate-500"
+                />
+                {replyInlineMention && replyInlineMentionMatches.length > 0 && (
+                  <div className="absolute bottom-full left-0 right-0 mb-2 max-h-52 overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900 z-20">
+                    {replyInlineMentionMatches.map((member, idx) => (
+                      <button
+                        key={member.id}
+                        type="button"
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          applyReplyMention(member);
+                        }}
+                        onMouseEnter={() => setReplyInlineMentionIndex(idx)}
+                        className={`w-full px-3 py-2 text-left text-xs ${
+                          idx === replyInlineMentionIndex
+                            ? 'bg-purple-50 text-purple-700 dark:bg-purple-950/40 dark:text-purple-300'
+                            : 'text-gray-700 hover:bg-gray-50 dark:text-slate-300 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        {member.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               <div className="flex flex-col gap-1 shrink-0">
                 <button
                   type="submit"
@@ -3025,6 +3137,7 @@ const CommentBlock = ({
                   key={reply.id}
                   comment={reply}
                   replies={[]}
+                  memberOptions={memberOptions}
                   currentUserId={currentUserId}
                   reactionPickerFor={reactionPickerFor}
                   setReactionPickerFor={setReactionPickerFor}

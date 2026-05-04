@@ -40,7 +40,13 @@ const Index = () => {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [memberOptions, setMemberOptions] = useState<{ id: string; label: string }[]>([]);
   const [teamMembers, setTeamMembers] = useState<
-    Array<{ id: string; label: string; role: 'super_admin' | 'admin' | 'manager' | 'team_lead' | 'employee' | 'guest' }>
+    Array<{
+      id: string;
+      label: string;
+      role: 'super_admin' | 'admin' | 'manager' | 'team_lead' | 'employee' | 'guest';
+      is_deleted?: boolean;
+      deleted_at?: string | null;
+    }>
   >([]);
   const [notificationUnreadCount, setNotificationUnreadCount] = useState(0);
   const [rolesByWorkspaceId, setRolesByWorkspaceId] = useState<Record<string, AppRole>>({});
@@ -102,7 +108,12 @@ const Index = () => {
     const isMyDepartmentSpace = (space: Space) => {
       if (!myDept) return true;
       const depNorm = normalizeDept(space.department);
-      if (depNorm) return depNorm === myDept || depNorm.includes(myDept) || myDept.includes(depNorm);
+      if (depNorm) {
+        const deptOk = depNorm === myDept || depNorm.includes(myDept) || myDept.includes(depNorm);
+        if (deptOk) return true;
+        // Same as server: don't let a wrong `space.department` hide a folder
+        // that clearly matches the user's dept by display name.
+      }
       const nameNorm = normalizeDept(space.name);
       return Boolean(nameNorm && (nameNorm === myDept || nameNorm.includes(myDept) || myDept.includes(nameNorm)));
     };
@@ -290,6 +301,7 @@ const Index = () => {
   /** Folder/list create & delete — admin / manager / team lead. */
   const canManageLists =
     activeRole === 'admin' || activeRole === 'super_admin' || activeRole === 'manager' || activeRole === 'team_lead';
+  const canDeleteLists = activeRole === 'admin' || activeRole === 'super_admin';
   const canDeleteSpaces = activeRole === 'admin' || activeRole === 'super_admin';
   const canCreateTasks = activeRole !== 'guest';
   const userDisplayLabel = user?.displayName?.trim() || user?.email || 'User';
@@ -345,24 +357,39 @@ const Index = () => {
     }
   }, [activeWorkspaceId]);
 
-  const bootstrapWorkspace = async () => {
+  const bootstrapWorkspace = async (options: { silent?: boolean } = {}) => {
     if (!user) return;
-    setLoading(true);
-    const data = await api.app.bootstrap();
-    setWorkspaces(data.workspaces as Workspace[]);
-    setSpaces(data.spaces as Space[]);
-    setLists(data.lists as List[]);
-    setTasks(data.tasks as Task[]);
-    setMemberOptions(data.memberOptions ?? []);
-    setTeamMembers(data.teamMembers ?? []);
-    setActiveWorkspaceId(data.activeWorkspaceId ?? null);
-    setActiveList(data.activeListId ?? null);
-    const rb = data.rolesByWorkspaceId as Record<string, AppRole> | undefined;
-    const wid = data.activeWorkspaceId as string | undefined;
-    const fallback = (data.activeRole ?? 'employee') as AppRole;
-    setRolesByWorkspaceId(rb ?? (wid ? { [wid]: fallback } : {}));
+    if (!options.silent) setLoading(true);
+    try {
+      const data = await api.app.bootstrap();
+      const nextWorkspaces = data.workspaces as Workspace[];
+      const nextSpaces = data.spaces as Space[];
+      const nextLists = data.lists as List[];
+      const activeListStillVisible = Boolean(activeList && nextLists.some((l) => l.id === activeList));
 
-    setLoading(false);
+      setWorkspaces(nextWorkspaces);
+      setSpaces(nextSpaces);
+      setLists(nextLists);
+      if (!options.silent || !activeListStillVisible) {
+        setTasks(data.tasks as Task[]);
+      }
+      setMemberOptions(data.memberOptions ?? []);
+      setTeamMembers(data.teamMembers ?? []);
+      setActiveWorkspaceId((prev) =>
+        options.silent && prev && nextWorkspaces.some((w) => w.id === prev)
+          ? prev
+          : data.activeWorkspaceId ?? null,
+      );
+      setActiveList((prev) =>
+        options.silent && prev && nextLists.some((l) => l.id === prev) ? prev : data.activeListId ?? null,
+      );
+      const rb = data.rolesByWorkspaceId as Record<string, AppRole> | undefined;
+      const wid = data.activeWorkspaceId as string | undefined;
+      const fallback = (data.activeRole ?? 'employee') as AppRole;
+      setRolesByWorkspaceId(rb ?? (wid ? { [wid]: fallback } : {}));
+    } finally {
+      if (!options.silent) setLoading(false);
+    }
   };
 
   const playNotificationSound = useCallback(() => {
@@ -386,6 +413,26 @@ const Index = () => {
     }
   }, []);
 
+  const notifyOutsideApp = useCallback(async (message: string, tag: string) => {
+    const text = String(message || '').trim();
+    if (!text) return;
+    if (typeof document !== 'undefined' && !document.hidden) return;
+
+    const desktopApi = (window as typeof window & { digitech?: { notify?: (payload: { title?: string; body: string; tag?: string }) => Promise<boolean> } }).digitech;
+    if (desktopApi?.notify) {
+      try {
+        const shown = await desktopApi.notify({ title: 'DigitechIO', body: text, tag });
+        if (shown) return;
+      } catch {
+        // Fallback to browser notification below.
+      }
+    }
+
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification('DigitechIO', { body: text, tag });
+    }
+  }, []);
+
   const fetchNotifications = useCallback(async () => {
     setNotificationsLoading(true);
     try {
@@ -399,14 +446,12 @@ const Index = () => {
 
       if (initializedNotificationsRef.current && newUnread.length > 0) {
         for (const item of newUnread.slice(0, 3)) {
-          // Task-create success toast is handled explicitly in createTask().
-          // Skip the generic bell toast to prevent duplicate popups.
-          if (item.type === 'task_created') continue;
+          const suppressForLocallyCreatedTask =
+            Boolean(item.taskId) &&
+            suppressNotificationToastTaskIdsRef.current.has(item.taskId);
+          if (suppressForLocallyCreatedTask) continue;
           showDedupedToast(item.message);
-          if (typeof document !== 'undefined' && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
-            // Browser-level popup for background/inactive tab
-            new Notification('Collab Creek', { body: item.message, tag: item.id });
-          }
+          void notifyOutsideApp(item.message, item.id);
         }
         playNotificationSound();
       }
@@ -418,7 +463,7 @@ const Index = () => {
     } finally {
       setNotificationsLoading(false);
     }
-  }, [playNotificationSound]);
+  }, [playNotificationSound, notifyOutsideApp]);
 
   // ────────────────────────────────────────────────────────────────────
   // Realtime fan-in: patch local caches when other users mutate things.
@@ -469,19 +514,17 @@ const Index = () => {
     const suppressForLocallyCreatedTask =
       Boolean(notification.taskId) &&
       suppressNotificationToastTaskIdsRef.current.has(notification.taskId);
-    const skipTaskCreatedBellToast = notification.type === 'task_created';
-    if (!suppressForLocallyCreatedTask && !skipTaskCreatedBellToast) {
+    if (!suppressForLocallyCreatedTask) {
       showDedupedToast(notification.message);
     }
-    if (
-      typeof document !== 'undefined' &&
-      document.hidden &&
-      'Notification' in window &&
-      Notification.permission === 'granted'
-    ) {
-      new Notification('DigitechIO', { body: notification.message, tag: notification.id });
-    }
+    void notifyOutsideApp(notification.message, notification.id);
     playNotificationSound();
+  });
+
+  useRealtimeEvent<{ type?: string; at?: string }>('navigation:changed', () => {
+    bootstrapWorkspace({ silent: true }).catch((error) => {
+      console.error('Failed to refresh navigation after realtime update', error);
+    });
   });
 
   const fetchWorkspaceDocs = useCallback(async (workspaceId?: string | null) => {
@@ -685,10 +728,7 @@ const Index = () => {
       window.alert('Only admins can create team spaces.');
       return;
     }
-    const suggestedDepartment = activeWorkspace?.department ?? user.department ?? '';
-    const department = window.prompt('Department for this team space', suggestedDepartment)?.trim();
-    if (!department) return;
-    const { space: data } = await api.app.createSpace(activeWorkspaceId, name, department);
+    const { space: data } = await api.app.createSpace(activeWorkspaceId, name, name);
     setSpaces((prev) => [...prev, data]);
   };
 
@@ -766,6 +806,10 @@ const Index = () => {
   };
 
   const archiveList = async (listId: string) => {
+    if (!canDeleteLists) {
+      window.alert('Only admin can archive lists.');
+      return;
+    }
     const { list: updated } = await api.app.archiveList(listId);
     setLists((prev) => prev.map((l) => (l.id === updated.id ? { ...l, ...updated } : l)));
     // If we just archived the active list, switch to any remaining active one.
@@ -777,6 +821,10 @@ const Index = () => {
   };
 
   const unarchiveList = async (listId: string) => {
+    if (!canDeleteLists) {
+      window.alert('Only admin can restore archived lists.');
+      return;
+    }
     const { list: updated } = await api.app.unarchiveList(listId);
     setLists((prev) => prev.map((l) => (l.id === updated.id ? { ...l, ...updated } : l)));
   };
@@ -793,6 +841,7 @@ const Index = () => {
   };
 
   const fetchArchivedLists = async (spaceId: string): Promise<List[]> => {
+    if (!canDeleteLists) return [];
     const { lists: archived } = await api.app.getArchivedLists(spaceId);
     return archived as List[];
   };
@@ -830,8 +879,8 @@ const Index = () => {
   };
 
   const deleteList = async (listId: string, listName: string) => {
-    if (!canManageLists) {
-      window.alert('Your role does not have permission to delete lists.');
+    if (!canDeleteLists) {
+      window.alert('Only admin can delete lists.');
       return;
     }
     const ok = window.confirm(`Are you sure you want to delete list "${listName}"?`);
@@ -891,6 +940,48 @@ const Index = () => {
     }
     await api.app.updateMemberRole(activeWorkspaceId, memberId, role);
     setTeamMembers((prev) => prev.map((member) => (member.id === memberId ? { ...member, role } : member)));
+  };
+
+  const deleteSuperAdmin = async (memberId: string) => {
+    if (!activeWorkspaceId) return;
+    if (!canManageWorkspace) {
+      window.alert('Only admin can delete super admin.');
+      return;
+    }
+    const ok = window.confirm('Are you sure you want to delete this super admin? You can recover later.');
+    if (!ok) return;
+    await api.app.deleteSuperAdmin(activeWorkspaceId, memberId);
+    setTeamMembers((prev) =>
+      prev.map((member) => (member.id === memberId ? { ...member, is_deleted: true } : member))
+    );
+    toast.success('Super admin deleted. You can recover anytime.');
+  };
+
+  const recoverSuperAdmin = async (memberId: string) => {
+    if (!activeWorkspaceId) return;
+    if (!canManageWorkspace) {
+      window.alert('Only admin can recover super admin.');
+      return;
+    }
+    await api.app.recoverSuperAdmin(activeWorkspaceId, memberId);
+    setTeamMembers((prev) =>
+      prev.map((member) => (member.id === memberId ? { ...member, is_deleted: false, deleted_at: null } : member))
+    );
+    toast.success('Super admin recovered successfully.');
+  };
+
+  const removeMember = async (memberId: string) => {
+    if (!activeWorkspaceId) return;
+    if (!canManageWorkspace) {
+      window.alert('Only admin can remove members.');
+      return;
+    }
+    const ok = window.confirm('Remove this member from workspace? They will lose access immediately.');
+    if (!ok) return;
+    await api.app.removeMember(activeWorkspaceId, memberId);
+    setTeamMembers((prev) => prev.filter((member) => member.id !== memberId));
+    setMemberOptions((prev) => prev.filter((member) => member.id !== memberId));
+    toast.success('Member removed from workspace.');
   };
 
   const createTask = async (payload: {
@@ -1402,7 +1493,10 @@ const Index = () => {
           deleteList(listId, listName).catch((error) => console.error('Failed to delete list', error))
         }
         onInvite={(email, role, department) =>
-          inviteMember(email, role, department).catch((error) => console.error('Failed to invite member', error))
+          inviteMember(email, role, department).catch((error) => {
+            console.error('Failed to invite member', error);
+            toast.error((error as Error)?.message || 'Failed to send invite.');
+          })
         }
         onCreatePrivilegedMember={(payload) =>
           createPrivilegedMember(payload).catch((error) => {
@@ -1415,6 +1509,7 @@ const Index = () => {
         canCreateSpaces={canCreateSpaces}
         canManageStructure={canManageStructure}
         canManageLists={canManageLists}
+        canDeleteLists={canDeleteLists}
         canDeleteSpaces={canDeleteSpaces}
         notificationCount={notificationUnreadCount}
         onLogout={() =>
@@ -1551,6 +1646,24 @@ const Index = () => {
               canManageWorkspace={canManageWorkspace}
               onUpdateMemberRole={(memberId, role) =>
                 updateMemberRole(memberId, role).catch((error) => console.error('Failed to update member role', error))
+              }
+              onRemoveMember={(memberId) =>
+                removeMember(memberId).catch((error) => {
+                  console.error('Failed to remove member', error);
+                  toast.error((error as Error)?.message || 'Could not remove member.');
+                })
+              }
+              onDeleteSuperAdmin={(memberId) =>
+                deleteSuperAdmin(memberId).catch((error) => {
+                  console.error('Failed to delete super admin', error);
+                  toast.error((error as Error)?.message || 'Could not delete super admin.');
+                })
+              }
+              onRecoverSuperAdmin={(memberId) =>
+                recoverSuperAdmin(memberId).catch((error) => {
+                  console.error('Failed to recover super admin', error);
+                  toast.error((error as Error)?.message || 'Could not recover super admin.');
+                })
               }
             />
           ) : pageView === 'docs' ? (

@@ -13,25 +13,31 @@ export function normalizeDepartment(input: string | null | undefined): string {
  * Same rules as server `canAccessSpaceByDepartment` — which spaces a non-admin may see
  * for tasks / export (manager, team_lead, employee scoped by department).
  */
+function departmentMatch(userNorm: string, targetNorm: string): boolean {
+  if (!userNorm || !targetNorm) return false;
+  return userNorm === targetNorm || userNorm.includes(targetNorm) || targetNorm.includes(userNorm);
+}
+
 export function canAccessSpaceForRole(
   role: AppRole,
   userDepartment: string | null | undefined,
   workspace: Pick<Workspace, 'department'> | null | undefined,
   space: Pick<Space, 'department' | 'name'>
 ): boolean {
-  if (role === 'admin') return true;
+  if (role === 'admin' || role === 'super_admin') return true;
   const userNorm = normalizeDepartment(userDepartment);
   if (!userNorm) return false;
 
   const explicitSpaceNorm = normalizeDepartment(space.department ?? null);
-  if (explicitSpaceNorm) return explicitSpaceNorm === userNorm;
-
-  const workspaceNorm = normalizeDepartment(workspace?.department ?? null);
-  if (workspaceNorm && workspaceNorm !== userNorm) return false;
+  if (explicitSpaceNorm && departmentMatch(userNorm, explicitSpaceNorm)) return true;
 
   const spaceNameNorm = normalizeDepartment(space.name);
-  if (!spaceNameNorm) return false;
-  return spaceNameNorm.includes(userNorm) || userNorm.includes(spaceNameNorm);
+  if (spaceNameNorm && departmentMatch(userNorm, spaceNameNorm)) return true;
+
+  const workspaceNorm = normalizeDepartment(workspace?.department ?? null);
+  if (workspaceNorm) return departmentMatch(userNorm, workspaceNorm);
+
+  return false;
 }
 
 /** Admin: full workspace export. Manager / TL: only spaces allowed by department rules. */
@@ -42,6 +48,6 @@ export function filterSpacesForExport(
   spaces: Space[]
 ): Space[] {
   if (!workspace) return [];
-  if (role === 'admin') return spaces;
+  if (role === 'admin' || role === 'super_admin') return spaces;
   return spaces.filter((s) => canAccessSpaceForRole(role, userDepartment, workspace, s));
 }

@@ -1,4 +1,6 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000/api';
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ||
+  (import.meta.env.DEV ? 'http://localhost:4000/api' : '/api');
 
 export class ApiError extends Error {
   status: number;
@@ -42,6 +44,11 @@ export const api = {
       request('/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) }),
     resetPassword: (password: string) =>
       request('/auth/reset-password', { method: 'POST', body: JSON.stringify({ password }) }),
+    completePasswordReset: (payload: { uid: string; token: string; password: string }) =>
+      request('/auth/complete-password-reset', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
   },
   app: {
     bootstrap: () => request('/app/bootstrap'),
@@ -142,6 +149,12 @@ export const api = {
     ) => request(`/workspaces/${workspaceId}/members/create-privileged`, { method: 'POST', body: JSON.stringify(payload) }),
     updateMemberRole: (workspaceId: string, memberId: string, role: 'employee' | 'team_lead' | 'manager' | 'admin' | 'super_admin') =>
       request(`/workspaces/${workspaceId}/members/${memberId}/role`, { method: 'PATCH', body: JSON.stringify({ role }) }),
+    removeMember: (workspaceId: string, memberId: string) =>
+      request(`/workspaces/${workspaceId}/members/${memberId}`, { method: 'DELETE' }),
+    deleteSuperAdmin: (workspaceId: string, memberId: string) =>
+      request(`/workspaces/${workspaceId}/members/${memberId}/super-admin`, { method: 'DELETE' }),
+    recoverSuperAdmin: (workspaceId: string, memberId: string) =>
+      request(`/workspaces/${workspaceId}/members/${memberId}/super-admin/recover`, { method: 'POST' }),
     getOverdueSettings: (workspaceId: string) =>
       request(`/workspaces/${workspaceId}/settings/overdue`),
     updateOverdueSettings: (

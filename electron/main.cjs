@@ -10,7 +10,7 @@
  *      In prod mode: load the built dist/index.html.
  *   4. Tear the backend down cleanly on quit.
  */
-const { app, BrowserWindow, shell, Menu, dialog } = require('electron');
+const { app, BrowserWindow, shell, Menu, dialog, ipcMain, Notification } = require('electron');
 const path = require('node:path');
 const net = require('node:net');
 const { spawn } = require('node:child_process');
@@ -393,6 +393,19 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+ipcMain.handle('desktop:notify', async (_event, payload) => {
+  try {
+    if (!Notification.isSupported()) return false;
+    const title = String(payload?.title || 'DigitechIO').trim() || 'DigitechIO';
+    const body = String(payload?.body || '').trim();
+    if (!body) return false;
+    new Notification({ title, body }).show();
+    return true;
+  } catch {
+    return false;
+  }
 });
 
 app.on('before-quit', stopBackend);

@@ -3,14 +3,17 @@ import express from 'express';
 import http from 'node:http';
 import cors from 'cors';
 import session from 'express-session';
+import MongoStore from 'connect-mongo';
 import path from 'node:path';
 import fs from 'node:fs';
+import dns from 'node:dns';
 import { fileURLToPath } from 'node:url';
 import { connectMongo } from './db.js';
 import { buildRoutes } from './routes.js';
 import { startReminderScheduler } from './reminderScheduler.js';
 import { startOverdueScheduler } from './overdueScheduler.js';
 import { createRealtime } from './realtime.js';
+import { startNavigationWatcher } from './navigationWatcher.js';
 
 dotenv.config({ path: '../.env' });
 dotenv.config();
@@ -23,6 +26,15 @@ const PORT = Number(process.env.PORT || 4000);
 const ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:8080';
 const ALLOWED_ORIGINS = new Set([ORIGIN, 'http://localhost:8080', 'http://localhost:8081']);
 const LOCALHOST_ORIGIN_REGEX = /^http:\/\/localhost:\d+$/;
+
+try {
+  dns.setServers(['1.1.1.1', '8.8.8.8', '1.0.0.1', '8.8.4.4']);
+  if (typeof dns.setDefaultResultOrder === 'function') {
+    dns.setDefaultResultOrder('ipv4first');
+  }
+} catch {
+  // best-effort DNS fallback for packaged desktop builds
+}
 
 app.use(
   cors({
@@ -39,16 +51,24 @@ app.use(express.json({ limit: '10mb' }));
 
 // Extracted so both the Express request pipeline AND the Socket.IO handshake
 // can share exactly the same session store/cookie.
+const sessionMaxAgeMs =
+  Number(process.env.SESSION_MAX_AGE_DAYS || 365) * 24 * 60 * 60 * 1000;
 const sessionMiddleware = session({
   name: 'collab.sid',
   secret: process.env.SESSION_SECRET || 'dev-secret-change-me',
   resave: false,
   saveUninitialized: false,
+  rolling: true,
+  store: MongoStore.create({
+    mongoUrl: process.env.MONGODB_URI,
+    collectionName: 'sessions',
+    ttl: Math.floor(sessionMaxAgeMs / 1000),
+  }),
   cookie: {
     httpOnly: true,
     sameSite: 'lax',
     secure: false,
-    maxAge: 1000 * 60 * 60 * 24 * 7,
+    maxAge: sessionMaxAgeMs,
   },
 });
 app.use(sessionMiddleware);
@@ -92,6 +112,7 @@ connectMongo()
     });
     startReminderScheduler({ realtime });
     startOverdueScheduler({ realtime });
+    startNavigationWatcher({ realtime });
   })
   .catch((error) => {
     console.error('Failed to start server', error);

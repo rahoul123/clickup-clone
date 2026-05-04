@@ -215,6 +215,8 @@ interface AppSidebarProps {
   canManageStructure: boolean;
   /** Admin / Manager / Team Lead: create & delete lists (folders) in sidebar. */
   canManageLists: boolean;
+  /** Admin / Super Admin: destructive list operations + recover archived lists. */
+  canDeleteLists: boolean;
   canDeleteSpaces: boolean;
   notificationCount?: number;
   onLogout: () => Promise<void> | void;
@@ -259,6 +261,7 @@ export function AppSidebar({
   canCreateSpaces,
   canManageStructure,
   canManageLists,
+  canDeleteLists,
   canDeleteSpaces,
   notificationCount = 0,
   onLogout,
@@ -612,6 +615,8 @@ export function AppSidebar({
     .map((child) => child.name.trim())
     .filter(Boolean)
     .filter((name, idx, arr) => arr.findIndex((x) => x.toLowerCase() === name.toLowerCase()) === idx);
+  const inviteEmailTrimmed = inviteEmail.trim();
+  const isInviteEmailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(inviteEmailTrimmed);
 
   useEffect(() => {
     setExpandedItems(new Set(workspaceSections.flatMap((s) => s.spaces.map((sp) => sp.id))));
@@ -652,8 +657,8 @@ export function AppSidebar({
     const canEditAppearance = canManageLists || isOwnList;
     const canDuplicate = Boolean(onDuplicateList) && canManageLists;
     const canMove = Boolean(onReorderLists) && canManageLists && (item.listSiblingIds?.length ?? 0) > 1;
-    const canArchive = Boolean(onArchiveList) && canManageThisList;
-    const canDelete = canManageLists;
+    const canArchive = Boolean(onArchiveList) && canDeleteLists;
+    const canDelete = canDeleteLists;
     const siblings = item.listSiblingIds ?? [];
     const myIndex = siblings.indexOf(item.id);
     const canMoveUp = canMove && myIndex > 0;
@@ -1030,7 +1035,7 @@ export function AppSidebar({
                     >
                       <LinkIcon className="h-3.5 w-3.5 mr-2" /> Copy link
                     </DropdownMenuItem>
-                    {onFetchArchivedLists && canManageLists && (
+                    {onFetchArchivedLists && canDeleteLists && (
                       <>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem onSelect={() => openArchivedModal(item.id, item.name)}>
@@ -1315,13 +1320,14 @@ export function AppSidebar({
             <button
               type="button"
               onClick={() => {
-                const email = inviteEmail.trim();
+                const email = inviteEmailTrimmed;
                 const department = inviteDepartment.trim();
-                if (!email || !department) return;
+                if (!email || !department || !isInviteEmailValid) return;
                 onInvite(email, inviteRole, department);
                 setShowInviteModal(false);
               }}
-              className="h-9 px-4 rounded-md bg-primary text-primary-foreground text-sm font-medium"
+              disabled={!isInviteEmailValid || !inviteDepartment.trim()}
+              className="h-9 px-4 rounded-md bg-primary text-primary-foreground text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
             >
               Send Invite
             </button>

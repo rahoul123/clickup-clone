@@ -126,7 +126,7 @@
       {
         "provider": "github",
         "owner": "rahoul123",
-        "repo": "clickup",
+        "repo": "clickup-clone",
         "releaseType": "release"
       }
     ],

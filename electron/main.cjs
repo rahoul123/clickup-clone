@@ -9,6 +9,13 @@
  *   3. In dev mode: point the window at the Vite dev server (HMR works).
  *      In prod mode: load the built dist/index.html.
  *   4. Tear the backend down cleanly on quit.
+ *
+ * ── VPS UPDATE ──────────────────────────────────────────────────────────────
+ *   CHANGED: SHOULD_SPAWN_BACKEND = false
+ *   CHANGED: Window always loads VPS_FRONTEND_URL instead of localhost
+ *   CHANGED: Local backend health-check (waitForBackend) skipped
+ *   All other functionality (auto-updater, notifications, menu) preserved.
+ * ────────────────────────────────────────────────────────────────────────────
  */
 const { app, BrowserWindow, shell, Menu, dialog, ipcMain, Notification } = require('electron');
 const path = require('node:path');
@@ -21,6 +28,11 @@ const http = require('node:http');
 // and then swaps the app on quit. It pairs with electron-builder's GitHub
 // provider (see `build.publish` in package.json).
 const { autoUpdater } = require('electron-updater');
+
+// ─── VPS Configuration ──────────────────────────────────────────────────────
+// Update this URL if your VPS IP or Coolify domain changes
+const VPS_FRONTEND_URL = 'http://omvf508mjkfa4kmnz8ukublz.187.127.116.26.sslip.io';
+// ────────────────────────────────────────────────────────────────────────────
 
 let logStream = null;
 function getLogStream() {
@@ -41,11 +53,12 @@ function logLine(msg) {
 }
 
 const isDev = !app.isPackaged;
-const DEV_URL = process.env.ELECTRON_DEV_URL || 'http://localhost:8080';
-// In dev we assume the backend is already on :4000 (run by `npm run dev:full`
-// or the `electron:dev` script). In packaged mode we auto-pick a free port
-// so the app doesn't fail on machines where :4000 is already taken.
-const SHOULD_SPAWN_BACKEND = !isDev || process.env.ELECTRON_SPAWN_BACKEND === '1';
+const DEV_URL = process.env.ELECTRON_DEV_URL || VPS_FRONTEND_URL;
+
+// ─── CHANGED: false — VPS backend used, no local spawning needed ─────────────
+const SHOULD_SPAWN_BACKEND = false;
+// ─────────────────────────────────────────────────────────────────────────────
+
 const DEV_BACKEND_PORT = 4000;
 
 /** Resolved at runtime once the backend's port is known. */
@@ -314,23 +327,23 @@ async function createMainWindow() {
     mainWindow = null;
   });
 
-  if (isDev) {
-    await mainWindow.loadURL(DEV_URL);
-    mainWindow.webContents.openDevTools({ mode: 'detach' });
-  } else {
-    const url = `http://localhost:${backendPort}/`;
-    logLine(`[electron] loading ${url}`);
-    try {
-      await mainWindow.loadURL(url);
-    } catch (err) {
-      logLine(`[electron] loadURL failed: ${err.stack || err}`);
-      const logPath = path.join(app.getPath('userData'), 'backend.log');
-      dialog.showErrorBox(
-        'DigitechIO could not start',
-        `The local server did not respond.\n\nCheck the log:\n${logPath}`,
-      );
+  // ─── CHANGED: Always load VPS frontend URL ──────────────────────────────
+  const url = VPS_FRONTEND_URL;
+  logLine(`[electron] loading ${url}`);
+  try {
+    await mainWindow.loadURL(url);
+    if (isDev) {
+      mainWindow.webContents.openDevTools({ mode: 'detach' });
     }
+  } catch (err) {
+    logLine(`[electron] loadURL failed: ${err.stack || err}`);
+    const logPath = path.join(app.getPath('userData'), 'backend.log');
+    dialog.showErrorBox(
+      'DigitechIO could not connect',
+      `Could not reach the server at:\n${url}\n\nPlease check your internet connection.\n\nLog file:\n${logPath}`,
+    );
   }
+  // ───────────────────────────────────────────────────────────────────────
 }
 
 app.whenReady().then(async () => {
@@ -359,9 +372,8 @@ app.whenReady().then(async () => {
     ]),
   );
 
+  // ─── CHANGED: SHOULD_SPAWN_BACKEND = false so this block is skipped ────
   if (SHOULD_SPAWN_BACKEND) {
-    // User override: honour $DIGITECH_PORT or $PORT if the OS confirms it's
-    // actually free. Otherwise let the kernel hand us a random free port.
     const preferred = Number(process.env.DIGITECH_PORT || process.env.PORT) || 0;
     try {
       backendPort = await pickFreePort(preferred);
@@ -372,16 +384,19 @@ app.whenReady().then(async () => {
     console.log(`[electron] starting backend on :${backendPort}`);
     startBackend(backendPort);
   } else {
-    // Dev: the external backend is already on a known port.
-    backendPort = DEV_BACKEND_PORT;
+    // VPS mode: no local backend needed
+    logLine('[electron] VPS backend mode — local backend spawn skipped');
+    logLine(`[electron] VPS frontend: ${VPS_FRONTEND_URL}`);
   }
+  // ────────────────────────────────────────────────────────────────────────
 
-  const backendUp = await waitForBackend(backendPort);
-  if (!backendUp) {
-    console.warn(
-      `[electron] backend didn't respond on :${backendPort} within 30s — continuing anyway.`,
-    );
-  }
+  // ─── CHANGED: waitForBackend skipped — VPS is always running ────────────
+  // const backendUp = await waitForBackend(backendPort);
+  // if (!backendUp) {
+  //   console.warn(`[electron] backend didn't respond on :${backendPort} within 30s`);
+  // }
+  // ────────────────────────────────────────────────────────────────────────
+
   await createMainWindow();
 
   setupAutoUpdater();

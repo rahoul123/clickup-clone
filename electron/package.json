@@ -1,0 +1,44 @@
+{
+  "name": "collab-creek",
+  "version": "1.0.0",
+  "main": "main.cjs",
+  "author": "Rahoul Khatri",
+  "scripts": {
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com-collabcreek-app",
+    "productName": "Collab Creek",
+    "directories": {
+      "output": "../frontend/release"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "rahoul123",
+      "repo": "clickup-clone"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs"
+    ],
+    "extraResources": [
+     
+    
+      {
+        "from": "../.env",
+        "to": "."
+      }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.1.7"
+  }
+}

@@ -2543,8 +2543,18 @@ export function buildRoutes({ realtime } = {}) {
       return res.status(403).json({ message: 'Super admin cannot be removed from this action.' });
     }
 
+    const removedUser = await User.findById(memberId).select({ email: 1 }).lean();
+
     await WorkspaceMember.deleteOne({ workspaceId, userId: memberId });
     await UserRole.deleteOne({ workspaceId, userId: memberId });
+
+    const stillMemberElsewhere = await WorkspaceMember.exists({ userId: memberId });
+    if (!stillMemberElsewhere && removedUser?.email) {
+      const normalizedEmail = String(removedUser.email).toLowerCase().trim();
+      await User.deleteOne({ _id: memberId });
+      await WorkspaceInvite.deleteMany({ email: normalizedEmail });
+    }
+
     broadcastNavigationChange({ type: 'workspace:members:updated', workspace_id: workspaceId });
     return res.json({ ok: true });
   });

@@ -351,6 +351,10 @@ export function TaskDetailDialog({
   >({});
   // derived description string for save/compare logic
   const description = useMemo(() => serializeDescBlocks(descBlocks), [descBlocks]);
+  const [rightPanelWidth, setRightPanelWidth] = useState(420);
+  const isDraggingDivider = useRef(false);
+  const [commentBoxHeight, setCommentBoxHeight] = useState(150);
+  const isDraggingCommentBox = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const attachTaskFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1103,8 +1107,19 @@ export function TaskDetailDialog({
         </div>
 
         {activeTab === 'task' ? (
-          <div className="flex flex-1 overflow-hidden bg-white dark:bg-slate-900">
-          <div className="flex-1 overflow-y-auto bg-white dark:bg-slate-900 p-4">
+          <div
+            className="flex flex-1 overflow-hidden bg-white dark:bg-slate-900"
+            onMouseMove={(e) => {
+              if (!isDraggingDivider.current) return;
+              const container = e.currentTarget as HTMLElement;
+              const rect = container.getBoundingClientRect();
+              const newRightWidth = Math.max(280, Math.min(700, rect.right - e.clientX));
+              setRightPanelWidth(newRightWidth);
+            }}
+            onMouseUp={() => { isDraggingDivider.current = false; }}
+            onMouseLeave={() => { isDraggingDivider.current = false; }}
+          >
+          <div className="flex-1 overflow-y-auto bg-white dark:bg-slate-900 p-4" style={{ minWidth: 0 }}>
             <div className="max-w-full">
               <div className="flex items-center gap-2 mb-2">
                 <div className="w-5 h-5 rounded-full border-2 border-purple-300 flex items-center justify-center bg-purple-50 dark:bg-purple-950/40">
@@ -2036,7 +2051,31 @@ export function TaskDetailDialog({
             </div>
           </div>
 
-          <div className="w-[420px] border-l border-gray-200 dark:border-slate-700 bg-gradient-to-b from-white dark:from-slate-900 via-white dark:via-slate-900 to-gray-50 dark:to-slate-900/80 flex flex-col">
+          {/* Draggable divider */}
+          <div
+            className="w-1 flex-shrink-0 cursor-col-resize bg-gray-200 dark:bg-slate-700 hover:bg-purple-400 dark:hover:bg-purple-600 transition-colors group relative select-none"
+            onMouseDown={(e) => { e.preventDefault(); isDraggingDivider.current = true; }}
+            title="Drag to resize"
+          >
+            <div className="absolute inset-y-0 -left-1 -right-1" />
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col gap-[3px] opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+              <div className="w-[3px] h-[3px] rounded-full bg-purple-500" />
+              <div className="w-[3px] h-[3px] rounded-full bg-purple-500" />
+              <div className="w-[3px] h-[3px] rounded-full bg-purple-500" />
+            </div>
+          </div>
+          <div
+            style={{ width: rightPanelWidth, flexShrink: 0 }}
+            className="border-l border-gray-200 dark:border-slate-700 bg-gradient-to-b from-white dark:from-slate-900 via-white dark:via-slate-900 to-gray-50 dark:to-slate-900/80 flex flex-col overflow-hidden"
+            onMouseMove={(e) => {
+              if (!isDraggingCommentBox.current) return;
+              const rect = e.currentTarget.getBoundingClientRect();
+              const newH = Math.max(80, Math.min(520, rect.bottom - e.clientY));
+              setCommentBoxHeight(newH);
+            }}
+            onMouseUp={() => { isDraggingCommentBox.current = false; }}
+            onMouseLeave={() => { isDraggingCommentBox.current = false; }}
+          >
             <div className="px-5 py-4 border-b border-gray-100 dark:border-slate-800 flex items-center justify-between bg-white dark:bg-slate-900 backdrop-blur-sm sticky top-0 z-10">
               <div className="flex items-center gap-3">
                 <div className="bg-gradient-to-br from-purple-100 to-purple-50 dark:from-purple-900/40 dark:to-purple-950/30 p-2 rounded-lg">
@@ -2167,19 +2206,30 @@ export function TaskDetailDialog({
               )}
             </div>
 
-            <form className="border-t border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 pt-3 pb-4 shadow-lg" onSubmit={handleSubmit}>
-              <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 focus-within:border-purple-400 focus-within:ring-2 focus-within:ring-purple-100 dark:focus-within:ring-purple-500/20 transition-all">
-                <div className="relative">
+            {/* Drag handle between activity feed and comment box */}
+            <div
+              className="h-1.5 flex-shrink-0 cursor-row-resize bg-gray-100 dark:bg-slate-800 hover:bg-purple-300 dark:hover:bg-purple-700 transition-colors group relative select-none"
+              onMouseDown={(e) => { e.preventDefault(); isDraggingCommentBox.current = true; }}
+              title="Drag to resize comment box"
+            >
+              <div className="absolute inset-0 flex items-center justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                <div className="w-6 h-[2px] rounded-full bg-purple-400" />
+              </div>
+            </div>
+
+            <form
+              className="flex-shrink-0 bg-white dark:bg-slate-900 px-4 pt-3 pb-4 shadow-lg flex flex-col"
+              style={{ height: commentBoxHeight }}
+              onSubmit={handleSubmit}
+            >
+              <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 focus-within:border-purple-400 focus-within:ring-2 focus-within:ring-purple-100 dark:focus-within:ring-purple-500/20 transition-all flex flex-col flex-1 min-h-0">
+                <div className="relative flex-1 min-h-0 overflow-hidden">
                   <textarea
                     ref={textareaRef}
                     value={commentText}
                     onChange={(e) => {
                       const el = e.currentTarget;
                       handleCommentInput(el.value, el.selectionStart ?? el.value.length);
-                      // Only grow — never force-shrink so manual resize is preserved
-                      if (el.scrollHeight > el.offsetHeight) {
-                        el.style.height = `${Math.min(400, el.scrollHeight)}px`;
-                      }
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
@@ -2212,9 +2262,8 @@ export function TaskDetailDialog({
                     onMouseUp={handleTextareaSelect}
                     onKeyUp={handleTextareaSelect}
                     onSelect={handleTextareaSelect}
-                    className="w-full px-4 pt-3 pb-2 text-sm bg-transparent border-0 outline-none resize-y placeholder-gray-400 dark:placeholder-slate-500 text-gray-800 dark:text-slate-200 min-h-[80px] max-h-[600px]"
+                    className="w-full h-full px-4 pt-3 pb-2 text-sm bg-transparent border-0 outline-none resize-none placeholder-gray-400 dark:placeholder-slate-500 text-gray-800 dark:text-slate-200"
                     placeholder="Write a comment..."
-                    rows={3}
                   />
                   {/* Floating format toolbar when text is selected */}
                   {selToolbarPos && (

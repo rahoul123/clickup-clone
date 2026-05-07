@@ -12,6 +12,99 @@ import {
 } from 'lucide-react';
 import type { Task, TaskPriority, CommentAttachment, ChecklistItem } from '@/types';
 
+/** Render inline markdown: **bold**, *italic*, __underline__, ~~strike~~, `code`, @mention */
+function renderInlineMarkdown(text: string): React.ReactNode[] {
+  const pattern = /(\*\*(.+?)\*\*|\*(.+?)\*|__(.+?)__|~~(.+?)~~|`(.+?)`|(@\w[\w.-]*))/g;
+  const nodes: React.ReactNode[] = [];
+  let last = 0; let m: RegExpExecArray | null; let key = 0;
+  while ((m = pattern.exec(text)) !== null) {
+    if (m.index > last) nodes.push(text.slice(last, m.index));
+    if (m[2]) nodes.push(<strong key={key++}>{m[2]}</strong>);
+    else if (m[3]) nodes.push(<em key={key++}>{m[3]}</em>);
+    else if (m[4]) nodes.push(<u key={key++}>{m[4]}</u>);
+    else if (m[5]) nodes.push(<s key={key++}>{m[5]}</s>);
+    else if (m[6]) nodes.push(<code key={key++} className="bg-gray-100 dark:bg-slate-800 rounded px-1 text-xs font-mono">{m[6]}</code>);
+    else if (m[7]) nodes.push(<span key={key++} className="text-purple-600 dark:text-purple-400 font-medium">{m[7]}</span>);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes.length ? nodes : [text];
+}
+
+/** Render comment/description content with markdown table + inline formatting support. */
+function CommentContent({ content }: { content: string }) {
+  if (!content?.trim()) return <p className="text-sm text-gray-400 dark:text-slate-500 italic">{'📎 Image attached'}</p>;
+  const lines = content.split(/\r?\n/);
+  const result: React.ReactNode[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i].trimEnd();
+    if (line.trimStart().startsWith('|')) {
+      const tableLines: string[] = [];
+      while (i < lines.length && lines[i].trimEnd().trimStart().startsWith('|')) {
+        tableLines.push(lines[i].trimEnd());
+        i++;
+      }
+      const isSep = (l: string) => /^\s*\|[\s\-:|]+\|\s*$/.test(l);
+      const dataLines = tableLines.filter((l) => !isSep(l));
+      const rows = dataLines.map((l) =>
+        l.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim()),
+      );
+      if (rows.length > 0) {
+        const maxCols = Math.max(...rows.map((r) => r.length));
+        result.push(
+          <div key={`tbl-${i}`} className="overflow-x-auto my-2 rounded-lg border border-gray-200 dark:border-slate-700">
+            <table className="min-w-full text-xs border-collapse">
+              <thead>
+                <tr className="bg-gray-50 dark:bg-slate-800/60">
+                  {Array.from({ length: maxCols }, (_, ci) => (
+                    <th key={ci} className="border-b border-r last:border-r-0 border-gray-200 dark:border-slate-700 px-3 py-2 text-left font-semibold text-gray-700 dark:text-slate-200 whitespace-nowrap">
+                      {renderInlineMarkdown(rows[0][ci] ?? '')}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.slice(1).map((row, ri) => (
+                  <tr key={ri} className={ri % 2 === 1 ? 'bg-gray-50/60 dark:bg-slate-800/30' : ''}>
+                    {Array.from({ length: maxCols }, (_, ci) => (
+                      <td key={ci} className="border-b border-r last:border-r-0 border-gray-100 dark:border-slate-800 px-3 py-1.5 text-gray-700 dark:text-slate-300">
+                        {renderInlineMarkdown(row[ci] ?? '')}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>,
+        );
+      }
+    } else {
+      const trimmed = line.trim();
+      result.push(
+        trimmed
+          ? <p key={`ln-${i}`} className="text-sm text-gray-700 dark:text-slate-300 leading-relaxed break-words">{renderInlineMarkdown(line)}</p>
+          : <div key={`br-${i}`} className="h-2" />,
+      );
+      i++;
+    }
+  }
+  return <div className="space-y-0.5">{result}</div>;
+}
+
+// ── Multiple description blocks ─────────────────────────────────────────────
+type DescBlock = { id: string; text: string };
+const BLOCK_SEP = '\n[[[DESC_BREAK]]]\n';
+let _blockCounter = 0;
+const newBlockId = () => `blk-${++_blockCounter}`;
+const parseDescBlocks = (raw: string): DescBlock[] => {
+  const parts = raw.split(BLOCK_SEP);
+  return parts.map((text) => ({ id: newBlockId(), text }));
+};
+const serializeDescBlocks = (blocks: DescBlock[]): string =>
+  blocks.length === 1 ? blocks[0].text : blocks.map((b) => b.text).join(BLOCK_SEP);
+// ─────────────────────────────────────────────────────────────────────────────
+
 interface TaskCommentView {
   id: string;
   task_id: string;
@@ -161,7 +254,9 @@ export function TaskDetailDialog({
   const [sending, setSending] = useState(false);
   const [saving, setSaving] = useState(false);
   const [title, setTitle] = useState(task.title);
-  const [description, setDescription] = useState(task.description || '');
+  const [descBlocks, setDescBlocks] = useState<DescBlock[]>(() => parseDescBlocks(task.description || ''));
+  const [blockEditing, setBlockEditing] = useState<string | null>(null);
+  const blockTextareaRefs = useRef<Map<string, HTMLTextAreaElement>>(new Map());
   const [status, setStatus] = useState<string>(task.status);
   const [priority, setPriority] = useState<TaskPriority>(task.priority);
   const [startDate, setStartDate] = useState(task.start_date ? task.start_date.slice(0, 10) : '');
@@ -254,12 +349,12 @@ export function TaskDetailDialog({
   const [relatedMeta, setRelatedMeta] = useState<
     Record<string, { title: string; status: string; list_name?: string | null; space_name?: string | null }>
   >({});
-  const [descriptionFocused, setDescriptionFocused] = useState(false);
+  // derived description string for save/compare logic
+  const description = useMemo(() => serializeDescBlocks(descBlocks), [descBlocks]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const attachTaskFileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const descriptionTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const assigneeDropdownRef = useRef<HTMLDivElement | null>(null);
   const mentionPickerRef = useRef<HTMLDivElement | null>(null);
 
@@ -357,14 +452,16 @@ export function TaskDetailDialog({
   );
 
   useLayoutEffect(() => {
-    if (descriptionFocused && descriptionTextareaRef.current) {
-      const el = descriptionTextareaRef.current;
-      el.focus();
-      el.style.height = 'auto';
-      el.style.height = `${Math.max(120, el.scrollHeight)}px`;
-      el.setSelectionRange(el.value.length, el.value.length);
+    if (blockEditing) {
+      const el = blockTextareaRefs.current.get(blockEditing);
+      if (el) {
+        el.focus();
+        el.style.height = 'auto';
+        el.style.height = `${Math.max(120, el.scrollHeight)}px`;
+        el.setSelectionRange(el.value.length, el.value.length);
+      }
     }
-  }, [descriptionFocused]);
+  }, [blockEditing]);
 
   const scrollActivityToBottom = () => {
     const container = activityScrollRef.current;
@@ -402,7 +499,8 @@ export function TaskDetailDialog({
   useEffect(() => {
     skipAutoSaveRef.current = true;
     setTitle(task.title);
-    setDescription(task.description || '');
+    setDescBlocks(parseDescBlocks(task.description || ''));
+    setBlockEditing(null);
     setStatus(task.status);
     setPriority(task.priority);
     setStartDate(task.start_date ? task.start_date.slice(0, 10) : '');
@@ -840,23 +938,26 @@ export function TaskDetailDialog({
     return [header, separator, ...body].join('\n');
   };
 
-  const handleDescriptionPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+  const handleDescriptionPaste = (blockId: string, e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const text = e.clipboardData.getData('text/plain');
     const md = tsvToMarkdown(text);
     if (!md) return;
     e.preventDefault();
-    const el = descriptionTextareaRef.current;
-    if (!el) { setDescription((prev) => prev + '\n' + md + '\n'); return; }
-    const start = el.selectionStart;
-    const end = el.selectionEnd;
-    const val = el.value;
-    const prefix = val.slice(0, start);
-    const newVal = prefix + (prefix.length && !prefix.endsWith('\n') ? '\n' : '') + md + '\n' + val.slice(end);
-    setDescription(newVal);
-    window.requestAnimationFrame(() => {
-      el.style.height = 'auto';
-      el.style.height = `${Math.max(120, el.scrollHeight)}px`;
-    });
+    const el = blockTextareaRefs.current.get(blockId);
+    const updateText = (prev: string) => {
+      if (!el) return prev + '\n' + md + '\n';
+      const start = el.selectionStart;
+      const end = el.selectionEnd;
+      const prefix = prev.slice(0, start);
+      return prefix + (prefix.length && !prefix.endsWith('\n') ? '\n' : '') + md + '\n' + prev.slice(end);
+    };
+    setDescBlocks((blocks) => blocks.map((b) => b.id === blockId ? { ...b, text: updateText(b.text) } : b));
+    if (el) {
+      window.requestAnimationFrame(() => {
+        el.style.height = 'auto';
+        el.style.height = `${Math.max(120, el.scrollHeight)}px`;
+      });
+    }
   };
 
   const commonEmojis = ['😀', '😂', '❤️', '👍', '🎉', '🔥', '✨', '👌', '😍', '🙌'];
@@ -1167,34 +1268,71 @@ export function TaskDetailDialog({
                 </PropertyItem>
               </div>
 
-              <div className="mb-3">
-                {descriptionFocused || !description.trim() ? (
-                  <textarea
-                    ref={descriptionTextareaRef}
-                    value={description}
-                    onChange={(e) => {
-                      setDescription(e.target.value);
-                      const el = e.currentTarget;
-                      el.style.height = 'auto';
-                      el.style.height = `${Math.max(120, el.scrollHeight)}px`;
-                    }}
-                    onFocus={() => setDescriptionFocused(true)}
-                    onBlur={() => setDescriptionFocused(false)}
-                    onPaste={handleDescriptionPaste}
-                    placeholder="Add description, or write with AI"
-                    rows={5}
-                    autoFocus={descriptionFocused}
-                    className="w-full min-h-[120px] border-0 border-b border-gray-100 dark:border-slate-800 p-2 text-sm text-gray-700 dark:text-slate-300 focus:outline-none focus:border-purple-300 resize-none bg-transparent placeholder-gray-400 dark:placeholder-slate-500 transition-all leading-relaxed"
-                  />
-                ) : (
-                  <div
-                    onClick={() => setDescriptionFocused(true)}
-                    className="min-h-[80px] cursor-text p-2 border-b border-gray-100 dark:border-slate-800 hover:border-purple-200 dark:hover:border-purple-800 transition-colors"
-                    title="Click to edit"
-                  >
-                    <CommentContent content={description} />
+              <div className="mb-3 space-y-2">
+                {descBlocks.map((block, idx) => (
+                  <div key={block.id} className="relative group/block">
+                    {blockEditing === block.id ? (
+                      <textarea
+                        ref={(el) => {
+                          if (el) blockTextareaRefs.current.set(block.id, el);
+                          else blockTextareaRefs.current.delete(block.id);
+                        }}
+                        value={block.text}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setDescBlocks((prev) => prev.map((b) => b.id === block.id ? { ...b, text: val } : b));
+                          const el = e.currentTarget;
+                          el.style.height = 'auto';
+                          el.style.height = `${Math.max(120, el.scrollHeight)}px`;
+                        }}
+                        onPaste={(e) => handleDescriptionPaste(block.id, e)}
+                        onBlur={() => setBlockEditing(null)}
+                        placeholder="Add description, or write with AI"
+                        rows={5}
+                        className="w-full min-h-[120px] border border-purple-300 dark:border-purple-700 rounded-lg p-2 text-sm text-gray-700 dark:text-slate-300 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-100 resize-y bg-transparent placeholder-gray-400 dark:placeholder-slate-500 transition-all leading-relaxed"
+                      />
+                    ) : (
+                      <div
+                        onClick={() => setBlockEditing(block.id)}
+                        className="group/desc min-h-[80px] rounded-lg border border-gray-100 dark:border-slate-800 hover:border-purple-300 dark:hover:border-purple-700 p-2 cursor-text transition-colors relative"
+                        title="Click to edit"
+                      >
+                        {block.text.trim() ? (
+                          <CommentContent content={block.text} />
+                        ) : (
+                          <p className="text-sm text-gray-400 dark:text-slate-500 italic">Add description, or write with AI</p>
+                        )}
+                        <span className="absolute top-1.5 right-2 opacity-0 group-hover/desc:opacity-100 transition-opacity text-[10px] text-purple-500 dark:text-purple-400 font-medium select-none flex items-center gap-1 bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded shadow-sm">
+                          <Pencil size={10} /> Click to edit
+                        </span>
+                      </div>
+                    )}
+                    {descBlocks.length > 1 && blockEditing !== block.id && (
+                      <button
+                        type="button"
+                        title="Remove this description block"
+                        onClick={() => setDescBlocks((prev) => prev.filter((b) => b.id !== block.id))}
+                        className="absolute -top-1.5 -right-1.5 hidden group-hover/block:flex h-4 w-4 items-center justify-center rounded-full bg-gray-200 dark:bg-slate-700 hover:bg-red-100 dark:hover:bg-red-900/40 hover:text-red-500 text-gray-500 dark:text-slate-400 text-[10px] leading-none z-10"
+                      >
+                        <X size={8} />
+                      </button>
+                    )}
+                    {idx < descBlocks.length - 1 && (
+                      <div className="mt-2 border-t border-dashed border-gray-200 dark:border-slate-700" />
+                    )}
                   </div>
-                )}
+                ))}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const newId = newBlockId();
+                    setDescBlocks((prev) => [...prev, { id: newId, text: '' }]);
+                    setBlockEditing(newId);
+                  }}
+                  className="flex items-center gap-1.5 text-xs text-gray-400 dark:text-slate-500 hover:text-purple-600 dark:hover:text-purple-400 transition-colors py-1"
+                >
+                  <Plus size={12} /> Add description
+                </button>
               </div>
 
               <div className="border-t border-gray-100 dark:border-slate-800 pt-3 mt-2">
@@ -2038,8 +2176,10 @@ export function TaskDetailDialog({
                     onChange={(e) => {
                       const el = e.currentTarget;
                       handleCommentInput(el.value, el.selectionStart ?? el.value.length);
-                      el.style.height = 'auto';
-                      el.style.height = `${Math.min(200, Math.max(80, el.scrollHeight))}px`;
+                      // Only grow — never force-shrink so manual resize is preserved
+                      if (el.scrollHeight > el.offsetHeight) {
+                        el.style.height = `${Math.min(400, el.scrollHeight)}px`;
+                      }
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
@@ -2072,7 +2212,7 @@ export function TaskDetailDialog({
                     onMouseUp={handleTextareaSelect}
                     onKeyUp={handleTextareaSelect}
                     onSelect={handleTextareaSelect}
-                    className="w-full px-4 pt-3 pb-2 text-sm bg-transparent border-0 outline-none resize-none placeholder-gray-400 dark:placeholder-slate-500 text-gray-800 dark:text-slate-200 min-h-[80px]"
+                    className="w-full px-4 pt-3 pb-2 text-sm bg-transparent border-0 outline-none resize-y placeholder-gray-400 dark:placeholder-slate-500 text-gray-800 dark:text-slate-200 min-h-[80px] max-h-[600px]"
                     placeholder="Write a comment..."
                     rows={3}
                   />
@@ -2838,89 +2978,6 @@ const PriorityValue = ({ value }: { value: string }) => {
     </span>
   );
 };
-
-/** Render inline markdown: **bold**, *italic*, __underline__, ~~strike~~, `code`, @mention */
-function renderInlineMarkdown(text: string): React.ReactNode[] {
-  const pattern = /(\*\*(.+?)\*\*|\*(.+?)\*|__(.+?)__|~~(.+?)~~|`(.+?)`|(@\w[\w.-]*))/g;
-  const nodes: React.ReactNode[] = [];
-  let last = 0;
-  let m: RegExpExecArray | null;
-  let key = 0;
-  while ((m = pattern.exec(text)) !== null) {
-    if (m.index > last) nodes.push(text.slice(last, m.index));
-    if (m[2]) nodes.push(<strong key={key++}>{m[2]}</strong>);
-    else if (m[3]) nodes.push(<em key={key++}>{m[3]}</em>);
-    else if (m[4]) nodes.push(<u key={key++}>{m[4]}</u>);
-    else if (m[5]) nodes.push(<s key={key++}>{m[5]}</s>);
-    else if (m[6]) nodes.push(<code key={key++} className="bg-gray-100 dark:bg-slate-800 rounded px-1 text-xs font-mono">{m[6]}</code>);
-    else if (m[7]) nodes.push(<span key={key++} className="text-purple-600 dark:text-purple-400 font-medium">{m[7]}</span>);
-    last = m.index + m[0].length;
-  }
-  if (last < text.length) nodes.push(text.slice(last));
-  return nodes;
-}
-
-/** Render comment content: supports markdown tables, inline formatting, and plain text. */
-function CommentContent({ content }: { content: string }) {
-  if (!content) return <p className="text-sm text-gray-700 dark:text-slate-300 leading-relaxed">{'📎 Image attached'}</p>;
-
-  const lines = content.split('\n');
-  const result: React.ReactNode[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    // Detect start of a markdown table block
-    if (line.trim().startsWith('|')) {
-      const tableLines: string[] = [];
-      while (i < lines.length && lines[i].trim().startsWith('|')) {
-        tableLines.push(lines[i]);
-        i++;
-      }
-      // Parse rows, skip separator rows (---|---|---)
-      const rows = tableLines
-        .filter((l) => !/^\s*\|[\s\-:|]+\|\s*$/.test(l))
-        .map((l) =>
-          l.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim()),
-        );
-      if (rows.length > 0) {
-        result.push(
-          <div key={i} className="overflow-x-auto my-2">
-            <table className="min-w-full text-xs border-collapse border border-gray-200 dark:border-slate-700 rounded-lg overflow-hidden">
-              <thead>
-                <tr className="bg-gray-50 dark:bg-slate-800/60">
-                  {rows[0].map((cell, ci) => (
-                    <th key={ci} className="border border-gray-200 dark:border-slate-700 px-3 py-1.5 text-left font-semibold text-gray-700 dark:text-slate-200">
-                      {renderInlineMarkdown(cell)}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.slice(1).map((row, ri) => (
-                  <tr key={ri} className="even:bg-gray-50/50 dark:even:bg-slate-800/30">
-                    {row.map((cell, ci) => (
-                      <td key={ci} className="border border-gray-200 dark:border-slate-700 px-3 py-1.5 text-gray-700 dark:text-slate-300">
-                        {renderInlineMarkdown(cell)}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>,
-        );
-      }
-    } else {
-      result.push(
-        <p key={i} className="text-sm text-gray-700 dark:text-slate-300 leading-relaxed break-words">
-          {renderInlineMarkdown(line) || <br />}
-        </p>,
-      );
-      i++;
-    }
-  }
-  return <div>{result}</div>;
-}
 
 const ActivityText = ({ content }: { content: string }) => {
   const match = content.match(/^(.*changed priority from )(.+?)( to )(.+)$/i);

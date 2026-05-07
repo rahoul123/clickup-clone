@@ -1014,6 +1014,7 @@ export function KanbanBoard({
                     inlineComposeStatus === columnKey ? (
                       <InlineTaskComposer
                         memberOptions={memberOptions}
+                        currentUserId={user?.id}
                         onSave={(payload) => handleInlineCreate(columnKey, payload)}
                         onCancel={() => setInlineComposeStatus(null)}
                       />

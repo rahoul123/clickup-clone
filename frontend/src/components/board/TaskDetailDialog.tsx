@@ -7,7 +7,8 @@ import {
   Tag, ChevronRight, Plus, ListChecks, Link, Paperclip,
   Smile, AtSign, Video, Mic, Image as ImageIcon, Send, BrainCircuit, Check, Search,
   Copy, Lock, Globe, Upload, FileText, Download, Play, Save, Trash2, ExternalLink, ChevronDown,
-  UserPlus, CheckSquare, Calendar as CalendarIcon, Flag as FlagIcon, Box, MoreVertical, Bookmark, Pencil
+  UserPlus, CheckSquare, Calendar as CalendarIcon, Flag as FlagIcon, Box, MoreVertical, Bookmark, Pencil,
+  Bell, Grid3x3, Bold, Italic, Underline, Strikethrough, ZoomIn,
 } from 'lucide-react';
 import type { Task, TaskPriority, CommentAttachment, ChecklistItem } from '@/types';
 
@@ -203,6 +204,14 @@ export function TaskDetailDialog({
   const [activityExpanded, setActivityExpanded] = useState(false);
   const activityScrollRef = useRef<HTMLDivElement | null>(null);
 
+  // --- Lightbox, floating format toolbar, notify bell ---
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
+  const [selToolbarPos, setSelToolbarPos] = useState<{ x: number; y: number } | null>(null);
+  const [notifyBellOpen, setNotifyBellOpen] = useState(false);
+  const [notifyBellSearch, setNotifyBellSearch] = useState('');
+  const [notifyUserIds, setNotifyUserIds] = useState<string[]>([]);
+  const notifyBellRef = useRef<HTMLDivElement | null>(null);
+
   // --- Subtasks / Checklist / Relate items ---
   const [subtasksOpen, setSubtasksOpen] = useState(true);
   const [subtaskComposerOpen, setSubtaskComposerOpen] = useState(false);
@@ -245,18 +254,71 @@ export function TaskDetailDialog({
   const [relatedMeta, setRelatedMeta] = useState<
     Record<string, { title: string; status: string; list_name?: string | null; space_name?: string | null }>
   >({});
+  const [descriptionFocused, setDescriptionFocused] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const attachTaskFileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const descriptionTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const assigneeDropdownRef = useRef<HTMLDivElement | null>(null);
   const mentionPickerRef = useRef<HTMLDivElement | null>(null);
 
   const filteredMembers = useMemo(() => {
     const q = assigneeSearch.trim().toLowerCase();
-    if (!q) return memberOptions;
-    return memberOptions.filter((m) => m.label.toLowerCase().includes(q));
-  }, [assigneeSearch, memberOptions]);
+    const base = q ? memberOptions.filter((m) => m.label.toLowerCase().includes(q)) : memberOptions;
+    return [...base].sort((a, b) => {
+      if (a.id === currentUserId) return -1;
+      if (b.id === currentUserId) return 1;
+      return 0;
+    });
+  }, [assigneeSearch, memberOptions, currentUserId]);
+
+  const filteredNotifyMembers = useMemo(() => {
+    const q = notifyBellSearch.trim().toLowerCase();
+    return q ? memberOptions.filter((m) => m.label.toLowerCase().includes(q)) : memberOptions;
+  }, [notifyBellSearch, memberOptions]);
+
+  /** Wrap selected text in comment textarea with markdown syntax. */
+  const applyCommentFormat = (syntax: 'bold' | 'italic' | 'underline' | 'strike' | 'table') => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+    const val = el.value;
+    let newVal: string;
+    let cursor: number;
+    if (syntax === 'table') {
+      const template = '\n| Col 1 | Col 2 | Col 3 |\n| --- | --- | --- |\n| Cell | Cell | Cell |\n';
+      newVal = val.slice(0, end) + template + val.slice(end);
+      cursor = end + template.length;
+    } else {
+      const selected = val.slice(start, end);
+      const wrap: Record<string, string> = { bold: '**', italic: '*', underline: '__', strike: '~~' };
+      const m = wrap[syntax];
+      newVal = val.slice(0, start) + m + selected + m + val.slice(end);
+      cursor = start + m.length + selected.length + m.length;
+    }
+    setCommentText(newVal);
+    setSelToolbarPos(null);
+    window.requestAnimationFrame(() => {
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(cursor, cursor);
+      el.style.height = 'auto';
+      el.style.height = `${Math.min(200, Math.max(80, el.scrollHeight))}px`;
+    });
+  };
+
+  const handleTextareaSelect = () => {
+    const el = textareaRef.current;
+    if (!el) return;
+    if (el.selectionStart === el.selectionEnd) {
+      setSelToolbarPos(null);
+      return;
+    }
+    const rect = el.getBoundingClientRect();
+    setSelToolbarPos({ x: rect.left + rect.width / 2, y: rect.top - 4 });
+  };
 
   const statusSelectOptions = useMemo(() => {
     const base = statusOptions && statusOptions.length > 0 ? [...statusOptions] : [...DEFAULT_STATUS_OPTIONS];
@@ -293,6 +355,16 @@ export function TaskDetailDialog({
     () => comments.filter((item) => !item.is_activity),
     [comments]
   );
+
+  useLayoutEffect(() => {
+    if (descriptionFocused && descriptionTextareaRef.current) {
+      const el = descriptionTextareaRef.current;
+      el.focus();
+      el.style.height = 'auto';
+      el.style.height = `${Math.max(120, el.scrollHeight)}px`;
+      el.setSelectionRange(el.value.length, el.value.length);
+    }
+  }, [descriptionFocused]);
 
   const scrollActivityToBottom = () => {
     const container = activityScrollRef.current;
@@ -703,6 +775,31 @@ export function TaskDetailDialog({
     const items = e.clipboardData?.items;
     if (!items) return;
 
+    // Detect TSV (tab-separated) paste from Excel / Google Sheets
+    const textData = e.clipboardData.getData('text/plain');
+    const mdTable = tsvToMarkdown(textData);
+    if (mdTable) {
+      e.preventDefault();
+      const el = textareaRef.current;
+      if (el) {
+        const start = el.selectionStart;
+        const end = el.selectionEnd;
+        const val = el.value;
+        const prefix = val.slice(0, start);
+        const newVal = prefix + (prefix.length && !prefix.endsWith('\n') ? '\n' : '') + mdTable + '\n' + val.slice(end);
+        setCommentText(newVal);
+        window.requestAnimationFrame(() => {
+          const newPos = newVal.length - val.slice(end).length;
+          el.setSelectionRange(newPos, newPos);
+          el.style.height = 'auto';
+          el.style.height = `${Math.min(200, Math.max(80, el.scrollHeight))}px`;
+        });
+      } else {
+        setCommentText((prev) => prev + '\n' + mdTable + '\n');
+      }
+      return;
+    }
+
     const pastedFiles: File[] = [];
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
@@ -727,6 +824,39 @@ export function TaskDetailDialog({
 
     e.preventDefault();
     setAttachments((prev) => [...prev, ...pastedFiles]);
+  };
+
+  /** Convert TSV clipboard text to markdown table string, or return null if not tabular. */
+  const tsvToMarkdown = (text: string): string | null => {
+    if (!text.includes('\t')) return null;
+    const rawLines = text.split('\n').filter((l) => l.trim() !== '');
+    if (rawLines.length < 1 || !rawLines[0].includes('\t')) return null;
+    const rows = rawLines.map((line) => line.split('\t').map((cell) => cell.trim().replace(/\|/g, '\\|')));
+    const maxCols = Math.max(...rows.map((r) => r.length));
+    const padRow = (row: string[]) => { while (row.length < maxCols) row.push(''); return row; };
+    const header = '| ' + padRow(rows[0]).join(' | ') + ' |';
+    const separator = '| ' + Array(maxCols).fill('---').join(' | ') + ' |';
+    const body = rows.slice(1).map((row) => '| ' + padRow(row).join(' | ') + ' |');
+    return [header, separator, ...body].join('\n');
+  };
+
+  const handleDescriptionPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const text = e.clipboardData.getData('text/plain');
+    const md = tsvToMarkdown(text);
+    if (!md) return;
+    e.preventDefault();
+    const el = descriptionTextareaRef.current;
+    if (!el) { setDescription((prev) => prev + '\n' + md + '\n'); return; }
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+    const val = el.value;
+    const prefix = val.slice(0, start);
+    const newVal = prefix + (prefix.length && !prefix.endsWith('\n') ? '\n' : '') + md + '\n' + val.slice(end);
+    setDescription(newVal);
+    window.requestAnimationFrame(() => {
+      el.style.height = 'auto';
+      el.style.height = `${Math.max(120, el.scrollHeight)}px`;
+    });
   };
 
   const commonEmojis = ['😀', '😂', '❤️', '👍', '🎉', '🔥', '✨', '👌', '😍', '🙌'];
@@ -951,6 +1081,7 @@ export function TaskDetailDialog({
                         <div className="max-h-32 overflow-y-auto space-y-0.5">
                           {filteredMembers.map((member) => {
                             const selected = assigneeIds.includes(member.id);
+                            const isMe = member.id === currentUserId;
                             return (
                               <button
                                 key={member.id}
@@ -962,7 +1093,7 @@ export function TaskDetailDialog({
                                     : 'hover:bg-gray-50 dark:hover:bg-slate-800 text-gray-700 dark:text-slate-300'
                                 }`}
                               >
-                                <span>{member.label}</span>
+                                <span>{isMe ? `Me (${member.label})` : member.label}</span>
                                 {selected && <Check className="w-4 h-4" />}
                               </button>
                             );
@@ -1037,14 +1168,33 @@ export function TaskDetailDialog({
               </div>
 
               <div className="mb-3">
-                <label className="text-[10px] font-bold text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-1 block">Description</label>
-                <textarea
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  placeholder="Add task description..."
-                  rows={2}
-                  className="w-full border border-gray-200 dark:border-slate-700 rounded-lg p-2 text-xs focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-100 resize-none bg-white dark:bg-slate-900 transition-all"
-                />
+                {descriptionFocused || !description.trim() ? (
+                  <textarea
+                    ref={descriptionTextareaRef}
+                    value={description}
+                    onChange={(e) => {
+                      setDescription(e.target.value);
+                      const el = e.currentTarget;
+                      el.style.height = 'auto';
+                      el.style.height = `${Math.max(120, el.scrollHeight)}px`;
+                    }}
+                    onFocus={() => setDescriptionFocused(true)}
+                    onBlur={() => setDescriptionFocused(false)}
+                    onPaste={handleDescriptionPaste}
+                    placeholder="Add description, or write with AI"
+                    rows={5}
+                    autoFocus={descriptionFocused}
+                    className="w-full min-h-[120px] border-0 border-b border-gray-100 dark:border-slate-800 p-2 text-sm text-gray-700 dark:text-slate-300 focus:outline-none focus:border-purple-300 resize-none bg-transparent placeholder-gray-400 dark:placeholder-slate-500 transition-all leading-relaxed"
+                  />
+                ) : (
+                  <div
+                    onClick={() => setDescriptionFocused(true)}
+                    className="min-h-[80px] cursor-text p-2 border-b border-gray-100 dark:border-slate-800 hover:border-purple-200 dark:hover:border-purple-800 transition-colors"
+                    title="Click to edit"
+                  >
+                    <CommentContent content={description} />
+                  </div>
+                )}
               </div>
 
               <div className="border-t border-gray-100 dark:border-slate-800 pt-3 mt-2">
@@ -1867,6 +2017,7 @@ export function TaskDetailDialog({
                                 setReplyText={setReplyText}
                                 sendingReply={sendingReply}
                                 onSubmitReply={submitReply}
+                                onOpenLightbox={setLightboxUrl}
                               />
                             )
                           )}
@@ -1878,8 +2029,8 @@ export function TaskDetailDialog({
               )}
             </div>
 
-            <form className="border-t border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3 shadow-lg" onSubmit={handleSubmit}>
-              <div className="space-y-3">
+            <form className="border-t border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 pt-3 pb-4 shadow-lg" onSubmit={handleSubmit}>
+              <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 focus-within:border-purple-400 focus-within:ring-2 focus-within:ring-purple-100 dark:focus-within:ring-purple-500/20 transition-all">
                 <div className="relative">
                   <textarea
                     ref={textareaRef}
@@ -1887,6 +2038,8 @@ export function TaskDetailDialog({
                     onChange={(e) => {
                       const el = e.currentTarget;
                       handleCommentInput(el.value, el.selectionStart ?? el.value.length);
+                      el.style.height = 'auto';
+                      el.style.height = `${Math.min(200, Math.max(80, el.scrollHeight))}px`;
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
@@ -1913,14 +2066,41 @@ export function TaskDetailDialog({
                       }
                     }}
                     onBlur={() => {
-                      // Delay so mousedown on suggestion can register first.
-                      window.setTimeout(() => setInlineMention(null), 120);
+                      window.setTimeout(() => { setInlineMention(null); setSelToolbarPos(null); }, 200);
                     }}
                     onPaste={handlePaste}
-                    className="w-full px-4 py-3 text-sm bg-white dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-100 dark:focus:ring-purple-500/20 resize-none placeholder-gray-400 dark:placeholder-slate-500 text-gray-800 dark:text-slate-200 transition-all"
-                    placeholder="Share your thoughts... ✨"
-                    rows={2}
+                    onMouseUp={handleTextareaSelect}
+                    onKeyUp={handleTextareaSelect}
+                    onSelect={handleTextareaSelect}
+                    className="w-full px-4 pt-3 pb-2 text-sm bg-transparent border-0 outline-none resize-none placeholder-gray-400 dark:placeholder-slate-500 text-gray-800 dark:text-slate-200 min-h-[80px]"
+                    placeholder="Write a comment..."
+                    rows={3}
                   />
+                  {/* Floating format toolbar when text is selected */}
+                  {selToolbarPos && (
+                    <div
+                      className="fixed z-[200] -translate-x-1/2 -translate-y-full flex items-center gap-0.5 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl px-1 py-1"
+                      style={{ left: selToolbarPos.x, top: selToolbarPos.y }}
+                      onMouseDown={(e) => e.preventDefault()}
+                    >
+                      <button type="button" title="Bold" onClick={() => applyCommentFormat('bold')} className="p-1.5 rounded hover:bg-purple-50 dark:hover:bg-purple-950/40 text-gray-600 dark:text-slate-300 hover:text-purple-600 transition-colors">
+                        <Bold size={14} />
+                      </button>
+                      <button type="button" title="Italic" onClick={() => applyCommentFormat('italic')} className="p-1.5 rounded hover:bg-purple-50 dark:hover:bg-purple-950/40 text-gray-600 dark:text-slate-300 hover:text-purple-600 transition-colors">
+                        <Italic size={14} />
+                      </button>
+                      <button type="button" title="Underline" onClick={() => applyCommentFormat('underline')} className="p-1.5 rounded hover:bg-purple-50 dark:hover:bg-purple-950/40 text-gray-600 dark:text-slate-300 hover:text-purple-600 transition-colors">
+                        <Underline size={14} />
+                      </button>
+                      <button type="button" title="Strikethrough" onClick={() => applyCommentFormat('strike')} className="p-1.5 rounded hover:bg-purple-50 dark:hover:bg-purple-950/40 text-gray-600 dark:text-slate-300 hover:text-purple-600 transition-colors">
+                        <Strikethrough size={14} />
+                      </button>
+                      <div className="w-px h-4 bg-gray-200 dark:bg-slate-700 mx-0.5" />
+                      <button type="button" title="Insert table" onClick={() => applyCommentFormat('table')} className="p-1.5 rounded hover:bg-purple-50 dark:hover:bg-purple-950/40 text-gray-600 dark:text-slate-300 hover:text-purple-600 transition-colors">
+                        <Grid3x3 size={14} />
+                      </button>
+                    </div>
+                  )}
                   {inlineMention && inlineMentionMatches.length > 0 && (
                     <div className="absolute bottom-full left-0 right-0 mb-2 max-h-64 overflow-y-auto bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-xl shadow-2xl z-50 py-1">
                       <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-slate-500 border-b border-gray-100 dark:border-slate-800">
@@ -1993,24 +2173,24 @@ export function TaskDetailDialog({
                   )}
                 </div>
                 
-                <div className="flex items-center justify-between pt-2">
-                  <div className="flex items-center gap-1">
+                <div className="flex items-center justify-between border-t border-gray-100 dark:border-slate-800 px-3 py-2">
+                  <div className="flex items-center gap-0.5">
                     <button
                       type="button"
                       onClick={handleAttachmentClick}
-                      className="p-2 hover:bg-purple-50 dark:hover:bg-purple-950/40 rounded-lg text-gray-500 dark:text-slate-400 hover:text-purple-600 dark:hover:text-purple-400 transition-all"
+                      className="p-1.5 hover:bg-purple-50 dark:hover:bg-purple-950/40 rounded-lg text-gray-400 dark:text-slate-500 hover:text-purple-600 dark:hover:text-purple-400 transition-all"
                       title="Attach file"
                     >
-                      <Paperclip size={18} />
+                      <Paperclip size={17} />
                     </button>
                     <div className="w-px h-6 bg-gray-200" />
                     <button
                       type="button"
                       onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                      className="p-2 hover:bg-purple-50 dark:hover:bg-purple-950/40 rounded-lg text-gray-500 dark:text-slate-400 hover:text-purple-600 dark:hover:text-purple-400 transition-all relative"
+                      className="p-1.5 hover:bg-purple-50 dark:hover:bg-purple-950/40 rounded-lg text-gray-400 dark:text-slate-500 hover:text-purple-600 dark:hover:text-purple-400 transition-all relative"
                       title="Add emoji"
                     >
-                      <Smile size={18} />
+                      <Smile size={17} />
                       {showEmojiPicker && (
                         <div className="absolute bottom-full left-0 mb-2 bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-xl shadow-2xl p-3 z-50 w-72">
                           <div className="grid grid-cols-5 gap-1">
@@ -2035,10 +2215,10 @@ export function TaskDetailDialog({
                           setShowMentionPicker((v) => !v);
                           setMentionSearch('');
                         }}
-                        className="p-2 hover:bg-purple-50 dark:hover:bg-purple-950/40 rounded-lg text-gray-500 dark:text-slate-400 hover:text-purple-600 dark:hover:text-purple-400 transition-all"
+                        className="p-1.5 hover:bg-purple-50 dark:hover:bg-purple-950/40 rounded-lg text-gray-400 dark:text-slate-500 hover:text-purple-600 dark:hover:text-purple-400 transition-all"
                         title="Mention someone"
                       >
-                        <AtSign size={18} />
+                        <AtSign size={17} />
                       </button>
                       {showMentionPicker && (
                         <div className="absolute bottom-full left-0 mb-2 w-72 bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-xl shadow-2xl z-50">
@@ -2078,18 +2258,80 @@ export function TaskDetailDialog({
                     <button
                       type="button"
                       onClick={handleImageAttachmentClick}
-                      className="p-2 hover:bg-purple-50 dark:hover:bg-purple-950/40 rounded-lg text-gray-500 dark:text-slate-400 hover:text-purple-600 dark:hover:text-purple-400 transition-all"
+                      className="p-1.5 hover:bg-purple-50 dark:hover:bg-purple-950/40 rounded-lg text-gray-400 dark:text-slate-500 hover:text-purple-600 dark:hover:text-purple-400 transition-all"
                       title="Add image"
                     >
-                      <ImageIcon size={18} />
+                      <ImageIcon size={17} />
                     </button>
+                    <div className="w-px h-6 bg-gray-200 dark:bg-slate-700" />
+                    {/* Notify-only bell */}
+                    <div ref={notifyBellRef} className="relative">
+                      <button
+                        type="button"
+                        onClick={() => { setNotifyBellOpen((v) => !v); setNotifyBellSearch(''); }}
+                        className={`p-1.5 hover:bg-purple-50 dark:hover:bg-purple-950/40 rounded-lg transition-all relative ${notifyBellOpen || notifyUserIds.length > 0 ? 'text-purple-600 dark:text-purple-400' : 'text-gray-400 dark:text-slate-500 hover:text-purple-600 dark:hover:text-purple-400'}`}
+                        title="Notify members"
+                      >
+                        <Bell size={17} />
+                        {notifyUserIds.length > 0 && (
+                          <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-3.5 rounded-full bg-purple-600 text-white text-[9px] font-bold flex items-center justify-center px-0.5">
+                            {notifyUserIds.length}
+                          </span>
+                        )}
+                      </button>
+                      {notifyBellOpen && (
+                        <div className="absolute bottom-full left-0 mb-2 w-72 bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-xl shadow-2xl z-50">
+                          <div className="p-2 border-b border-gray-100 dark:border-slate-800">
+                            <p className="text-[11px] font-semibold text-gray-500 dark:text-slate-400 mb-1.5 px-1">Notify only (no comment)</p>
+                            <input
+                              type="text"
+                              autoFocus
+                              value={notifyBellSearch}
+                              onChange={(e) => setNotifyBellSearch(e.target.value)}
+                              placeholder="Search member..."
+                              className="w-full px-3 py-1.5 text-sm border border-gray-200 dark:border-slate-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-400 bg-transparent"
+                            />
+                          </div>
+                          <div className="max-h-52 overflow-y-auto py-1">
+                            {filteredNotifyMembers.length === 0 && (
+                              <div className="px-3 py-4 text-center text-xs text-gray-400 dark:text-slate-500">No member found</div>
+                            )}
+                            {filteredNotifyMembers.map((member) => {
+                              const checked = notifyUserIds.includes(member.id);
+                              return (
+                                <button
+                                  key={member.id}
+                                  type="button"
+                                  onClick={() => setNotifyUserIds((ids) => checked ? ids.filter((id) => id !== member.id) : [...ids, member.id])}
+                                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-purple-50 dark:hover:bg-purple-950/40 text-left text-sm text-gray-700 dark:text-slate-300"
+                                >
+                                  <span className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border ${checked ? 'bg-purple-600 border-purple-600' : 'border-gray-300 dark:border-slate-600'}`}>
+                                    {checked && <Check size={10} className="text-white" />}
+                                  </span>
+                                  <span className="w-6 h-6 rounded-full bg-purple-500 text-white flex items-center justify-center text-xs font-semibold flex-shrink-0">
+                                    {member.label[0]?.toUpperCase() ?? '?'}
+                                  </span>
+                                  <span className="truncate">{member.id === currentUserId ? `Me (${member.label})` : member.label}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {notifyUserIds.length > 0 && (
+                            <div className="border-t border-gray-100 dark:border-slate-800 px-3 py-2 flex items-center justify-between">
+                              <span className="text-xs text-gray-500 dark:text-slate-400">{notifyUserIds.length} selected</span>
+                              <button type="button" onClick={() => setNotifyUserIds([])} className="text-xs text-red-500 hover:text-red-600 font-medium">Clear</button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                   <button
                     type="submit"
                     disabled={sending || (!commentText.trim() && attachments.length === 0)}
-                    className="bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 text-white px-4 py-2.5 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed font-semibold text-sm flex items-center gap-2 transition-all shadow-md hover:shadow-lg"
+                    className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-1.5 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed font-semibold text-sm flex items-center gap-1.5 transition-all"
                   >
-                    <Send size={16} />
+                    <Send size={14} />
                     <span>Send</span>
                   </button>
                 </div>
@@ -2494,6 +2736,28 @@ export function TaskDetailDialog({
           </div>
         )}
       </div>
+      {/* Image lightbox */}
+      {lightboxUrl && createPortal(
+        <div
+          className="fixed inset-0 z-[500] flex items-center justify-center bg-black/85 backdrop-blur-sm"
+          onClick={() => setLightboxUrl(null)}
+        >
+          <button
+            type="button"
+            onClick={() => setLightboxUrl(null)}
+            className="absolute top-4 right-4 flex h-9 w-9 items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+          >
+            <X size={20} />
+          </button>
+          <img
+            src={lightboxUrl}
+            alt="Full size"
+            className="max-h-[90vh] max-w-[90vw] rounded-xl object-contain shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>,
+        document.body,
+      )}
       {activePopup === 'share' && (
         <ShareModal
           onClose={() => setActivePopup(null)}
@@ -2575,6 +2839,89 @@ const PriorityValue = ({ value }: { value: string }) => {
   );
 };
 
+/** Render inline markdown: **bold**, *italic*, __underline__, ~~strike~~, `code`, @mention */
+function renderInlineMarkdown(text: string): React.ReactNode[] {
+  const pattern = /(\*\*(.+?)\*\*|\*(.+?)\*|__(.+?)__|~~(.+?)~~|`(.+?)`|(@\w[\w.-]*))/g;
+  const nodes: React.ReactNode[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let key = 0;
+  while ((m = pattern.exec(text)) !== null) {
+    if (m.index > last) nodes.push(text.slice(last, m.index));
+    if (m[2]) nodes.push(<strong key={key++}>{m[2]}</strong>);
+    else if (m[3]) nodes.push(<em key={key++}>{m[3]}</em>);
+    else if (m[4]) nodes.push(<u key={key++}>{m[4]}</u>);
+    else if (m[5]) nodes.push(<s key={key++}>{m[5]}</s>);
+    else if (m[6]) nodes.push(<code key={key++} className="bg-gray-100 dark:bg-slate-800 rounded px-1 text-xs font-mono">{m[6]}</code>);
+    else if (m[7]) nodes.push(<span key={key++} className="text-purple-600 dark:text-purple-400 font-medium">{m[7]}</span>);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+
+/** Render comment content: supports markdown tables, inline formatting, and plain text. */
+function CommentContent({ content }: { content: string }) {
+  if (!content) return <p className="text-sm text-gray-700 dark:text-slate-300 leading-relaxed">{'📎 Image attached'}</p>;
+
+  const lines = content.split('\n');
+  const result: React.ReactNode[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    // Detect start of a markdown table block
+    if (line.trim().startsWith('|')) {
+      const tableLines: string[] = [];
+      while (i < lines.length && lines[i].trim().startsWith('|')) {
+        tableLines.push(lines[i]);
+        i++;
+      }
+      // Parse rows, skip separator rows (---|---|---)
+      const rows = tableLines
+        .filter((l) => !/^\s*\|[\s\-:|]+\|\s*$/.test(l))
+        .map((l) =>
+          l.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim()),
+        );
+      if (rows.length > 0) {
+        result.push(
+          <div key={i} className="overflow-x-auto my-2">
+            <table className="min-w-full text-xs border-collapse border border-gray-200 dark:border-slate-700 rounded-lg overflow-hidden">
+              <thead>
+                <tr className="bg-gray-50 dark:bg-slate-800/60">
+                  {rows[0].map((cell, ci) => (
+                    <th key={ci} className="border border-gray-200 dark:border-slate-700 px-3 py-1.5 text-left font-semibold text-gray-700 dark:text-slate-200">
+                      {renderInlineMarkdown(cell)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.slice(1).map((row, ri) => (
+                  <tr key={ri} className="even:bg-gray-50/50 dark:even:bg-slate-800/30">
+                    {row.map((cell, ci) => (
+                      <td key={ci} className="border border-gray-200 dark:border-slate-700 px-3 py-1.5 text-gray-700 dark:text-slate-300">
+                        {renderInlineMarkdown(cell)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>,
+        );
+      }
+    } else {
+      result.push(
+        <p key={i} className="text-sm text-gray-700 dark:text-slate-300 leading-relaxed break-words">
+          {renderInlineMarkdown(line) || <br />}
+        </p>,
+      );
+      i++;
+    }
+  }
+  return <div>{result}</div>;
+}
+
 const ActivityText = ({ content }: { content: string }) => {
   const match = content.match(/^(.*changed priority from )(.+?)( to )(.+)$/i);
   if (!match) return <span>{content}</span>;
@@ -2626,6 +2973,7 @@ const CommentBlock = ({
   setReplyText,
   sendingReply,
   onSubmitReply,
+  onOpenLightbox,
   isReply = false,
 }: {
   comment: TaskCommentView;
@@ -2643,6 +2991,7 @@ const CommentBlock = ({
   setReplyText: (t: string) => void;
   sendingReply: boolean;
   onSubmitReply: (parentId: string) => void;
+  onOpenLightbox?: (url: string) => void;
   isReply?: boolean;
 }) => {
   // Group reactions by emoji so we can render "👍 2" style chips.
@@ -2669,8 +3018,11 @@ const CommentBlock = ({
   const [deleting, setDeleting] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const editTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [replyInlineMention, setReplyInlineMention] = useState<{ start: number; query: string } | null>(null);
   const [replyInlineMentionIndex, setReplyInlineMentionIndex] = useState(0);
+  const [editInlineMention, setEditInlineMention] = useState<{ start: number; query: string } | null>(null);
+  const [editInlineMentionIndex, setEditInlineMentionIndex] = useState(0);
 
   const replyInlineMentionMatches = useMemo(() => {
     if (!replyInlineMention) return [] as typeof memberOptions;
@@ -2678,6 +3030,56 @@ const CommentBlock = ({
     if (!q) return memberOptions.slice(0, 8);
     return memberOptions.filter((m) => m.label.toLowerCase().includes(q)).slice(0, 8);
   }, [replyInlineMention, memberOptions]);
+
+  const editInlineMentionMatches = useMemo(() => {
+    if (!editInlineMention) return [] as typeof memberOptions;
+    const q = editInlineMention.query.trim().toLowerCase();
+    if (!q) return memberOptions.slice(0, 8);
+    return memberOptions.filter((m) => m.label.toLowerCase().includes(q)).slice(0, 8);
+  }, [editInlineMention, memberOptions]);
+
+  const detectEditMention = (value: string, caret: number) => {
+    const upto = value.slice(0, caret);
+    const match = upto.match(/@([\w.]*)$/);
+    if (match) {
+      setEditInlineMention({ start: caret - 1 - match[1].length, query: match[1] });
+      setEditInlineMentionIndex(0);
+    } else {
+      setEditInlineMention(null);
+    }
+  };
+
+  const applyEditMention = (member: { id: string; label: string }) => {
+    if (!editInlineMention) return;
+    const displayName = member.label.replace(/\s*\(.*?\)\s*$/, '').trim() || member.label;
+    const token = `@${displayName.replace(/\s+/g, '_')} `;
+    const before = editingText.slice(0, editInlineMention.start);
+    const afterStart = editInlineMention.start + 1 + editInlineMention.query.length;
+    const after = editingText.slice(afterStart);
+    const next = `${before}${token}${after}`;
+    setEditingText(next);
+    setEditInlineMention(null);
+    setEditInlineMentionIndex(0);
+    window.setTimeout(() => {
+      const pos = (before + token).length;
+      const el = editTextareaRef.current;
+      if (el) { el.focus(); el.setSelectionRange(pos, pos); }
+    }, 0);
+  };
+
+  const applyEditFormat = (wrapper: string) => {
+    const el = editTextareaRef.current;
+    if (!el) return;
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+    const selected = editingText.slice(start, end);
+    const next = editingText.slice(0, start) + wrapper + selected + wrapper + editingText.slice(end);
+    setEditingText(next);
+    window.setTimeout(() => {
+      el.focus();
+      el.setSelectionRange(start + wrapper.length, end + wrapper.length);
+    }, 0);
+  };
 
   const handleReplyInput = (value: string, caret: number) => {
     setReplyText(value);
@@ -2884,12 +3286,49 @@ const CommentBlock = ({
           <div className="bg-white dark:bg-slate-900 border border-gray-100 dark:border-slate-800 rounded-lg p-3 shadow-xs hover:shadow-sm dark:hover:shadow-black/40 transition-shadow">
             {editing ? (
               <div className="space-y-2">
+                <div className="flex items-center gap-1 mb-1">
+                  <button type="button" onMouseDown={(e) => { e.preventDefault(); applyEditFormat('**'); }} title="Bold" className="px-1.5 py-0.5 text-xs font-bold rounded hover:bg-gray-100 dark:hover:bg-slate-700 text-gray-600 dark:text-slate-300">B</button>
+                  <button type="button" onMouseDown={(e) => { e.preventDefault(); applyEditFormat('*'); }} title="Italic" className="px-1.5 py-0.5 text-xs italic rounded hover:bg-gray-100 dark:hover:bg-slate-700 text-gray-600 dark:text-slate-300">I</button>
+                  <button type="button" onMouseDown={(e) => { e.preventDefault(); applyEditFormat('~~'); }} title="Strikethrough" className="px-1.5 py-0.5 text-xs rounded hover:bg-gray-100 dark:hover:bg-slate-700 text-gray-600 dark:text-slate-300 line-through">S</button>
+                  <button type="button" onMouseDown={(e) => { e.preventDefault(); applyEditFormat('`'); }} title="Code" className="px-1.5 py-0.5 text-xs font-mono rounded hover:bg-gray-100 dark:hover:bg-slate-700 text-gray-600 dark:text-slate-300">{`<>`}</button>
+                </div>
+                <div className="relative">
                 <textarea
+                  ref={editTextareaRef}
                   value={editingText}
-                  onChange={(e) => setEditingText(e.target.value)}
+                  onChange={(e) => {
+                    setEditingText(e.target.value);
+                    detectEditMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
+                  }}
+                  onKeyDown={(e) => {
+                    if (editInlineMention && editInlineMentionMatches.length > 0) {
+                      if (e.key === 'ArrowDown') { e.preventDefault(); setEditInlineMentionIndex((i) => (i + 1) % editInlineMentionMatches.length); return; }
+                      if (e.key === 'ArrowUp') { e.preventDefault(); setEditInlineMentionIndex((i) => (i - 1 + editInlineMentionMatches.length) % editInlineMentionMatches.length); return; }
+                      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); applyEditMention(editInlineMentionMatches[editInlineMentionIndex]); return; }
+                      if (e.key === 'Escape') { e.preventDefault(); setEditInlineMention(null); return; }
+                    }
+                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void submitEdit(); }
+                  }}
                   rows={3}
-                  className="w-full resize-none rounded-md border border-gray-200 dark:border-slate-700 bg-transparent px-2 py-1.5 text-sm text-gray-700 dark:text-slate-200 outline-none focus:ring-2 focus:ring-purple-400/30"
+                  className="w-full resize-y rounded-md border border-gray-200 dark:border-slate-700 bg-transparent px-2 py-1.5 text-sm text-gray-700 dark:text-slate-200 outline-none focus:ring-2 focus:ring-purple-400/30"
                 />
+                {editInlineMention && editInlineMentionMatches.length > 0 && (
+                  <div className="absolute bottom-full left-0 mb-1 w-56 max-h-48 overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900 z-30">
+                    <div className="px-3 py-1 text-[10px] uppercase tracking-wider font-semibold text-gray-400 dark:text-slate-500 border-b border-gray-100 dark:border-slate-800">Mention someone</div>
+                    {editInlineMentionMatches.map((m, i) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onMouseDown={(e) => { e.preventDefault(); applyEditMention(m); }}
+                        className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm ${i === editInlineMentionIndex ? 'bg-purple-50 dark:bg-purple-500/20 text-gray-900 dark:text-slate-100' : 'hover:bg-gray-50 dark:hover:bg-slate-800 text-gray-700 dark:text-slate-300'}`}
+                      >
+                        <span className="h-6 w-6 rounded-full bg-purple-500 flex items-center justify-center text-[10px] font-bold text-white shrink-0">{m.label[0]?.toUpperCase() ?? '?'}</span>
+                        <span className="truncate">{m.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                </div>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -2912,9 +3351,7 @@ const CommentBlock = ({
                 </div>
               </div>
             ) : (
-              <p className="text-sm text-gray-700 dark:text-slate-300 leading-relaxed break-words whitespace-pre-wrap">
-                {comment.content || '📎 Image attached'}
-              </p>
+              <CommentContent content={comment.content} />
             )}
             {comment.attachments?.length ? (
               <div className="mt-3 grid gap-2">
@@ -2924,11 +3361,16 @@ const CommentBlock = ({
                     className="rounded-xl overflow-hidden border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-900/60"
                   >
                     {attachment.mimeType.startsWith('image/') ? (
-                      <img
-                        src={attachment.dataUrl}
-                        alt={attachment.filename}
-                        className="w-full h-auto object-cover"
-                      />
+                      <div className="relative group/img cursor-zoom-in" onClick={() => onOpenLightbox?.(attachment.dataUrl)}>
+                        <img
+                          src={attachment.dataUrl}
+                          alt={attachment.filename}
+                          className="w-full h-auto object-cover"
+                        />
+                        <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover/img:opacity-100 bg-black/30 transition-opacity rounded-xl">
+                          <ZoomIn className="text-white" size={24} />
+                        </div>
+                      </div>
                     ) : (
                       <div className="flex items-center gap-2 p-3 text-sm text-gray-700 dark:text-slate-300">
                         <FileText size={16} />
@@ -3150,6 +3592,7 @@ const CommentBlock = ({
                   setReplyText={setReplyText}
                   sendingReply={sendingReply}
                   onSubmitReply={onSubmitReply}
+                  onOpenLightbox={onOpenLightbox}
                   isReply
                 />
               ))}
@@ -3831,8 +4274,23 @@ const ShareModal = ({
   };
 
   const handleCopyLink = async () => {
+    const doCopy = async () => {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(taskUrl);
+        return;
+      }
+      const el = document.createElement('textarea');
+      el.value = taskUrl;
+      el.style.cssText = 'position:fixed;left:-9999px;top:-9999px';
+      document.body.appendChild(el);
+      el.focus();
+      el.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(el);
+      if (!ok) throw new Error('execCommand failed');
+    };
     try {
-      await navigator.clipboard.writeText(taskUrl);
+      await doCopy();
       setCopied(true);
       toast({ title: 'Link copied', description: 'Task link copied to clipboard.' });
       window.setTimeout(() => setCopied(false), 2000);

@@ -11,6 +11,7 @@ import {
   Loader2,
   AlertTriangle,
   Clock,
+  X,
 } from 'lucide-react';
 import type { Notification } from '@/types';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -23,6 +24,8 @@ interface NotificationsPanelProps {
   onOpenTask?: (taskId: string) => void;
   /** Optional bulk-read handler; if omitted we fall back to calling onMarkRead per unread item. */
   onMarkAllRead?: () => void | Promise<void>;
+  /** Optional dismiss handler — removes the notification from the list entirely. */
+  onDismiss?: (id: string) => void | Promise<void>;
 }
 
 type FilterMode = 'all' | 'unread' | 'read';
@@ -35,6 +38,7 @@ export function NotificationsPanel({
   onMarkRead,
   onOpenTask,
   onMarkAllRead,
+  onDismiss,
 }: NotificationsPanelProps) {
   const [filter, setFilter] = useState<FilterMode>('all');
   const [page, setPage] = useState(1);
@@ -179,7 +183,7 @@ export function NotificationsPanel({
                   const isOverdue = item.type === 'task_overdue';
                   const isDueSoon = item.type === 'task_due_soon';
                   return (
-                  <li key={item.id}>
+                  <li key={item.id} className="relative group/item">
                     <button
                       type="button"
                       className={cn(
@@ -256,6 +260,16 @@ export function NotificationsPanel({
                         )}
                       </div>
                     </button>
+                    {onDismiss && (
+                      <button
+                        type="button"
+                        title="Clear notification"
+                        onClick={(e) => { e.stopPropagation(); void onDismiss(item.id); }}
+                        className="absolute top-2 right-2 hidden group-hover/item:flex items-center justify-center h-5 w-5 rounded-full bg-muted hover:bg-destructive/10 hover:text-destructive text-muted-foreground transition-colors z-10"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    )}
                   </li>
                   );
                 })}

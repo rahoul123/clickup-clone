@@ -19,6 +19,7 @@ import { Calendar } from '@/components/ui/calendar';
 
 interface InlineTaskComposerProps {
   memberOptions: { id: string; label: string }[];
+  currentUserId?: string;
   onSave: (payload: {
     title: string;
     priority: TaskPriority;
@@ -50,7 +51,7 @@ const PRIORITY_FLAG_CLASS: Record<TaskPriority, string> = {
   low: 'text-slate-400 fill-slate-400',
 };
 
-export function InlineTaskComposer({ memberOptions, onSave, onCancel }: InlineTaskComposerProps) {
+export function InlineTaskComposer({ memberOptions, currentUserId, onSave, onCancel }: InlineTaskComposerProps) {
   const rootRef = useRef<HTMLDivElement>(null);
 
   const [title, setTitle] = useState('');
@@ -86,9 +87,13 @@ export function InlineTaskComposer({ memberOptions, onSave, onCancel }: InlineTa
 
   const filteredMembers = useMemo(() => {
     const q = assigneeSearch.trim().toLowerCase();
-    if (!q) return memberOptions;
-    return memberOptions.filter((m) => m.label.toLowerCase().includes(q));
-  }, [assigneeSearch, memberOptions]);
+    const base = q ? memberOptions.filter((m) => m.label.toLowerCase().includes(q)) : memberOptions;
+    return [...base].sort((a, b) => {
+      if (a.id === currentUserId) return -1;
+      if (b.id === currentUserId) return 1;
+      return 0;
+    });
+  }, [assigneeSearch, memberOptions, currentUserId]);
 
   const visibleMembers = filteredMembers.length > 0 ? filteredMembers : memberOptions;
 
@@ -243,6 +248,7 @@ export function InlineTaskComposer({ memberOptions, onSave, onCancel }: InlineTa
               <div className="max-h-[min(280px,45vh)] overflow-y-auto py-1.5">
                 {visibleMembers.map((m, idx) => {
                   const selected = assigneeIds.includes(m.id);
+                  const isMe = m.id === currentUserId;
                   return (
                     <button
                       key={m.id}
@@ -264,7 +270,9 @@ export function InlineTaskComposer({ memberOptions, onSave, onCancel }: InlineTa
                         </span>
                         <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-background bg-emerald-500" />
                       </span>
-                      <span className="min-w-0 flex-1 truncate font-medium text-foreground">{m.label}</span>
+                      <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+                        {isMe ? 'Me' : m.label}
+                      </span>
                       {selected && <Check className="h-4 w-4 shrink-0 text-primary" />}
                     </button>
                   );

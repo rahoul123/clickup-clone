@@ -184,9 +184,13 @@ export function AddTaskDialog({
 
   const filteredMembers = useMemo(() => {
     const q = assigneeSearch.trim().toLowerCase();
-    if (!q) return memberOptions;
-    return memberOptions.filter((m) => m.label.toLowerCase().includes(q));
-  }, [assigneeSearch, memberOptions]);
+    const base = q ? memberOptions.filter((m) => m.label.toLowerCase().includes(q)) : memberOptions;
+    return [...base].sort((a, b) => {
+      if (a.id === currentUserId) return -1;
+      if (b.id === currentUserId) return 1;
+      return 0;
+    });
+  }, [assigneeSearch, memberOptions, currentUserId]);
 
   const visibleMembers = filteredMembers.length > 0 ? filteredMembers : memberOptions;
 
@@ -355,6 +359,7 @@ export function AddTaskDialog({
         )}
         {visibleMembers.map((member, idx) => {
           const selected = assigneeIds.includes(member.id);
+          const isMe = member.id === currentUserId;
           return (
             <button
               type="button"
@@ -372,7 +377,9 @@ export function AddTaskDialog({
                 >
                   {member.label.trim().charAt(0).toUpperCase() || 'U'}
                 </span>
-                <span className="text-[12px] text-gray-700 dark:text-slate-300 truncate">{member.label}</span>
+                <span className="text-[12px] text-gray-700 dark:text-slate-300 truncate">
+                  {isMe ? 'Me' : member.label}
+                </span>
               </span>
               <span className="flex items-center gap-1.5 shrink-0">
                 <span className="h-2 w-2 rounded-full bg-emerald-500" title="Online" />

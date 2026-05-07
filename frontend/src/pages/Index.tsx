@@ -687,6 +687,19 @@ const Index = () => {
     }
   };
 
+  const dismissNotification = async (id: string) => {
+    const target = notifications.find((n) => n.id === id);
+    if (target && !target.read) {
+      try {
+        await api.app.markNotificationRead(id);
+        setNotificationUnreadCount((prev) => (prev > 0 ? prev - 1 : 0));
+      } catch {
+        // best-effort
+      }
+    }
+    setNotifications((prev) => prev.filter((n) => n.id !== id));
+  };
+
   const handleOpenSpaceView = async (spaceId: string, spaceName: string) => {
     const space = spaces.find((s) => s.id === spaceId);
     if (space) setActiveWorkspaceId(space.workspace_id);
@@ -1639,6 +1652,7 @@ const Index = () => {
               loading={notificationsLoading}
               onMarkRead={markNotificationRead}
               onOpenTask={handleOpenNotificationTask}
+              onDismiss={dismissNotification}
             />
           ) : pageView === 'team-members' ? (
             <TeamMembersPage

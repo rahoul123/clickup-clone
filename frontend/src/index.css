@@ -240,3 +240,111 @@
     transition: background-color 9999s ease-in-out 0s;
   }
 }
+
+/* ── Tiptap Description / Comment Editor ────────────────────────────────────── */
+.description-editor .tiptap {
+  min-height: 80px;
+  outline: none;
+}
+.description-editor .tiptap p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  color: #9ca3af;
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+.dark .description-editor .tiptap p.is-editor-empty:first-child::before {
+  color: #64748b;
+}
+
+/* Table styles inside the Tiptap editor */
+.description-editor .tiptap table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: 0.75rem;
+  overflow-x: auto;
+  display: block;
+}
+.description-editor .tiptap table th,
+.description-editor .tiptap table td {
+  border: 1px solid #e2e8f0;
+  padding: 6px 12px;
+  text-align: left;
+  min-width: 60px;
+  vertical-align: top;
+  position: relative;
+}
+.dark .description-editor .tiptap table th,
+.dark .description-editor .tiptap table td {
+  border-color: #334155;
+}
+.description-editor .tiptap table th {
+  background: #f8fafc;
+  font-weight: 600;
+  color: #374151;
+}
+.dark .description-editor .tiptap table th {
+  background: #1e293b;
+  color: #e2e8f0;
+}
+.description-editor .tiptap table td {
+  color: #374151;
+}
+.dark .description-editor .tiptap table td {
+  color: #cbd5e1;
+}
+.description-editor .tiptap table tr:nth-child(even) td {
+  background: #f9fafb;
+}
+.dark .description-editor .tiptap table tr:nth-child(even) td {
+  background: #1e293b40;
+}
+/* Selected cell highlight */
+.description-editor .tiptap table .selectedCell::after {
+  background: rgba(139, 92, 246, 0.15);
+  content: '';
+  left: 0; right: 0; top: 0; bottom: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 2;
+}
+.description-editor .tiptap table p {
+  margin: 0;
+  padding: 0;
+}
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+/* ── Tiptap HTML rendered inside comment feed ───────────────────────────────── */
+.tiptap-comment-output p { margin: 0 0 4px 0; }
+.tiptap-comment-output p:last-child { margin-bottom: 0; }
+.tiptap-comment-output table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 6px 0;
+  font-size: 0.75rem;
+  overflow-x: auto;
+  display: block;
+}
+.tiptap-comment-output table th,
+.tiptap-comment-output table td {
+  border: 1px solid #e2e8f0;
+  padding: 5px 10px;
+  text-align: left;
+  min-width: 60px;
+  vertical-align: top;
+}
+.dark .tiptap-comment-output table th,
+.dark .tiptap-comment-output table td { border-color: #334155; }
+.tiptap-comment-output table th {
+  background: #f8fafc;
+  font-weight: 600;
+  color: #374151;
+}
+.dark .tiptap-comment-output table th { background: #1e293b; color: #e2e8f0; }
+.tiptap-comment-output table td { color: #374151; }
+.dark .tiptap-comment-output table td { color: #cbd5e1; }
+.tiptap-comment-output table tr:nth-child(even) td { background: #f9fafb; }
+.dark .tiptap-comment-output table tr:nth-child(even) td { background: #1e293b40; }
+.tiptap-comment-output table p { margin: 0; padding: 0; }
+/* ─────────────────────────────────────────────────────────────────────────── */

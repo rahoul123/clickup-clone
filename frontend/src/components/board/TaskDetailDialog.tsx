@@ -1,6 +1,8 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { toast } from '@/hooks/use-toast';
+import { DescriptionEditor } from './DescriptionEditor';
+import { CommentEditor, type CommentEditorHandle } from './CommentEditor';
 import {
   X, Maximize2, MoreHorizontal, Settings, Share2,
   MessageSquare, User, Calendar, Flag, Clock,
@@ -8,7 +10,7 @@ import {
   Smile, AtSign, Video, Mic, Image as ImageIcon, Send, BrainCircuit, Check, Search,
   Copy, Lock, Globe, Upload, FileText, Download, Play, Save, Trash2, ExternalLink, ChevronDown,
   UserPlus, CheckSquare, Calendar as CalendarIcon, Flag as FlagIcon, Box, MoreVertical, Bookmark, Pencil,
-  Bell, Grid3x3, Bold, Italic, Underline, Strikethrough, ZoomIn,
+  Bell, ZoomIn,
 } from 'lucide-react';
 import type { Task, TaskPriority, CommentAttachment, ChecklistItem } from '@/types';
 
@@ -34,6 +36,15 @@ function renderInlineMarkdown(text: string): React.ReactNode[] {
 /** Render comment/description content with markdown table + inline formatting support. */
 function CommentContent({ content }: { content: string }) {
   if (!content?.trim()) return <p className="text-sm text-gray-400 dark:text-slate-500 italic">{'📎 Image attached'}</p>;
+  // HTML content from Tiptap editor — render directly with appropriate styles
+  if (content.trimStart().startsWith('<')) {
+    return (
+      <div
+        className="description-editor tiptap-comment-output text-sm text-gray-700 dark:text-slate-300 leading-relaxed break-words"
+        dangerouslySetInnerHTML={{ __html: content }}
+      />
+    );
+  }
   const lines = content.split(/\r?\n/);
   const result: React.ReactNode[] = [];
   let i = 0;
@@ -45,7 +56,8 @@ function CommentContent({ content }: { content: string }) {
         tableLines.push(lines[i].trimEnd());
         i++;
       }
-      const isSep = (l: string) => /^\s*\|[\s\-:|]+\|\s*$/.test(l);
+      // Only treat as separator if it contains at least one dash sequence (e.g. | --- |)
+      const isSep = (l: string) => /^\s*\|[\s\-:|]+\|\s*$/.test(l) && l.includes('-');
       const dataLines = tableLines.filter((l) => !isSep(l));
       const rows = dataLines.map((l) =>
         l.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim()),
@@ -94,15 +106,32 @@ function CommentContent({ content }: { content: string }) {
 
 // ── Multiple description blocks ─────────────────────────────────────────────
 type DescBlock = { id: string; text: string };
-const BLOCK_SEP = '\n[[[DESC_BREAK]]]\n';
 let _blockCounter = 0;
 const newBlockId = () => `blk-${++_blockCounter}`;
+
 const parseDescBlocks = (raw: string): DescBlock[] => {
-  const parts = raw.split(BLOCK_SEP);
-  return parts.map((text) => ({ id: newBlockId(), text }));
+  if (!raw?.trim()) return [{ id: newBlockId(), text: '' }];
+  // JSON multi-block format (new)
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) {
+      return parsed.map((text) => ({ id: newBlockId(), text }));
+    }
+  } catch {}
+  // Legacy BLOCK_SEP format
+  const SEP = '\n[[[DESC_BREAK]]]\n';
+  if (raw.includes(SEP)) {
+    return raw.split(SEP).map((text) => ({ id: newBlockId(), text }));
+  }
+  // Single block (HTML or pipe-markdown — convert on the fly)
+  return [{ id: newBlockId(), text: raw }];
 };
-const serializeDescBlocks = (blocks: DescBlock[]): string =>
-  blocks.length === 1 ? blocks[0].text : blocks.map((b) => b.text).join(BLOCK_SEP);
+
+const serializeDescBlocks = (blocks: DescBlock[]): string => {
+  if (blocks.length === 0) return '';
+  if (blocks.length === 1) return blocks[0].text;
+  return JSON.stringify(blocks.map((b) => b.text));
+};
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface TaskCommentView {
@@ -250,13 +279,12 @@ export function TaskDetailDialog({
   onResolveRelatedTasks,
 }: TaskDetailDialogProps) {
   const [activeTab, setActiveTab] = useState<'task' | 'doc' | 'reminder' | 'whiteboard' | 'dashboard'>('task');
-  const [commentText, setCommentText] = useState('');
+  const [commentHtml, setCommentHtml] = useState('');
+  const commentEditorRef = useRef<CommentEditorHandle | null>(null);
   const [sending, setSending] = useState(false);
   const [saving, setSaving] = useState(false);
   const [title, setTitle] = useState(task.title);
   const [descBlocks, setDescBlocks] = useState<DescBlock[]>(() => parseDescBlocks(task.description || ''));
-  const [blockEditing, setBlockEditing] = useState<string | null>(null);
-  const blockTextareaRefs = useRef<Map<string, HTMLTextAreaElement>>(new Map());
   const [status, setStatus] = useState<string>(task.status);
   const [priority, setPriority] = useState<TaskPriority>(task.priority);
   const [startDate, setStartDate] = useState(task.start_date ? task.start_date.slice(0, 10) : '');
@@ -269,8 +297,6 @@ export function TaskDetailDialog({
   const [attachments, setAttachments] = useState<File[]>([]);
   const [showMentionPicker, setShowMentionPicker] = useState(false);
   const [mentionSearch, setMentionSearch] = useState('');
-  const [inlineMention, setInlineMention] = useState<{ start: number; query: string } | null>(null);
-  const [inlineMentionIndex, setInlineMentionIndex] = useState(0);
   const [reminderTitle, setReminderTitle] = useState('');
   const [reminderBody, setReminderBody] = useState('');
   const [reminderDate, setReminderDate] = useState('');
@@ -299,9 +325,8 @@ export function TaskDetailDialog({
   const [activityExpanded, setActivityExpanded] = useState(false);
   const activityScrollRef = useRef<HTMLDivElement | null>(null);
 
-  // --- Lightbox, floating format toolbar, notify bell ---
+  // --- Lightbox, notify bell ---
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
-  const [selToolbarPos, setSelToolbarPos] = useState<{ x: number; y: number } | null>(null);
   const [notifyBellOpen, setNotifyBellOpen] = useState(false);
   const [notifyBellSearch, setNotifyBellSearch] = useState('');
   const [notifyUserIds, setNotifyUserIds] = useState<string[]>([]);
@@ -358,7 +383,6 @@ export function TaskDetailDialog({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const attachTaskFileInputRef = useRef<HTMLInputElement | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const assigneeDropdownRef = useRef<HTMLDivElement | null>(null);
   const mentionPickerRef = useRef<HTMLDivElement | null>(null);
 
@@ -376,48 +400,6 @@ export function TaskDetailDialog({
     const q = notifyBellSearch.trim().toLowerCase();
     return q ? memberOptions.filter((m) => m.label.toLowerCase().includes(q)) : memberOptions;
   }, [notifyBellSearch, memberOptions]);
-
-  /** Wrap selected text in comment textarea with markdown syntax. */
-  const applyCommentFormat = (syntax: 'bold' | 'italic' | 'underline' | 'strike' | 'table') => {
-    const el = textareaRef.current;
-    if (!el) return;
-    const start = el.selectionStart;
-    const end = el.selectionEnd;
-    const val = el.value;
-    let newVal: string;
-    let cursor: number;
-    if (syntax === 'table') {
-      const template = '\n| Col 1 | Col 2 | Col 3 |\n| --- | --- | --- |\n| Cell | Cell | Cell |\n';
-      newVal = val.slice(0, end) + template + val.slice(end);
-      cursor = end + template.length;
-    } else {
-      const selected = val.slice(start, end);
-      const wrap: Record<string, string> = { bold: '**', italic: '*', underline: '__', strike: '~~' };
-      const m = wrap[syntax];
-      newVal = val.slice(0, start) + m + selected + m + val.slice(end);
-      cursor = start + m.length + selected.length + m.length;
-    }
-    setCommentText(newVal);
-    setSelToolbarPos(null);
-    window.requestAnimationFrame(() => {
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(cursor, cursor);
-      el.style.height = 'auto';
-      el.style.height = `${Math.min(200, Math.max(80, el.scrollHeight))}px`;
-    });
-  };
-
-  const handleTextareaSelect = () => {
-    const el = textareaRef.current;
-    if (!el) return;
-    if (el.selectionStart === el.selectionEnd) {
-      setSelToolbarPos(null);
-      return;
-    }
-    const rect = el.getBoundingClientRect();
-    setSelToolbarPos({ x: rect.left + rect.width / 2, y: rect.top - 4 });
-  };
 
   const statusSelectOptions = useMemo(() => {
     const base = statusOptions && statusOptions.length > 0 ? [...statusOptions] : [...DEFAULT_STATUS_OPTIONS];
@@ -454,18 +436,6 @@ export function TaskDetailDialog({
     () => comments.filter((item) => !item.is_activity),
     [comments]
   );
-
-  useLayoutEffect(() => {
-    if (blockEditing) {
-      const el = blockTextareaRefs.current.get(blockEditing);
-      if (el) {
-        el.focus();
-        el.style.height = 'auto';
-        el.style.height = `${Math.max(120, el.scrollHeight)}px`;
-        el.setSelectionRange(el.value.length, el.value.length);
-      }
-    }
-  }, [blockEditing]);
 
   const scrollActivityToBottom = () => {
     const container = activityScrollRef.current;
@@ -504,7 +474,6 @@ export function TaskDetailDialog({
     skipAutoSaveRef.current = true;
     setTitle(task.title);
     setDescBlocks(parseDescBlocks(task.description || ''));
-    setBlockEditing(null);
     setStatus(task.status);
     setPriority(task.priority);
     setStartDate(task.start_date ? task.start_date.slice(0, 10) : '');
@@ -678,9 +647,9 @@ export function TaskDetailDialog({
 
   const handleSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const text = commentText.trim();
+    const html = commentHtml.trim();
     const hasAttachments = attachments.length > 0;
-    if (!text && !hasAttachments) return;
+    if (!html && !hasAttachments) return;
 
     setSending(true);
     try {
@@ -691,8 +660,8 @@ export function TaskDetailDialog({
           dataUrl: await readFileAsDataUrl(file),
         }))
       );
-      await onSendComment(text, payloadAttachments.length > 0 ? payloadAttachments : undefined);
-      setCommentText('');
+      await onSendComment(html, payloadAttachments.length > 0 ? payloadAttachments : undefined);
+      commentEditorRef.current?.clear();
       setAttachments([]);
       window.setTimeout(() => {
         scrollActivityToBottom();
@@ -713,7 +682,7 @@ export function TaskDetailDialog({
   };
 
   const handleEmojiSelect = (emoji: string) => {
-    setCommentText((prev) => prev + emoji);
+    commentEditorRef.current?.insertContent(emoji);
     setShowEmojiPicker(false);
   };
 
@@ -777,14 +746,10 @@ export function TaskDetailDialog({
 
   const insertMention = (member: { id: string; label: string }) => {
     const displayName = member.label.replace(/\s*\(.*?\)\s*$/, '').trim() || member.label;
-    const mentionToken = `@${displayName.replace(/\s+/g, '_')}`;
-    setCommentText((prev) => {
-      const needsSpace = prev && !prev.endsWith(' ') && !prev.endsWith('\n');
-      return `${prev}${needsSpace ? ' ' : ''}${mentionToken} `;
-    });
+    const mentionToken = `@${displayName.replace(/\s+/g, '_')} `;
+    commentEditorRef.current?.insertContent(mentionToken);
     setShowMentionPicker(false);
     setMentionSearch('');
-    window.setTimeout(() => textareaRef.current?.focus(), 0);
   };
 
   const filteredMentionMembers = useMemo(() => {
@@ -792,64 +757,6 @@ export function TaskDetailDialog({
     if (!q) return memberOptions;
     return memberOptions.filter((m) => m.label.toLowerCase().includes(q));
   }, [mentionSearch, memberOptions]);
-
-  const inlineMentionMatches = useMemo(() => {
-    if (!inlineMention) return [] as typeof memberOptions;
-    const q = inlineMention.query.trim().toLowerCase();
-    if (!q) return memberOptions.slice(0, 8);
-    return memberOptions
-      .filter((m) => m.label.toLowerCase().includes(q))
-      .slice(0, 8);
-  }, [inlineMention, memberOptions]);
-
-  const handleCommentInput = (value: string, caret: number) => {
-    setCommentText(value);
-    // Scan backwards from caret for a @ that starts a mention token.
-    let i = caret - 1;
-    let foundAt = -1;
-    while (i >= 0) {
-      const ch = value[i];
-      if (ch === '@') {
-        const prev = i === 0 ? ' ' : value[i - 1];
-        if (/[\s\n]/.test(prev) || i === 0) {
-          foundAt = i;
-        }
-        break;
-      }
-      if (/\s/.test(ch)) break;
-      i -= 1;
-    }
-    if (foundAt >= 0) {
-      const query = value.slice(foundAt + 1, caret);
-      if (/^[\w.\-]*$/.test(query)) {
-        setInlineMention({ start: foundAt, query });
-        setInlineMentionIndex(0);
-        return;
-      }
-    }
-    setInlineMention(null);
-  };
-
-  const applyInlineMention = (member: { id: string; label: string }) => {
-    if (!inlineMention) return;
-    const displayName = member.label.replace(/\s*\(.*?\)\s*$/, '').trim() || member.label;
-    const token = `@${displayName.replace(/\s+/g, '_')} `;
-    const before = commentText.slice(0, inlineMention.start);
-    const afterStart = inlineMention.start + 1 + inlineMention.query.length;
-    const after = commentText.slice(afterStart);
-    const next = `${before}${token}${after}`;
-    setCommentText(next);
-    setInlineMention(null);
-    setInlineMentionIndex(0);
-    window.setTimeout(() => {
-      const pos = (before + token).length;
-      const el = textareaRef.current;
-      if (el) {
-        el.focus();
-        el.setSelectionRange(pos, pos);
-      }
-    }, 0);
-  };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.currentTarget.files;
@@ -873,95 +780,16 @@ export function TaskDetailDialog({
     setAttachments((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-
-    // Detect TSV (tab-separated) paste from Excel / Google Sheets
-    const textData = e.clipboardData.getData('text/plain');
-    const mdTable = tsvToMarkdown(textData);
-    if (mdTable) {
-      e.preventDefault();
-      const el = textareaRef.current;
-      if (el) {
-        const start = el.selectionStart;
-        const end = el.selectionEnd;
-        const val = el.value;
-        const prefix = val.slice(0, start);
-        const newVal = prefix + (prefix.length && !prefix.endsWith('\n') ? '\n' : '') + mdTable + '\n' + val.slice(end);
-        setCommentText(newVal);
-        window.requestAnimationFrame(() => {
-          const newPos = newVal.length - val.slice(end).length;
-          el.setSelectionRange(newPos, newPos);
-          el.style.height = 'auto';
-          el.style.height = `${Math.min(200, Math.max(80, el.scrollHeight))}px`;
-        });
-      } else {
-        setCommentText((prev) => prev + '\n' + mdTable + '\n');
-      }
-      return;
-    }
-
-    const pastedFiles: File[] = [];
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
-        const file = item.getAsFile();
-        if (file) {
-          pastedFiles.push(file);
-        }
-      }
-    }
-
-    if (pastedFiles.length === 0) return;
-    const oversize = pastedFiles.find((file) => file.size > MAX_ATTACHMENT_SIZE_BYTES);
+  const handleImagePaste = (files: File[]) => {
+    const oversize = files.find((f) => f.size > MAX_ATTACHMENT_SIZE_BYTES);
     if (oversize) {
-      e.preventDefault();
       toast({
         title: 'Image too large',
         description: `${oversize.name || 'Pasted image'} is larger than 4 MB.`,
       });
       return;
     }
-
-    e.preventDefault();
-    setAttachments((prev) => [...prev, ...pastedFiles]);
-  };
-
-  /** Convert TSV clipboard text to markdown table string, or return null if not tabular. */
-  const tsvToMarkdown = (text: string): string | null => {
-    if (!text.includes('\t')) return null;
-    const rawLines = text.split('\n').filter((l) => l.trim() !== '');
-    if (rawLines.length < 1 || !rawLines[0].includes('\t')) return null;
-    const rows = rawLines.map((line) => line.split('\t').map((cell) => cell.trim().replace(/\|/g, '\\|')));
-    const maxCols = Math.max(...rows.map((r) => r.length));
-    const padRow = (row: string[]) => { while (row.length < maxCols) row.push(''); return row; };
-    const header = '| ' + padRow(rows[0]).join(' | ') + ' |';
-    const separator = '| ' + Array(maxCols).fill('---').join(' | ') + ' |';
-    const body = rows.slice(1).map((row) => '| ' + padRow(row).join(' | ') + ' |');
-    return [header, separator, ...body].join('\n');
-  };
-
-  const handleDescriptionPaste = (blockId: string, e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const text = e.clipboardData.getData('text/plain');
-    const md = tsvToMarkdown(text);
-    if (!md) return;
-    e.preventDefault();
-    const el = blockTextareaRefs.current.get(blockId);
-    const updateText = (prev: string) => {
-      if (!el) return prev + '\n' + md + '\n';
-      const start = el.selectionStart;
-      const end = el.selectionEnd;
-      const prefix = prev.slice(0, start);
-      return prefix + (prefix.length && !prefix.endsWith('\n') ? '\n' : '') + md + '\n' + prev.slice(end);
-    };
-    setDescBlocks((blocks) => blocks.map((b) => b.id === blockId ? { ...b, text: updateText(b.text) } : b));
-    if (el) {
-      window.requestAnimationFrame(() => {
-        el.style.height = 'auto';
-        el.style.height = `${Math.max(120, el.scrollHeight)}px`;
-      });
-    }
+    setAttachments((prev) => [...prev, ...files]);
   };
 
   const commonEmojis = ['😀', '😂', '❤️', '👍', '🎉', '🔥', '✨', '👌', '😍', '🙌'];
@@ -1286,43 +1114,15 @@ export function TaskDetailDialog({
               <div className="mb-3 space-y-2">
                 {descBlocks.map((block, idx) => (
                   <div key={block.id} className="relative group/block">
-                    {blockEditing === block.id ? (
-                      <textarea
-                        ref={(el) => {
-                          if (el) blockTextareaRefs.current.set(block.id, el);
-                          else blockTextareaRefs.current.delete(block.id);
-                        }}
-                        value={block.text}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setDescBlocks((prev) => prev.map((b) => b.id === block.id ? { ...b, text: val } : b));
-                          const el = e.currentTarget;
-                          el.style.height = 'auto';
-                          el.style.height = `${Math.max(120, el.scrollHeight)}px`;
-                        }}
-                        onPaste={(e) => handleDescriptionPaste(block.id, e)}
-                        onBlur={() => setBlockEditing(null)}
-                        placeholder="Add description, or write with AI"
-                        rows={5}
-                        className="w-full min-h-[120px] border border-purple-300 dark:border-purple-700 rounded-lg p-2 text-sm text-gray-700 dark:text-slate-300 focus:outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-100 resize-y bg-transparent placeholder-gray-400 dark:placeholder-slate-500 transition-all leading-relaxed"
-                      />
-                    ) : (
-                      <div
-                        onClick={() => setBlockEditing(block.id)}
-                        className="group/desc min-h-[80px] rounded-lg border border-gray-100 dark:border-slate-800 hover:border-purple-300 dark:hover:border-purple-700 p-2 cursor-text transition-colors relative"
-                        title="Click to edit"
-                      >
-                        {block.text.trim() ? (
-                          <CommentContent content={block.text} />
-                        ) : (
-                          <p className="text-sm text-gray-400 dark:text-slate-500 italic">Add description, or write with AI</p>
-                        )}
-                        <span className="absolute top-1.5 right-2 opacity-0 group-hover/desc:opacity-100 transition-opacity text-[10px] text-purple-500 dark:text-purple-400 font-medium select-none flex items-center gap-1 bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded shadow-sm">
-                          <Pencil size={10} /> Click to edit
-                        </span>
-                      </div>
-                    )}
-                    {descBlocks.length > 1 && blockEditing !== block.id && (
+                    <DescriptionEditor
+                      content={block.text}
+                      onChange={(html) =>
+                        setDescBlocks((prev) =>
+                          prev.map((b) => (b.id === block.id ? { ...b, text: html } : b)),
+                        )
+                      }
+                    />
+                    {descBlocks.length > 1 && (
                       <button
                         type="button"
                         title="Remove this description block"
@@ -1342,7 +1142,6 @@ export function TaskDetailDialog({
                   onClick={() => {
                     const newId = newBlockId();
                     setDescBlocks((prev) => [...prev, { id: newId, text: '' }]);
-                    setBlockEditing(newId);
                   }}
                   className="flex items-center gap-1.5 text-xs text-gray-400 dark:text-slate-500 hover:text-purple-600 dark:hover:text-purple-400 transition-colors py-1"
                 >
@@ -2223,101 +2022,13 @@ export function TaskDetailDialog({
               onSubmit={handleSubmit}
             >
               <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 focus-within:border-purple-400 focus-within:ring-2 focus-within:ring-purple-100 dark:focus-within:ring-purple-500/20 transition-all flex flex-col flex-1 min-h-0">
-                <div className="relative flex-1 min-h-0 overflow-hidden">
-                  <textarea
-                    ref={textareaRef}
-                    value={commentText}
-                    onChange={(e) => {
-                      const el = e.currentTarget;
-                      handleCommentInput(el.value, el.selectionStart ?? el.value.length);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        if (!sending && (commentText.trim() || attachments.length > 0)) {
-                          void handleSubmit();
-                        }
-                        return;
-                      }
-                      if (!inlineMention || inlineMentionMatches.length === 0) return;
-                      if (e.key === 'ArrowDown') {
-                        e.preventDefault();
-                        setInlineMentionIndex((i) => (i + 1) % inlineMentionMatches.length);
-                      } else if (e.key === 'ArrowUp') {
-                        e.preventDefault();
-                        setInlineMentionIndex((i) =>
-                          (i - 1 + inlineMentionMatches.length) % inlineMentionMatches.length,
-                        );
-                      } else if (e.key === 'Tab') {
-                        e.preventDefault();
-                        applyInlineMention(inlineMentionMatches[inlineMentionIndex]);
-                      } else if (e.key === 'Escape') {
-                        setInlineMention(null);
-                      }
-                    }}
-                    onBlur={() => {
-                      window.setTimeout(() => { setInlineMention(null); setSelToolbarPos(null); }, 200);
-                    }}
-                    onPaste={handlePaste}
-                    onMouseUp={handleTextareaSelect}
-                    onKeyUp={handleTextareaSelect}
-                    onSelect={handleTextareaSelect}
-                    className="w-full h-full px-4 pt-3 pb-2 text-sm bg-transparent border-0 outline-none resize-none placeholder-gray-400 dark:placeholder-slate-500 text-gray-800 dark:text-slate-200"
-                    placeholder="Write a comment..."
+                <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden">
+                  <CommentEditor
+                    ref={commentEditorRef}
+                    onChange={setCommentHtml}
+                    onSubmit={() => { if (!sending) void handleSubmit(); }}
+                    onImagePaste={handleImagePaste}
                   />
-                  {/* Floating format toolbar when text is selected */}
-                  {selToolbarPos && (
-                    <div
-                      className="fixed z-[200] -translate-x-1/2 -translate-y-full flex items-center gap-0.5 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl px-1 py-1"
-                      style={{ left: selToolbarPos.x, top: selToolbarPos.y }}
-                      onMouseDown={(e) => e.preventDefault()}
-                    >
-                      <button type="button" title="Bold" onClick={() => applyCommentFormat('bold')} className="p-1.5 rounded hover:bg-purple-50 dark:hover:bg-purple-950/40 text-gray-600 dark:text-slate-300 hover:text-purple-600 transition-colors">
-                        <Bold size={14} />
-                      </button>
-                      <button type="button" title="Italic" onClick={() => applyCommentFormat('italic')} className="p-1.5 rounded hover:bg-purple-50 dark:hover:bg-purple-950/40 text-gray-600 dark:text-slate-300 hover:text-purple-600 transition-colors">
-                        <Italic size={14} />
-                      </button>
-                      <button type="button" title="Underline" onClick={() => applyCommentFormat('underline')} className="p-1.5 rounded hover:bg-purple-50 dark:hover:bg-purple-950/40 text-gray-600 dark:text-slate-300 hover:text-purple-600 transition-colors">
-                        <Underline size={14} />
-                      </button>
-                      <button type="button" title="Strikethrough" onClick={() => applyCommentFormat('strike')} className="p-1.5 rounded hover:bg-purple-50 dark:hover:bg-purple-950/40 text-gray-600 dark:text-slate-300 hover:text-purple-600 transition-colors">
-                        <Strikethrough size={14} />
-                      </button>
-                      <div className="w-px h-4 bg-gray-200 dark:bg-slate-700 mx-0.5" />
-                      <button type="button" title="Insert table" onClick={() => applyCommentFormat('table')} className="p-1.5 rounded hover:bg-purple-50 dark:hover:bg-purple-950/40 text-gray-600 dark:text-slate-300 hover:text-purple-600 transition-colors">
-                        <Grid3x3 size={14} />
-                      </button>
-                    </div>
-                  )}
-                  {inlineMention && inlineMentionMatches.length > 0 && (
-                    <div className="absolute bottom-full left-0 right-0 mb-2 max-h-64 overflow-y-auto bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-xl shadow-2xl z-50 py-1">
-                      <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-slate-500 border-b border-gray-100 dark:border-slate-800">
-                        Mention a member
-                      </div>
-                      {inlineMentionMatches.map((member, idx) => (
-                        <button
-                          key={member.id}
-                          type="button"
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            applyInlineMention(member);
-                          }}
-                          onMouseEnter={() => setInlineMentionIndex(idx)}
-                          className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm ${
-                            idx === inlineMentionIndex
-                              ? 'bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300'
-                              : 'text-gray-700 dark:text-slate-300 hover:bg-purple-50 dark:hover:bg-purple-950/40'
-                          }`}
-                        >
-                          <span className="w-7 h-7 rounded-full bg-purple-500 text-white flex items-center justify-center text-xs font-semibold">
-                            {member.label[0]?.toUpperCase() ?? '?'}
-                          </span>
-                          <span className="truncate">{member.label}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
 
                   {attachments.length > 0 && (
                     <div className="mt-2 rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50/70 dark:bg-slate-800/60 p-2">
@@ -2517,7 +2228,7 @@ export function TaskDetailDialog({
                   </div>
                   <button
                     type="submit"
-                    disabled={sending || (!commentText.trim() && attachments.length === 0)}
+                    disabled={sending || (!commentHtml.trim() && attachments.length === 0)}
                     className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-1.5 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed font-semibold text-sm flex items-center gap-1.5 transition-all"
                   >
                     <Send size={14} />

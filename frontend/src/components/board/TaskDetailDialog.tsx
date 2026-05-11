@@ -2888,7 +2888,7 @@ const CommentBlock = ({
   const isAuthor = Boolean(currentUserId && comment.user_id === currentUserId);
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [editingText, setEditingText] = useState(() => htmlToText(comment.content || ''));
+  const [editingText, setEditingText] = useState(comment.content || '');
   const [savingEdit, setSavingEdit] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -3003,7 +3003,7 @@ const CommentBlock = ({
   };
 
   useEffect(() => {
-    setEditingText(htmlToText(comment.content || ''));
+    setEditingText(comment.content || '');
   }, [comment.id, comment.content]);
 
   useEffect(() => {
@@ -3017,22 +3017,17 @@ const CommentBlock = ({
   }, [menuOpen]);
 
   const submitEdit = async () => {
-    const next = editingText.trim();
-    const original = htmlToText(comment.content || '').trim();
-    if (!next || next === original) {
+    const nextHtml = editingText.trim();
+    const plain = nextHtml.replace(/<[^>]+>/g, '').trim();
+    if (!plain || nextHtml === (comment.content || '').trim()) {
       setEditing(false);
-      setEditingText(htmlToText(comment.content || ''));
+      setEditingText(comment.content || '');
       return;
     }
     if (!isAuthor || !onEditComment) return;
     setSavingEdit(true);
     try {
-      // Wrap plain-text lines in <p> tags so it stays compatible with Tiptap rendering
-      const html = next
-        .split(/\n+/)
-        .map((line) => `<p>${line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`)
-        .join('');
-      await onEditComment(comment.id, html);
+      await onEditComment(comment.id, nextHtml);
       setEditing(false);
     } catch (error) {
       toast({
@@ -3103,7 +3098,7 @@ const CommentBlock = ({
                   className="p-1 text-gray-400 hover:text-purple-500"
                   title="Edit comment"
                   onClick={() => {
-                    setEditingText(htmlToText(comment.content || ''));
+                    setEditingText(comment.content || '');
                     setEditing(true);
                     setMenuOpen(false);
                   }}
@@ -3170,54 +3165,17 @@ const CommentBlock = ({
           <div className="bg-white dark:bg-slate-900 border border-gray-100 dark:border-slate-800 rounded-lg p-3 shadow-xs hover:shadow-sm dark:hover:shadow-black/40 transition-shadow">
             {editing ? (
               <div className="space-y-2">
-                <div className="flex items-center gap-1 mb-1">
-                  <button type="button" onMouseDown={(e) => { e.preventDefault(); applyEditFormat('**'); }} title="Bold" className="px-1.5 py-0.5 text-xs font-bold rounded hover:bg-gray-100 dark:hover:bg-slate-700 text-gray-600 dark:text-slate-300">B</button>
-                  <button type="button" onMouseDown={(e) => { e.preventDefault(); applyEditFormat('*'); }} title="Italic" className="px-1.5 py-0.5 text-xs italic rounded hover:bg-gray-100 dark:hover:bg-slate-700 text-gray-600 dark:text-slate-300">I</button>
-                  <button type="button" onMouseDown={(e) => { e.preventDefault(); applyEditFormat('~~'); }} title="Strikethrough" className="px-1.5 py-0.5 text-xs rounded hover:bg-gray-100 dark:hover:bg-slate-700 text-gray-600 dark:text-slate-300 line-through">S</button>
-                  <button type="button" onMouseDown={(e) => { e.preventDefault(); applyEditFormat('`'); }} title="Code" className="px-1.5 py-0.5 text-xs font-mono rounded hover:bg-gray-100 dark:hover:bg-slate-700 text-gray-600 dark:text-slate-300">{`<>`}</button>
-                </div>
-                <div className="relative">
-                <textarea
-                  ref={editTextareaRef}
-                  value={editingText}
-                  onChange={(e) => {
-                    setEditingText(e.target.value);
-                    detectEditMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
-                  }}
-                  onKeyDown={(e) => {
-                    if (editInlineMention && editInlineMentionMatches.length > 0) {
-                      if (e.key === 'ArrowDown') { e.preventDefault(); setEditInlineMentionIndex((i) => (i + 1) % editInlineMentionMatches.length); return; }
-                      if (e.key === 'ArrowUp') { e.preventDefault(); setEditInlineMentionIndex((i) => (i - 1 + editInlineMentionMatches.length) % editInlineMentionMatches.length); return; }
-                      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); applyEditMention(editInlineMentionMatches[editInlineMentionIndex]); return; }
-                      if (e.key === 'Escape') { e.preventDefault(); setEditInlineMention(null); return; }
-                    }
-                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void submitEdit(); }
-                  }}
-                  rows={3}
-                  className="w-full resize-y rounded-md border border-gray-200 dark:border-slate-700 bg-transparent px-2 py-1.5 text-sm text-gray-700 dark:text-slate-200 outline-none focus:ring-2 focus:ring-purple-400/30"
+                <DescriptionEditor
+                  content={editingText}
+                  onChange={(html) => setEditingText(html)}
+                  placeholder="Edit comment..."
+                  className="bg-transparent"
                 />
-                {editInlineMention && editInlineMentionMatches.length > 0 && (
-                  <div className="absolute bottom-full left-0 mb-1 w-56 max-h-48 overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900 z-30">
-                    <div className="px-3 py-1 text-[10px] uppercase tracking-wider font-semibold text-gray-400 dark:text-slate-500 border-b border-gray-100 dark:border-slate-800">Mention someone</div>
-                    {editInlineMentionMatches.map((m, i) => (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onMouseDown={(e) => { e.preventDefault(); applyEditMention(m); }}
-                        className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm ${i === editInlineMentionIndex ? 'bg-purple-50 dark:bg-purple-500/20 text-gray-900 dark:text-slate-100' : 'hover:bg-gray-50 dark:hover:bg-slate-800 text-gray-700 dark:text-slate-300'}`}
-                      >
-                        <span className="h-6 w-6 rounded-full bg-purple-500 flex items-center justify-center text-[10px] font-bold text-white shrink-0">{m.label[0]?.toUpperCase() ?? '?'}</span>
-                        <span className="truncate">{m.label}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-                </div>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => void submitEdit()}
-                    disabled={savingEdit || !editingText.trim()}
+                    disabled={savingEdit || !editingText.replace(/<[^>]+>/g, '').trim()}
                     className="rounded-md bg-purple-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-purple-700 disabled:opacity-50"
                   >
                     Save

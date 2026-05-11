@@ -108,7 +108,7 @@ export function DescriptionEditor({
     },
     editorProps: {
       attributes: {
-        class: 'outline-none min-h-[80px] p-2 text-sm text-gray-800 dark:text-slate-200 leading-relaxed',
+        class: 'outline-none min-h-[80px] p-2 text-sm text-gray-800 dark:text-slate-200 leading-relaxed [&_p]:min-h-[1.4em] [&_p+p]:mt-1',
       },
       handlePaste(_view, event) {
         const ed = editorRef.current;

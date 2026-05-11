@@ -54,6 +54,8 @@ export interface CommentEditorHandle {
   clear(): void;
   focus(): void;
   insertContent(content: string): void;
+  /** Delete `charsBack` characters before cursor, then insert `content`. */
+  replaceBackAndInsert(charsBack: number, content: string): void;
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -62,6 +64,7 @@ interface CommentEditorProps {
   onChange?: (html: string) => void;
   onSubmit?: () => void;
   onImagePaste?: (files: File[]) => void;
+  onMentionTrigger?: () => void;
   placeholder?: string;
   className?: string;
 }
@@ -72,6 +75,7 @@ export const CommentEditor = forwardRef<CommentEditorHandle, CommentEditorProps>
       onChange,
       onSubmit,
       onImagePaste,
+      onMentionTrigger,
       placeholder = 'Write a comment...',
       className = '',
     },
@@ -81,10 +85,12 @@ export const CommentEditor = forwardRef<CommentEditorHandle, CommentEditorProps>
     const onSubmitRef = useRef(onSubmit);
     const onImagePasteRef = useRef(onImagePaste);
     const onChangeRef = useRef(onChange);
+    const onMentionTriggerRef = useRef(onMentionTrigger);
 
     useEffect(() => { onSubmitRef.current = onSubmit; }, [onSubmit]);
     useEffect(() => { onImagePasteRef.current = onImagePaste; }, [onImagePaste]);
     useEffect(() => { onChangeRef.current = onChange; }, [onChange]);
+    useEffect(() => { onMentionTriggerRef.current = onMentionTrigger; }, [onMentionTrigger]);
 
     const editor = useEditor({
       extensions: [
@@ -100,6 +106,12 @@ export const CommentEditor = forwardRef<CommentEditorHandle, CommentEditorProps>
         const html = ed.getHTML();
         const value = html === '<p></p>' ? '' : html;
         onChangeRef.current?.(value);
+        // Detect inline @ typing → open mention picker
+        const { from } = ed.state.selection;
+        const textBefore = ed.state.doc.textBetween(Math.max(0, from - 2), from, '\n');
+        if (textBefore.endsWith('@') && (textBefore.length === 1 || /[\s\n]/.test(textBefore[0]))) {
+          onMentionTriggerRef.current?.();
+        }
       },
       editorProps: {
         attributes: {
@@ -170,6 +182,12 @@ export const CommentEditor = forwardRef<CommentEditorHandle, CommentEditorProps>
       insertContent(content: string) {
         editorRef.current?.commands.focus();
         editorRef.current?.commands.insertContent(content);
+      },
+      replaceBackAndInsert(charsBack: number, content: string) {
+        const ed = editorRef.current;
+        if (!ed) return;
+        const { from } = ed.state.selection;
+        ed.chain().focus().deleteRange({ from: from - charsBack, to: from }).insertContentAt(from - charsBack, content).run();
       },
     }));
 

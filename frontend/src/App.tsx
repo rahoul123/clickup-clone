@@ -13,6 +13,7 @@ import Signup from "./pages/Signup";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import NotFound from "./pages/NotFound";
+import { UpdateDialog } from "@/components/UpdateDialog";
 
 const queryClient = new QueryClient();
 
@@ -90,6 +91,7 @@ const App = () => (
     <AppErrorBoundary>
       <TooltipProvider>
         <div className="h-full min-h-0 w-full overflow-hidden bg-background text-foreground">
+          <UpdateDialog />
         <Toaster />
         <Sonner position="bottom-right" closeButton offset={24} />
         <BrowserRouter>

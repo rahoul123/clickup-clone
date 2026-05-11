@@ -26,6 +26,8 @@ interface NotificationsPanelProps {
   onMarkAllRead?: () => void | Promise<void>;
   /** Optional dismiss handler — removes the notification from the list entirely. */
   onDismiss?: (id: string) => void | Promise<void>;
+  /** Permanently clear all notifications — they will NOT reappear after reload. */
+  onClearAll?: () => void | Promise<void>;
 }
 
 type FilterMode = 'all' | 'unread' | 'read';
@@ -39,10 +41,22 @@ export function NotificationsPanel({
   onOpenTask,
   onMarkAllRead,
   onDismiss,
+  onClearAll,
 }: NotificationsPanelProps) {
   const [filter, setFilter] = useState<FilterMode>('all');
   const [page, setPage] = useState(1);
   const [markingAll, setMarkingAll] = useState(false);
+  const [clearingAll, setClearingAll] = useState(false);
+
+  const handleClearAll = async () => {
+    if (notifications.length === 0 || clearingAll || !onClearAll) return;
+    setClearingAll(true);
+    try {
+      await onClearAll();
+    } finally {
+      setClearingAll(false);
+    }
+  };
 
   const unreadCount = notifications.filter((n) => !n.read).length;
   const readCount = notifications.length - unreadCount;
@@ -137,19 +151,37 @@ export function NotificationsPanel({
                 ))}
               </div>
 
-              <button
-                type="button"
-                onClick={handleMarkAllRead}
-                disabled={unreadCount === 0 || markingAll}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-border/70 bg-background px-3 py-1.5 text-xs font-medium text-gray-800 dark:text-slate-200 hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                {markingAll ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <CheckCheck className="h-3.5 w-3.5" />
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleMarkAllRead}
+                  disabled={unreadCount === 0 || markingAll}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-border/70 bg-background px-3 py-1.5 text-xs font-medium text-gray-800 dark:text-slate-200 hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {markingAll ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <CheckCheck className="h-3.5 w-3.5" />
+                  )}
+                  Mark all as read
+                </button>
+                {onClearAll && (
+                  <button
+                    type="button"
+                    onClick={handleClearAll}
+                    disabled={notifications.length === 0 || clearingAll}
+                    title="Permanently clear all — they will not come back after reload"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50/60 dark:bg-red-950/20 px-3 py-1.5 text-xs font-medium text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-950/40 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {clearingAll ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <X className="h-3.5 w-3.5" />
+                    )}
+                    Clear all
+                  </button>
                 )}
-                Mark all as read
-              </button>
+              </div>
             </div>
           </CardHeader>
 

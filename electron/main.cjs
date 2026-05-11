@@ -262,38 +262,49 @@ function setupAutoUpdater() {
   autoUpdater.on('download-progress', (p) => {
     logLine(`[updater] downloading ${Math.round(p.percent)}% (${p.transferred}/${p.total})`);
   });
-  autoUpdater.on('update-downloaded', async (info) => {
-    logLine(`[updater] downloaded: ${info?.version} — prompting user`);
-    const { response } = await dialog.showMessageBox(mainWindow ?? undefined, {
-      type: 'info',
-      buttons: ['Restart now', 'Later'],
-      defaultId: 0,
-      cancelId: 1,
-      title: 'Update ready',
-      message: `DigitechIO ${info?.version || ''} is ready to install.`,
-      detail:
-        'The app will close, update, and reopen. Any unsaved work should be saved first.',
-    });
-    if (response === 0) {
-      // `isSilent=false` shows the NSIS progress UI; `isForceRunAfter=true`
-      // relaunches the app once the installer finishes.
-      autoUpdater.quitAndInstall(false, true);
-    }
+  autoUpdater.on('update-downloaded', (info) => {
+    logLine(`[updater] downloaded: ${info?.version} — showing modern dialog`);
+    global.__pendingUpdateInfo = info;
+    showUpdateReadyDialog(info);
   });
 
-  // Delay the first check a bit so the app fully boots and the user sees a
-  // responsive window before any background network work kicks in.
+  // Install button clicked
+  ipcMain.on('update:install', () => {
+    logLine('[updater] user chose to install now');
+    if (global.__updateReminderTimer) {
+      clearTimeout(global.__updateReminderTimer);
+      global.__updateReminderTimer = null;
+    }
+    autoUpdater.quitAndInstall(false, true);
+  });
+
+  // Later button clicked — remind after 30 minutes
+  ipcMain.on('update:dismiss', () => {
+    logLine('[updater] user dismissed — will remind in 30 min');
+    if (global.__updateReminderTimer) clearTimeout(global.__updateReminderTimer);
+    global.__updateReminderTimer = setTimeout(() => {
+      logLine('[updater] re-showing update dialog after 30 min');
+      if (global.__pendingUpdateInfo) {
+        showUpdateReadyDialog(global.__pendingUpdateInfo);
+      }
+    }, 30 * 60 * 1000);
+  });
+
   setTimeout(() => {
     autoUpdater.checkForUpdates().catch((err) => {
       logLine(`[updater] checkForUpdates failed: ${err?.stack || err?.message || err}`);
     });
   }, 8_000);
 
-  // Also re-check every 4 hours while the app stays open, so long-running
-  // sessions eventually pick up releases without a manual restart.
   setInterval(() => {
     autoUpdater.checkForUpdates().catch(() => {});
   }, 4 * 60 * 60 * 1000);
+}
+
+function showUpdateReadyDialog(info) {
+  if (!mainWindow) return;
+  logLine(`[updater] sending update:ready to renderer — version ${info?.version}`);
+  mainWindow.webContents.send('update:ready', info);
 }
 
 async function createMainWindow() {

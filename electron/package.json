@@ -26,9 +26,7 @@
       "preload.cjs"
     ],
     "extraResources": [
-     
-    
-      {
+     {
         "from": "../.env",
         "to": "."
       }

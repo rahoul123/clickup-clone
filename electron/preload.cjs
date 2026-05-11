@@ -1,8 +1,3 @@
-/**
- * Preload script — exposes a tiny, safe `window.digitech` surface to the
- * renderer. Currently just reports whether we're running inside the desktop
- * shell, so the UI can show Desktop-specific affordances later if needed.
- */
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('digitech', {
@@ -14,4 +9,8 @@ contextBridge.exposeInMainWorld('digitech', {
     chrome: process.versions.chrome,
     node: process.versions.node,
   },
+  // Update handlers
+  onUpdateReady: (callback) => ipcRenderer.on('update:ready', (_e, info) => callback(info)),
+  installUpdate: () => ipcRenderer.send('update:install'),
+  dismissUpdate: () => ipcRenderer.send('update:dismiss'),
 });

@@ -14,6 +14,26 @@ import {
 } from 'lucide-react';
 import type { Task, TaskPriority, CommentAttachment, ChecklistItem } from '@/types';
 
+/** Strip HTML tags and convert common HTML elements to plain text (for edit textareas). */
+function htmlToText(html: string): string {
+  if (!html) return '';
+  if (!html.trimStart().startsWith('<')) return html;
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<li[^>]*>/gi, '• ')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 /** Render inline markdown: **bold**, *italic*, __underline__, ~~strike~~, `code`, @mention */
 function renderInlineMarkdown(text: string): React.ReactNode[] {
   const pattern = /(\*\*(.+?)\*\*|\*(.+?)\*|__(.+?)__|~~(.+?)~~|`(.+?)`|(@\w[\w.-]*))/g;
@@ -281,6 +301,7 @@ export function TaskDetailDialog({
   const [activeTab, setActiveTab] = useState<'task' | 'doc' | 'reminder' | 'whiteboard' | 'dashboard'>('task');
   const [commentHtml, setCommentHtml] = useState('');
   const commentEditorRef = useRef<CommentEditorHandle | null>(null);
+  const mentionFromTypingRef = useRef(false);
   const [sending, setSending] = useState(false);
   const [saving, setSaving] = useState(false);
   const [title, setTitle] = useState(task.title);
@@ -747,16 +768,26 @@ export function TaskDetailDialog({
   const insertMention = (member: { id: string; label: string }) => {
     const displayName = member.label.replace(/\s*\(.*?\)\s*$/, '').trim() || member.label;
     const mentionToken = `@${displayName.replace(/\s+/g, '_')} `;
-    commentEditorRef.current?.insertContent(mentionToken);
+    if (mentionFromTypingRef.current) {
+      // User typed @ — delete that char then insert so we don't get @@Name
+      commentEditorRef.current?.replaceBackAndInsert(1, mentionToken);
+    } else {
+      commentEditorRef.current?.insertContent(mentionToken);
+    }
+    mentionFromTypingRef.current = false;
     setShowMentionPicker(false);
     setMentionSearch('');
   };
 
   const filteredMentionMembers = useMemo(() => {
     const q = mentionSearch.trim().toLowerCase();
-    if (!q) return memberOptions;
-    return memberOptions.filter((m) => m.label.toLowerCase().includes(q));
-  }, [mentionSearch, memberOptions]);
+    const base = q ? memberOptions.filter((m) => m.label.toLowerCase().includes(q)) : memberOptions;
+    return [...base].sort((a, b) => {
+      if (a.id === currentUserId) return -1;
+      if (b.id === currentUserId) return 1;
+      return 0;
+    });
+  }, [mentionSearch, memberOptions, currentUserId]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.currentTarget.files;
@@ -1971,6 +2002,8 @@ export function TaskDetailDialog({
                                 key={comment.id}
                                 content={comment.content}
                                 createdAt={comment.created_at}
+                                authorName={comment.author_name}
+                                isCurrentUser={comment.user_id === currentUserId}
                               />
                             ) : (
                               <CommentBlock
@@ -2028,6 +2061,7 @@ export function TaskDetailDialog({
                     onChange={setCommentHtml}
                     onSubmit={() => { if (!sending) void handleSubmit(); }}
                     onImagePaste={handleImagePaste}
+                    onMentionTrigger={() => { mentionFromTypingRef.current = true; setShowMentionPicker(true); setMentionSearch(''); }}
                   />
 
                   {attachments.length > 0 && (
@@ -2112,6 +2146,7 @@ export function TaskDetailDialog({
                       <button
                         type="button"
                         onClick={() => {
+                          mentionFromTypingRef.current = false;
                           setShowMentionPicker((v) => !v);
                           setMentionSearch('');
                         }}
@@ -2138,19 +2173,24 @@ export function TaskDetailDialog({
                                 No member found
                               </div>
                             )}
-                            {filteredMentionMembers.map((member) => (
-                              <button
-                                key={member.id}
-                                type="button"
-                                onClick={() => insertMention(member)}
-                                className="w-full flex items-center gap-2 px-3 py-2 hover:bg-purple-50 dark:hover:bg-purple-950/40 text-left text-sm text-gray-700 dark:text-slate-300"
-                              >
-                                <span className="w-7 h-7 rounded-full bg-purple-500 text-white flex items-center justify-center text-xs font-semibold">
-                                  {member.label[0]?.toUpperCase() ?? '?'}
-                                </span>
-                                <span className="truncate">{member.label}</span>
-                              </button>
-                            ))}
+                            {filteredMentionMembers.map((member) => {
+                              const isMe = member.id === currentUserId;
+                              return (
+                                <button
+                                  key={member.id}
+                                  type="button"
+                                  onClick={() => insertMention(member)}
+                                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-purple-50 dark:hover:bg-purple-950/40 text-left text-sm text-gray-700 dark:text-slate-300"
+                                >
+                                  <span className="w-7 h-7 rounded-full bg-purple-500 text-white flex items-center justify-center text-xs font-semibold flex-shrink-0">
+                                    {member.label[0]?.toUpperCase() ?? '?'}
+                                  </span>
+                                  <span className="truncate">
+                                    {isMe ? `Me (${member.label})` : member.label}
+                                  </span>
+                                </button>
+                              );
+                            })}
                           </div>
                         </div>
                       )}
@@ -2752,17 +2792,35 @@ const ActivityText = ({ content }: { content: string }) => {
   );
 };
 
-const ActivityRow = ({ content, createdAt }: { content: string; createdAt: string }) => (
-  <div className="flex items-start justify-between gap-3 py-1 text-xs leading-5">
-    <div className="min-w-0 flex items-start gap-2">
-      <span className="mt-[2px] text-gray-500 dark:text-slate-500">•</span>
-      <p className="text-gray-700 dark:text-slate-200 font-normal break-words">
-        <ActivityText content={content} />
-      </p>
+const ActivityRow = ({
+  content,
+  createdAt,
+  authorName,
+  isCurrentUser,
+}: {
+  content: string;
+  createdAt: string;
+  authorName?: string;
+  isCurrentUser?: boolean;
+}) => {
+  // Replace the author's name with "Me" when the actor is the current user
+  let displayContent = content;
+  if (isCurrentUser && authorName) {
+    const escaped = authorName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    displayContent = content.replace(new RegExp(`^${escaped}`), 'Me');
+  }
+  return (
+    <div className="flex items-start justify-between gap-3 py-1 text-xs leading-5">
+      <div className="min-w-0 flex items-start gap-2">
+        <span className="mt-[2px] text-gray-500 dark:text-slate-500">•</span>
+        <p className="text-gray-700 dark:text-slate-200 font-normal break-words">
+          <ActivityText content={displayContent} />
+        </p>
+      </div>
+      <span className="shrink-0 text-[11px] text-gray-500 dark:text-slate-500">{formatRelativeActivityTime(createdAt)}</span>
     </div>
-    <span className="shrink-0 text-[11px] text-gray-500 dark:text-slate-500">{formatRelativeActivityTime(createdAt)}</span>
-  </div>
-);
+  );
+};
 
 /**
  * One comment bubble in the Activity panel. Handles:
@@ -2830,7 +2888,7 @@ const CommentBlock = ({
   const isAuthor = Boolean(currentUserId && comment.user_id === currentUserId);
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [editingText, setEditingText] = useState(comment.content || '');
+  const [editingText, setEditingText] = useState(() => htmlToText(comment.content || ''));
   const [savingEdit, setSavingEdit] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -2945,7 +3003,7 @@ const CommentBlock = ({
   };
 
   useEffect(() => {
-    setEditingText(comment.content || '');
+    setEditingText(htmlToText(comment.content || ''));
   }, [comment.id, comment.content]);
 
   useEffect(() => {
@@ -2960,15 +3018,21 @@ const CommentBlock = ({
 
   const submitEdit = async () => {
     const next = editingText.trim();
-    if (!next || next === (comment.content || '').trim()) {
+    const original = htmlToText(comment.content || '').trim();
+    if (!next || next === original) {
       setEditing(false);
-      setEditingText(comment.content || '');
+      setEditingText(htmlToText(comment.content || ''));
       return;
     }
     if (!isAuthor || !onEditComment) return;
     setSavingEdit(true);
     try {
-      await onEditComment(comment.id, next);
+      // Wrap plain-text lines in <p> tags so it stays compatible with Tiptap rendering
+      const html = next
+        .split(/\n+/)
+        .map((line) => `<p>${line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`)
+        .join('');
+      await onEditComment(comment.id, html);
       setEditing(false);
     } catch (error) {
       toast({
@@ -3011,7 +3075,9 @@ const CommentBlock = ({
         <div className="flex-1 min-w-0 relative">
           <div className="flex items-center justify-between mb-1">
             <p className="text-sm font-semibold text-gray-900 dark:text-slate-100">
-              {comment.author_name || 'Anonymous'}
+              {comment.user_id === currentUserId
+                ? `Me (${comment.author_name || 'You'})`
+                : (comment.author_name || 'Anonymous')}
             </p>
             <time className="text-xs text-gray-400 dark:text-slate-500 opacity-0 group-hover:opacity-100 transition-opacity">
               {new Date(comment.created_at).toLocaleString('en-US', {
@@ -3037,6 +3103,7 @@ const CommentBlock = ({
                   className="p-1 text-gray-400 hover:text-purple-500"
                   title="Edit comment"
                   onClick={() => {
+                    setEditingText(htmlToText(comment.content || ''));
                     setEditing(true);
                     setMenuOpen(false);
                   }}

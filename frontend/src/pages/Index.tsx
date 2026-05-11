@@ -77,6 +77,37 @@ const Index = () => {
   const recentToastByMessageRef = useRef<Map<string, number>>(new Map());
   const initializedNotificationsRef = useRef(false);
 
+  /** Per-user persistent set of notification ids the user has cleared.
+   *  These should NEVER re-appear after a page reload. */
+  const dismissedStorageKey = user?.id ? `dismissedNotifications:${user.id}` : null;
+  const dismissedNotificationIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!dismissedStorageKey) {
+      dismissedNotificationIdsRef.current = new Set();
+      return;
+    }
+    try {
+      const raw = window.localStorage.getItem(dismissedStorageKey);
+      const arr = raw ? (JSON.parse(raw) as string[]) : [];
+      dismissedNotificationIdsRef.current = new Set(Array.isArray(arr) ? arr : []);
+    } catch {
+      dismissedNotificationIdsRef.current = new Set();
+    }
+  }, [dismissedStorageKey]);
+
+  const persistDismissed = useCallback(() => {
+    if (!dismissedStorageKey) return;
+    try {
+      window.localStorage.setItem(
+        dismissedStorageKey,
+        JSON.stringify(Array.from(dismissedNotificationIdsRef.current)),
+      );
+    } catch {
+      // ignore quota errors
+    }
+  }, [dismissedStorageKey]);
+
   const showDedupedToast = useCallback(
     (message: string, variant: 'default' | 'success' | 'error' = 'default') => {
       const text = String(message || '').trim();
@@ -437,8 +468,11 @@ const Index = () => {
     setNotificationsLoading(true);
     try {
       const result = await api.app.notifications();
-      const next = (result.notifications ?? []) as AppNotification[];
-      setNotificationUnreadCount(result.unreadCount ?? 0);
+      const all = (result.notifications ?? []) as AppNotification[];
+      // Filter out notifications the user has permanently cleared
+      const next = all.filter((n) => !dismissedNotificationIdsRef.current.has(n.id));
+      const filteredUnreadCount = next.filter((n) => !n.read).length;
+      setNotificationUnreadCount(filteredUnreadCount);
       setNotifications(next);
 
       const unread = next.filter((n) => !n.read);
@@ -697,7 +731,24 @@ const Index = () => {
         // best-effort
       }
     }
+    // Remember locally so it stays gone after reload
+    dismissedNotificationIdsRef.current.add(id);
+    persistDismissed();
     setNotifications((prev) => prev.filter((n) => n.id !== id));
+  };
+
+  const dismissAllNotifications = async () => {
+    const ids = notifications.map((n) => n.id);
+    if (ids.length === 0) return;
+    // Mark all unread on server (best-effort, parallel)
+    const unread = notifications.filter((n) => !n.read);
+    if (unread.length > 0) {
+      await Promise.allSettled(unread.map((n) => api.app.markNotificationRead(n.id)));
+    }
+    for (const id of ids) dismissedNotificationIdsRef.current.add(id);
+    persistDismissed();
+    setNotifications([]);
+    setNotificationUnreadCount(0);
   };
 
   const handleOpenSpaceView = async (spaceId: string, spaceName: string) => {
@@ -1653,6 +1704,7 @@ const Index = () => {
               onMarkRead={markNotificationRead}
               onOpenTask={handleOpenNotificationTask}
               onDismiss={dismissNotification}
+              onClearAll={dismissAllNotifications}
             />
           ) : pageView === 'team-members' ? (
             <TeamMembersPage

@@ -524,12 +524,17 @@ export function AddTaskDialog({
                   placeholder="Task Name"
                   className="w-full bg-transparent text-2xl font-semibold text-gray-900 dark:text-slate-100 outline-none placeholder:text-gray-300 dark:placeholder:text-slate-600 border-none p-0 focus:ring-0 caret-purple-500"
                 />
-                <input
-                  type="text"
+                <textarea
                   value={description}
-                  onChange={(e) => setDescription(e.target.value)}
+                  onChange={(e) => {
+                    setDescription(e.target.value);
+                    const el = e.currentTarget;
+                    el.style.height = 'auto';
+                    el.style.height = `${Math.max(24, el.scrollHeight)}px`;
+                  }}
                   placeholder="Add description, or write with AI"
-                  className="w-full bg-transparent text-[14px] text-gray-700 dark:text-slate-300 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500 border-none p-0 focus:ring-0"
+                  rows={1}
+                  className="w-full bg-transparent text-[14px] text-gray-700 dark:text-slate-300 outline-none placeholder:text-gray-400 dark:placeholder:text-slate-500 border-none p-0 focus:ring-0 resize-none leading-relaxed"
                 />
                 <div className="flex items-center gap-1 text-[13px] text-gray-400 dark:text-slate-500">
                   <span>Write with</span>

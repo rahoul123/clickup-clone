@@ -1,6 +1,6 @@
 {
   "name": "collab-creek-electron",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "main": "main.cjs",
   "author": "Rahoul Khatri",
   "private": true,
@@ -18,7 +18,7 @@
       "owner": "rahoul123",
       "repo": "clickup-clone"
     },
-    "win": {
+    "win": { "icon": "assets/icon.ico",
       "target": "nsis",
       "artifactName": "${productName}-Setup-${version}.exe"
     },

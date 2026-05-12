@@ -2,7 +2,7 @@
   "name": "digitechio-desktop",
   "productName": "DigitechIO",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.4",
   "description": "DigitechIO collaboration workspace desktop app",
   "author": {
     "name": "DigitechIO"
@@ -188,16 +188,20 @@
           ]
         }
       ],
-      "icon": "frontend/public/favicon.png"
+      "icon": "frontend/public/favicon.ico"
     },
     "nsis": {
-      "oneClick": false,
+      "oneClick": true,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
+      "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "DigitechIO",
-      "artifactName": "DigitechIO-Setup-${version}.${ext}"
+      "artifactName": "DigitechIO-Setup-${version}.${ext}",
+      "differentialPackage": true,
+      "installerIcon": "frontend/public/favicon.ico",
+      "uninstallerIcon": "frontend/public/favicon.ico",
+      "installerHeaderIcon": "frontend/public/favicon.ico"
     },
     "mac": {
       "target": [

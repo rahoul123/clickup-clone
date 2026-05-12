@@ -253,7 +253,7 @@ function setupAutoUpdater() {
 
   autoUpdater.on('checking-for-update', () => logLine('[updater] checking...'));
   autoUpdater.on('update-available', (info) => {
-    logLine(`[updater] update available: ${info?.version}`);
+    logLine(`[updater] update available: ${info?.version} (currently running ${app.getVersion()})`);
   });
   autoUpdater.on('update-not-available', () => logLine('[updater] up to date'));
   autoUpdater.on('error', (err) => {
@@ -263,6 +263,16 @@ function setupAutoUpdater() {
     logLine(`[updater] downloading ${Math.round(p.percent)}% (${p.transferred}/${p.total})`);
   });
   autoUpdater.on('update-downloaded', (info) => {
+    // Guard: if the "new" version equals the version we're already running,
+    // don't prompt. This prevents the "update popup keeps coming back" loop
+    // when GitHub release version matches the installed version.
+    try {
+      const running = app.getVersion();
+      if (info?.version && running && info.version === running) {
+        logLine(`[updater] downloaded ${info.version} but we already run ${running} — skipping prompt`);
+        return;
+      }
+    } catch {}
     logLine(`[updater] downloaded: ${info?.version} — showing modern dialog`);
     global.__pendingUpdateInfo = info;
     showUpdateReadyDialog(info);
@@ -275,7 +285,19 @@ function setupAutoUpdater() {
       clearTimeout(global.__updateReminderTimer);
       global.__updateReminderTimer = null;
     }
-    autoUpdater.quitAndInstall(false, true);
+    // Silent install (isSilent=true) + auto-restart after (isForceRunAfter=true).
+    // Requires NSIS `oneClick: true` in builder config so the installer
+    // doesn't show a wizard the user has to click through.
+    try {
+      // Allow Electron a moment to clean up renderer state before we
+      // initiate the swap. Without this, mainWindow.close() races the
+      // installer and the new version sometimes fails to be written.
+      setImmediate(() => {
+        autoUpdater.quitAndInstall(true, true);
+      });
+    } catch (err) {
+      logLine(`[updater] quitAndInstall threw: ${err?.stack || err?.message || err}`);
+    }
   });
 
   // Later button clicked — remind after 30 minutes

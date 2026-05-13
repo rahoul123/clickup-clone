@@ -34,6 +34,21 @@ function htmlToText(html: string): string {
     .trim();
 }
 
+/** True when Tiptap HTML has no visible text (avoids posting empty-looking comments). */
+function isEmptyRichComment(html: string): boolean {
+  const raw = html.trim();
+  if (!raw) return true;
+  if (raw === '<p></p>') return true;
+  try {
+    const doc = new DOMParser().parseFromString(raw, 'text/html');
+    const text = (doc.body.textContent || '').replace(/\u00a0/g, ' ').trim();
+    if (text.length > 0) return false;
+    return doc.body.querySelector('img') === null;
+  } catch {
+    return false;
+  }
+}
+
 /** Render inline markdown: **bold**, *italic*, __underline__, ~~strike~~, `code`, @mention */
 function renderInlineMarkdown(text: string): React.ReactNode[] {
   const pattern = /(\*\*(.+?)\*\*|\*(.+?)\*|__(.+?)__|~~(.+?)~~|`(.+?)`|(@\w[\w.-]*))/g;
@@ -484,6 +499,15 @@ export function TaskDetailDialog({
   useEffect(() => {
     taskRef.current = task;
   }, [task]);
+
+  // When a teammate updates the task (e.g. moves it to Complete), keep local
+  // `status` aligned with the server record. Otherwise debounced autosave can
+  // PATCH a stale status and undo their change.
+  useLayoutEffect(() => {
+    if (skipAutoSaveRef.current) return;
+    setStatus(task.status);
+  }, [task.status]);
+
   const MAX_ATTACHMENT_SIZE_BYTES = 4 * 1024 * 1024;
 
   // Only reset local form state when the user switches to a DIFFERENT task.
@@ -670,7 +694,7 @@ export function TaskDetailDialog({
     if (e) e.preventDefault();
     const html = commentHtml.trim();
     const hasAttachments = attachments.length > 0;
-    if (!html && !hasAttachments) return;
+    if (isEmptyRichComment(html) && !hasAttachments) return;
 
     setSending(true);
     try {
@@ -2268,7 +2292,7 @@ export function TaskDetailDialog({
                   </div>
                   <button
                     type="submit"
-                    disabled={sending || (!commentHtml.trim() && attachments.length === 0)}
+                    disabled={sending || (isEmptyRichComment(commentHtml) && attachments.length === 0)}
                     className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-1.5 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed font-semibold text-sm flex items-center gap-1.5 transition-all"
                   >
                     <Send size={14} />

@@ -208,6 +208,8 @@ export function KanbanBoard({
   const [inlineComposeStatus, setInlineComposeStatus] = useState<string | null>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const homeOpenRef = useRef<string | null>(null);
+  /** Which task id the detail panel is loading / showing comments for (avoids stale updates after close/switch). */
+  const taskDetailCommentsForIdRef = useRef<string | null>(null);
   const [taskComments, setTaskComments] = useState<
     Array<{
       id: string;
@@ -400,33 +402,53 @@ export function KanbanBoard({
   };
 
   const openTaskDetails = async (task: Task) => {
+    taskDetailCommentsForIdRef.current = task.id;
     setSelectedTask(task);
     setLoadingComments(true);
+    let loaded: typeof taskComments = [];
     try {
       const result = await api.app.taskComments(task.id);
-      let next = result.comments ?? [];
-      setTaskComments(next);
-      if (user?.id && next.length > 0) {
-        try {
-          await api.app.markTaskCommentsRead(task.id, { commentIds: next.map((c) => c.id) });
-          const refreshed = await api.app.taskComments(task.id);
-          next = refreshed.comments ?? [];
-          setTaskComments(next);
-        } catch (e) {
-          console.error('Failed to mark comments read', e);
-        }
-      }
+      loaded = result.comments ?? [];
+      setTaskComments(loaded);
     } catch (error) {
       console.error('Failed to fetch task comments', error);
       setTaskComments([]);
+      loaded = [];
     } finally {
       setLoadingComments(false);
+    }
+
+    if (user?.id && loaded.length > 0) {
+      const openedId = task.id;
+      const viewerId = user.id;
+      const viewerName = user.displayName || user.email || 'You';
+      void (async () => {
+        try {
+          await api.app.markTaskCommentsRead(openedId, { commentIds: loaded.map((c) => c.id) });
+          if (taskDetailCommentsForIdRef.current !== openedId) return;
+          setTaskComments((prev) => {
+            if (taskDetailCommentsForIdRef.current !== openedId) return prev;
+            const readAt = new Date().toISOString();
+            return prev.map((c) => {
+              if (c.user_id === viewerId) return c;
+              if (c.read_by?.some((r) => r.user_id === viewerId)) return c;
+              return {
+                ...c,
+                read_by: [...(c.read_by ?? []), { user_id: viewerId, name: viewerName, read_at: readAt }],
+              };
+            });
+          });
+        } catch (e) {
+          console.error('Failed to mark comments read', e);
+        }
+      })();
     }
   };
 
   const handleDeleteTask = async (taskId: string) => {
     await onDeleteTask(taskId);
     if (selectedTask?.id === taskId) {
+      taskDetailCommentsForIdRef.current = null;
       setSelectedTask(null);
     }
   };
@@ -1153,7 +1175,10 @@ export function KanbanBoard({
               setSelectedTask((prev) => (prev && prev.id === savedId ? updated : prev));
             }
           }}
-          onClose={() => setSelectedTask(null)}
+          onClose={() => {
+            taskDetailCommentsForIdRef.current = null;
+            setSelectedTask(null);
+          }}
           onCreateReminder={onCreateReminder}
           currentUserId={user?.id}
           subtasks={tasks.filter((t) => t.parent_task_id === selectedTask.id)}

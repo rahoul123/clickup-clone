@@ -1,0 +1,47 @@
+Collab Creek Codebase Bug Report
+Generated: 2026-05-14
+
+Scope
+- Backend and frontend codebase review focused on functional and authorization defects.
+- No code changes were applied during analysis.
+
+Bug 1
+File/Line
+- backend/src/routes.js:1386, 1395, 1399, 1406
+
+What the bug is
+- The endpoint GET /workspaces/:workspaceId/tasks-search searches tasks across all workspace spaces/lists without applying department/list visibility checks (including restricted-list access checks).
+
+Why it is a bug
+- The endpoint can expose task metadata (title/status/list/space name) from lists the caller should not be able to access, which is an authorization/data-leak defect.
+
+Bug 2
+File/Line
+- backend/src/routes.js:2165, 2172
+
+What the bug is
+- The endpoint POST /lists/:listId/favorite validates access using WorkspaceMember.findOne({ userId: req.session.userId }) rather than validating membership/access for the specific target list’s workspace/list.
+
+Why it is a bug
+- Any user who is a member of any workspace can favorite arbitrary list IDs, including lists outside their authorized scope. This is an authorization boundary violation.
+
+Bug 3
+File/Line
+- backend/src/routes.js:2052, 2069, 2077, 2083
+
+What the bug is
+- The list reorder endpoint updates only IDs present in orderedListIds and leaves omitted active lists at previous positions.
+
+Why it is a bug
+- This can produce duplicate position values and unstable list ordering, causing inconsistent UI order and non-deterministic behavior.
+
+Bug 4
+File/Line
+- backend/src/routes.js:3267-3505
+- Key check points: 3277, 3321, 3398, 3437, 3474, 3505
+
+What the bug is
+- Task comment endpoints (read/create/react/edit/delete/mark-read) enforce only broad role checks and do not enforce list-level/department/restricted-list access rules for the task’s parent list.
+
+Why it is a bug
+- Users with a workspace role can read or mutate comments on tasks in restricted/cross-department lists if they know task/comment IDs, creating an access-control bypass.

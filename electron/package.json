@@ -1,6 +1,6 @@
 {
   "name": "collab-creek-electron",
-  "version": "1.0.7",
+  "version": "1.0.9",
   "main": "main.cjs",
   "author": "Rahoul Khatri",
   "private": true,

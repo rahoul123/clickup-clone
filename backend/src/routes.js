@@ -347,6 +347,51 @@ async function isDepartmentMainSpace(space) {
   return Boolean(parent?.isMasterTeamSpace);
 }
 
+/**
+ * Shared prelude for task-comment endpoints. Loads the task → list → space
+ * → workspace chain and verifies that the caller has both department-level
+ * workspace access and per-list access (restricted lists / shared-main /
+ * department scope). Returns `{ task, list, space, role, ... }` on success
+ * or `{ error: { status, message } }` so callers can early-return.
+ */
+async function loadTaskAccessContext(taskId, userId) {
+  const task = await Task.findById(taskId).lean();
+  if (!task) return { error: { status: 404, message: 'Task not found' } };
+  const list = await List.findById(task.listId).lean();
+  if (!list) return { error: { status: 404, message: 'List not found' } };
+  const space = await Space.findById(list.spaceId).lean();
+  if (!space) return { error: { status: 404, message: 'Space not found' } };
+  const role = await getRole(space.workspaceId, userId);
+  if (!role) return { error: { status: 403, message: 'No permission' } };
+  const workspace = await Workspace.findById(space.workspaceId).lean();
+  const currentUser = await User.findById(userId).lean();
+  if (
+    !canViewWorkspaceByDepartment(
+      currentUser?.department ?? null,
+      workspace?.department ?? null,
+      role,
+    )
+  ) {
+    return { error: { status: 403, message: 'Department access blocked' } };
+  }
+  const isDepartmentMain = await isDepartmentMainSpace(space);
+  if (
+    !canAccessListForTasks({
+      list,
+      role,
+      userId,
+      userDepartment: currentUser?.department ?? null,
+      workspaceDepartment: workspace?.department ?? null,
+      spaceDepartment: space.department,
+      spaceName: space.name,
+      isDepartmentMain,
+    })
+  ) {
+    return { error: { status: 403, message: 'List access blocked' } };
+  }
+  return { task, list, space, workspace, role, currentUser };
+}
+
 async function applyPendingInvitesForUser(user) {
   if (!user?.email) return;
   const email = String(user.email).toLowerCase().trim();
@@ -1392,14 +1437,79 @@ export function buildRoutes({ realtime } = {}) {
     const role = await getRole(workspaceId, req.session.userId);
     if (!role) return res.status(403).json({ message: 'No permission' });
 
-    const spaces = await Space.find({ workspaceId }, { _id: 1, name: 1 }).lean();
+    const workspace = await Workspace.findById(workspaceId).lean();
+    if (!workspace) return res.status(404).json({ message: 'Workspace not found' });
+    const currentUser = await User.findById(req.session.userId).lean();
+    if (
+      !canViewWorkspaceByDepartment(
+        currentUser?.department ?? null,
+        workspace?.department ?? null,
+        role,
+      )
+    ) {
+      return res.status(403).json({ message: 'Department access blocked' });
+    }
+
+    const spaces = await Space.find(
+      { workspaceId },
+      { _id: 1, name: 1, department: 1, parentSpaceId: 1, isMasterTeamSpace: 1 },
+    ).lean();
     const spaceIds = spaces.map((s) => s._id);
     if (spaceIds.length === 0) return res.json({ tasks: [] });
 
-    const lists = await List.find({ spaceId: { $in: spaceIds } }, { _id: 1, name: 1, spaceId: 1 }).lean();
-    const listIds = lists.map((l) => l._id);
-    const listMap = new Map(lists.map((l) => [l._id, l]));
+    const lists = await List.find(
+      { spaceId: { $in: spaceIds } },
+      {
+        _id: 1,
+        name: 1,
+        spaceId: 1,
+        isRestricted: 1,
+        allowedUserIds: 1,
+        createdBy: 1,
+        isSharedMainList: 1,
+      },
+    ).lean();
     const spaceMap = new Map(spaces.map((s) => [s._id, s]));
+
+    // Filter lists down to the set the caller can actually access, so restricted
+    // lists and department-blocked spaces never leak titles via search results.
+    const parentIds = [
+      ...new Set(
+        spaces
+          .map((s) => s.parentSpaceId)
+          .filter((id) => typeof id === 'string' && id.length > 0),
+      ),
+    ];
+    const parentSpaces = parentIds.length
+      ? await Space.find(
+          { _id: { $in: parentIds } },
+          { _id: 1, isMasterTeamSpace: 1 },
+        ).lean()
+      : [];
+    const parentSpaceMap = new Map(parentSpaces.map((s) => [s._id, s]));
+    const isDeptMainForSpace = (space) => {
+      if (!space || space.isMasterTeamSpace || !space.parentSpaceId) return false;
+      const parent = parentSpaceMap.get(space.parentSpaceId);
+      return Boolean(parent?.isMasterTeamSpace);
+    };
+
+    const accessibleLists = lists.filter((list) => {
+      const space = spaceMap.get(list.spaceId);
+      if (!space) return false;
+      return canAccessListForTasks({
+        list,
+        role,
+        userId: req.session.userId,
+        userDepartment: currentUser?.department ?? null,
+        workspaceDepartment: workspace?.department ?? null,
+        spaceDepartment: space.department,
+        spaceName: space.name,
+        isDepartmentMain: isDeptMainForSpace(space),
+      });
+    });
+    const listIds = accessibleLists.map((l) => l._id);
+    if (listIds.length === 0) return res.json({ tasks: [] });
+    const listMap = new Map(accessibleLists.map((l) => [l._id, l]));
 
     // Escape user input for regex, then do a case-insensitive contains search.
     const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -2063,7 +2173,8 @@ export function buildRoutes({ realtime } = {}) {
     }
 
     const rows = await List.find({ spaceId, archivedAt: null })
-      .select({ _id: 1 })
+      .select({ _id: 1, position: 1, createdAt: 1 })
+      .sort({ position: 1, createdAt: 1 })
       .lean();
     const validIds = new Set(rows.map((r) => r._id));
     const filtered = orderedListIds.filter((id) => typeof id === 'string' && validIds.has(id));
@@ -2072,11 +2183,22 @@ export function buildRoutes({ realtime } = {}) {
     }
 
     // Normalize: the ids the client sent get positions 1..N. Any active list
-    // NOT in the payload keeps its relative order at the tail (position > N).
+    // NOT in the payload is appended at N+1..N+M in its previous relative
+    // order, so positions stay unique and ordering is consistent.
     const ops = [];
     filtered.forEach((id, idx) => {
       ops.push({
         updateOne: { filter: { _id: id }, update: { $set: { position: idx + 1 } } },
+      });
+    });
+    const filteredSet = new Set(filtered);
+    const tail = rows.filter((r) => !filteredSet.has(r._id));
+    tail.forEach((row, idx) => {
+      ops.push({
+        updateOne: {
+          filter: { _id: row._id },
+          update: { $set: { position: filtered.length + idx + 1 } },
+        },
       });
     });
     if (ops.length) {
@@ -2166,11 +2288,39 @@ export function buildRoutes({ realtime } = {}) {
     const { listId } = req.params;
     const list = await List.findById(listId).lean();
     if (!list) return res.status(404).json({ message: 'List not found' });
-    // Favorites are purely user-local: anyone who can see the list in the
-    // sidebar may also favorite it. We just make sure the viewer has some
-    // connection to the workspace via membership.
-    const member = await WorkspaceMember.findOne({ userId: req.session.userId }).lean();
-    if (!member) return res.status(403).json({ message: 'No workspace access.' });
+    // Favorites are user-local but must still respect list visibility — a user
+    // who cannot read a restricted or department-scoped list must not be able
+    // to favorite it (which would also confirm the list's existence).
+    const space = await Space.findById(list.spaceId).lean();
+    if (!space) return res.status(404).json({ message: 'Space not found' });
+    const role = await getRole(space.workspaceId, req.session.userId);
+    if (!role) return res.status(403).json({ message: 'No permission' });
+    const workspace = await Workspace.findById(space.workspaceId).lean();
+    const currentUser = await User.findById(req.session.userId).lean();
+    if (
+      !canViewWorkspaceByDepartment(
+        currentUser?.department ?? null,
+        workspace?.department ?? null,
+        role,
+      )
+    ) {
+      return res.status(403).json({ message: 'Department access blocked' });
+    }
+    const isDepartmentMain = await isDepartmentMainSpace(space);
+    if (
+      !canAccessListForTasks({
+        list,
+        role,
+        userId: req.session.userId,
+        userDepartment: currentUser?.department ?? null,
+        workspaceDepartment: workspace?.department ?? null,
+        spaceDepartment: space.department,
+        spaceName: space.name,
+        isDepartmentMain,
+      })
+    ) {
+      return res.status(403).json({ message: 'List access blocked' });
+    }
 
     await UserListFavorite.updateOne(
       { userId: req.session.userId, listId },
@@ -3266,15 +3416,8 @@ export function buildRoutes({ realtime } = {}) {
 
   router.get('/tasks/:taskId/comments', requireAuth, async (req, res) => {
     const { taskId } = req.params;
-    const task = await Task.findById(taskId).lean();
-    if (!task) return res.status(404).json({ message: 'Task not found' });
-    const list = await List.findById(task.listId).lean();
-    if (!list) return res.status(404).json({ message: 'List not found' });
-    const space = await Space.findById(list.spaceId).lean();
-    if (!space) return res.status(404).json({ message: 'Space not found' });
-
-    const role = await getRole(space.workspaceId, req.session.userId);
-    if (!role) return res.status(403).json({ message: 'No permission' });
+    const ctx = await loadTaskAccessContext(taskId, req.session.userId);
+    if (ctx.error) return res.status(ctx.error.status).json({ message: ctx.error.message });
 
     const comments = await TaskComment.find({ taskId }).sort({ createdAt: 1 }).lean();
     const authorIds = comments.map((c) => c.userId);
@@ -3311,13 +3454,9 @@ export function buildRoutes({ realtime } = {}) {
       return res.status(400).json({ message: 'Comment content or attachment required' });
     }
 
-    const task = await Task.findById(taskId).lean();
-    if (!task) return res.status(404).json({ message: 'Task not found' });
-    const list = await List.findById(task.listId).lean();
-    if (!list) return res.status(404).json({ message: 'List not found' });
-    const space = await Space.findById(list.spaceId).lean();
-    if (!space) return res.status(404).json({ message: 'Space not found' });
-    const role = await getRole(space.workspaceId, req.session.userId);
+    const ctx = await loadTaskAccessContext(taskId, req.session.userId);
+    if (ctx.error) return res.status(ctx.error.status).json({ message: ctx.error.message });
+    const { task, space, role } = ctx;
     if (!canUpdateTask(role)) return res.status(403).json({ message: 'No permission' });
 
     // Validate the parent reference — it must be an existing comment on the SAME task,
@@ -3388,14 +3527,8 @@ export function buildRoutes({ realtime } = {}) {
     // Keep to a short symbol so we can't be abused with multi-KB payloads.
     if (emoji.length > 8) return res.status(400).json({ message: 'emoji too long' });
 
-    const task = await Task.findById(taskId).lean();
-    if (!task) return res.status(404).json({ message: 'Task not found' });
-    const list = await List.findById(task.listId).lean();
-    if (!list) return res.status(404).json({ message: 'List not found' });
-    const space = await Space.findById(list.spaceId).lean();
-    if (!space) return res.status(404).json({ message: 'Space not found' });
-    const role = await getRole(space.workspaceId, req.session.userId);
-    if (!role) return res.status(403).json({ message: 'No permission' });
+    const ctx = await loadTaskAccessContext(taskId, req.session.userId);
+    if (ctx.error) return res.status(ctx.error.status).json({ message: ctx.error.message });
 
     const doc = await TaskComment.findOne({ _id: commentId, taskId });
     if (!doc) return res.status(404).json({ message: 'Comment not found' });
@@ -3427,14 +3560,9 @@ export function buildRoutes({ realtime } = {}) {
     const content = String(req.body?.content || '').trim();
     if (!content) return res.status(400).json({ message: 'content required' });
 
-    const task = await Task.findById(taskId).lean();
-    if (!task) return res.status(404).json({ message: 'Task not found' });
-    const list = await List.findById(task.listId).lean();
-    if (!list) return res.status(404).json({ message: 'List not found' });
-    const space = await Space.findById(list.spaceId).lean();
-    if (!space) return res.status(404).json({ message: 'Space not found' });
-    const role = await getRole(space.workspaceId, req.session.userId);
-    if (!canUpdateTask(role)) return res.status(403).json({ message: 'No permission' });
+    const ctx = await loadTaskAccessContext(taskId, req.session.userId);
+    if (ctx.error) return res.status(ctx.error.status).json({ message: ctx.error.message });
+    if (!canUpdateTask(ctx.role)) return res.status(403).json({ message: 'No permission' });
 
     const comment = await TaskComment.findOne({ _id: commentId, taskId });
     if (!comment) return res.status(404).json({ message: 'Comment not found' });
@@ -3464,14 +3592,9 @@ export function buildRoutes({ realtime } = {}) {
   router.delete('/tasks/:taskId/comments/:commentId', requireAuth, async (req, res) => {
     const { taskId, commentId } = req.params;
 
-    const task = await Task.findById(taskId).lean();
-    if (!task) return res.status(404).json({ message: 'Task not found' });
-    const list = await List.findById(task.listId).lean();
-    if (!list) return res.status(404).json({ message: 'List not found' });
-    const space = await Space.findById(list.spaceId).lean();
-    if (!space) return res.status(404).json({ message: 'Space not found' });
-    const role = await getRole(space.workspaceId, req.session.userId);
-    if (!canUpdateTask(role)) return res.status(403).json({ message: 'No permission' });
+    const ctx = await loadTaskAccessContext(taskId, req.session.userId);
+    if (ctx.error) return res.status(ctx.error.status).json({ message: ctx.error.message });
+    if (!canUpdateTask(ctx.role)) return res.status(403).json({ message: 'No permission' });
 
     const comment = await TaskComment.findOne({ _id: commentId, taskId }).lean();
     if (!comment) return res.status(404).json({ message: 'Comment not found' });
@@ -3494,15 +3617,8 @@ export function buildRoutes({ realtime } = {}) {
       return res.status(400).json({ message: 'commentIds required' });
     }
 
-    const task = await Task.findById(taskId).lean();
-    if (!task) return res.status(404).json({ message: 'Task not found' });
-    const list = await List.findById(task.listId).lean();
-    if (!list) return res.status(404).json({ message: 'List not found' });
-    const space = await Space.findById(list.spaceId).lean();
-    if (!space) return res.status(404).json({ message: 'Space not found' });
-
-    const role = await getRole(space.workspaceId, req.session.userId);
-    if (!role) return res.status(403).json({ message: 'No permission' });
+    const ctx = await loadTaskAccessContext(taskId, req.session.userId);
+    if (ctx.error) return res.status(ctx.error.status).json({ message: ctx.error.message });
 
     const viewerId = req.session.userId;
     const now = new Date();

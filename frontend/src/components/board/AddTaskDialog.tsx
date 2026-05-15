@@ -24,6 +24,8 @@ import {
 import type { TaskStatus, TaskPriority } from '@/types';
 import { STATUS_CONFIG, PRIORITY_CONFIG } from '@/types';
 import { toast } from '@/hooks/use-toast';
+import { DatePickerPanel, parseYmd, ymdToIso } from './DatePickerPanel';
+import { format as formatDate } from 'date-fns';
 
 const MAX_ATTACHMENT_SIZE_BYTES = 4 * 1024 * 1024;
 
@@ -100,6 +102,10 @@ export function AddTaskDialog({
   const [isPrivateAsset, setIsPrivateAsset] = useState(false);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  /** Optional time-of-day attached to start / due. Empty string = no time
+   *  (we treat the task as date-only). Combined into an ISO string at submit. */
+  const [startTime, setStartTime] = useState('');
+  const [endTime, setEndTime] = useState('');
   const [assigneeIds, setAssigneeIds] = useState<string[]>([]);
   const [notifyOnlyUserIds, setNotifyOnlyUserIds] = useState<string[]>([]);
   const [activeDropdown, setActiveDropdown] = useState<'attach' | 'dueDate' | null>(null);
@@ -231,6 +237,10 @@ export function AddTaskDialog({
 
   const submitTask = () => {
     if (!title.trim()) return;
+    // Combine date + optional time into ISO strings so the backend keeps the
+    // user's hour/minute selection (otherwise we'd silently strip it).
+    const startIso = startDate ? ymdToIso(startDate, startTime || undefined) : undefined;
+    const endIso = endDate ? ymdToIso(endDate, endTime || undefined) : undefined;
     onCreate({
       listId: selectedListId || undefined,
       status: taskStatus,
@@ -238,8 +248,8 @@ export function AddTaskDialog({
       priority,
       assigneeIds,
       notifyOnlyUserIds: notifyOnlyUserIds.length > 0 ? notifyOnlyUserIds : undefined,
-      startDate: startDate || undefined,
-      endDate: endDate || undefined,
+      startDate: startIso ?? undefined,
+      endDate: endIso ?? undefined,
       description: description.trim() || undefined,
       attachments: attachments.length > 0 ? attachments : undefined,
     });
@@ -300,6 +310,8 @@ export function AddTaskDialog({
     };
     const selected = payloadByTab[activeTab as 'Doc' | 'Reminder' | 'Whiteboard' | 'Dashboard'];
     if (!selected.title) return;
+    const startIso = startDate ? ymdToIso(startDate, startTime || undefined) : undefined;
+    const endIso = endDate ? ymdToIso(endDate, endTime || undefined) : undefined;
     onCreate({
       listId: selectedListId || undefined,
       status: taskStatus,
@@ -309,8 +321,8 @@ export function AddTaskDialog({
       priority,
       assigneeIds,
       notifyOnlyUserIds: notifyOnlyUserIds.length > 0 ? notifyOnlyUserIds : undefined,
-      startDate: startDate || undefined,
-      endDate: endDate || undefined,
+      startDate: startIso ?? undefined,
+      endDate: endIso ?? undefined,
     });
   };
 
@@ -521,6 +533,15 @@ export function AddTaskDialog({
                   autoFocus
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
+                  onKeyDown={(e) => {
+                    // Enter on the title input fires Create Task when the title
+                    // has content. Shift+Enter is left alone so power users can
+                    // paste multi-line titles if they paste with newlines.
+                    if (e.key === 'Enter' && !e.shiftKey && activeTab === 'Task' && title.trim()) {
+                      e.preventDefault();
+                      submitTask();
+                    }
+                  }}
                   placeholder="Task Name"
                   className="w-full bg-transparent text-2xl font-semibold text-gray-900 dark:text-slate-100 outline-none placeholder:text-gray-300 dark:placeholder:text-slate-600 border-none p-0 focus:ring-0 caret-purple-500"
                 />
@@ -600,29 +621,41 @@ export function AddTaskDialog({
                       activeDropdown === 'dueDate' ? 'bg-gray-50 dark:bg-slate-800/70 border-gray-400 dark:border-slate-500 text-gray-700 dark:text-slate-200' : 'border-gray-300 dark:border-slate-600 text-gray-500 dark:text-slate-400 hover:bg-gray-50 dark:hover:bg-slate-800/70'
                     }`}
                   >
-                    <Calendar size={14} /> {endDate ? new Date(endDate).toLocaleDateString() : 'Due date'}
+                    <Calendar size={14} />
+                    {endDate
+                      ? `${formatDate(parseYmd(endDate)!, 'MMM d')}${endTime ? ' · ' + endTime : ''}`
+                      : startDate
+                        ? `${formatDate(parseYmd(startDate)!, 'MMM d')} →`
+                        : 'Due date'}
                   </button>
                   {activeDropdown === 'dueDate' && (
-                    <div className="absolute top-10 left-0 z-[70] w-56 rounded-xl border border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl p-3">
-                      <div className="text-[11px] font-semibold text-gray-600 dark:text-slate-400 mb-2">Select due date</div>
-                      <input
-                        type="date"
-                        value={endDate}
-                        onChange={(e) => {
-                          setEndDate(e.target.value);
+                    <div className="absolute top-10 left-0 z-[70] rounded-xl border border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl p-3">
+                      <DatePickerPanel
+                        value={{ startDate, endDate, startTime, endTime }}
+                        onChange={(next) => {
+                          setStartDate(next.startDate);
+                          setEndDate(next.endDate);
+                          setStartTime(next.startTime);
+                          setEndTime(next.endTime);
+                        }}
+                        onComplete={() => {
+                          // Only auto-close once the user has picked a due date.
+                          // Time tweaks shouldn't dismiss the panel.
                           setActiveDropdown(null);
                         }}
-                        className="w-full h-9 rounded-md border border-gray-200 dark:border-slate-700 px-2 text-xs"
                       />
                       <button
                         type="button"
                         onClick={() => {
+                          setStartDate('');
                           setEndDate('');
+                          setStartTime('');
+                          setEndTime('');
                           setActiveDropdown(null);
                         }}
                         className="mt-2 text-[11px] text-gray-500 dark:text-slate-400 hover:text-gray-700"
                       >
-                        Clear date
+                        Clear dates
                       </button>
                     </div>
                   )}

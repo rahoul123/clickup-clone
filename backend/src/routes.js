@@ -526,6 +526,7 @@ function taskToDTO(task, assigneeIds) {
         }))
       : [],
     is_private: Boolean(task.isPrivate),
+    cover_image_url: task.coverImageUrl ?? null,
   };
 }
 
@@ -3957,6 +3958,23 @@ export function buildRoutes({ realtime } = {}) {
       attachments: attachmentList,
       parentCommentId: normalizedParentId,
     });
+
+    // First image attached to the task wins the card cover slot. We only
+    // backfill when the task has no cover yet so re-uploads later don't
+    // overwrite a deliberately picked thumbnail.
+    if (!task.coverImageUrl) {
+      const firstImage = attachmentList.find(
+        (att) => att.dataUrl && /^image\//i.test(att.mimeType || ''),
+      );
+      if (firstImage) {
+        await Task.updateOne({ _id: taskId }, { $set: { coverImageUrl: firstImage.dataUrl } });
+        rt.broadcast('task:updated', {
+          task_id: taskId,
+          list_id: task.listId,
+          patch: { cover_image_url: firstImage.dataUrl },
+        });
+      }
+    }
 
     const author = await User.findById(req.session.userId).lean();
     const userMap = author

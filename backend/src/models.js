@@ -232,6 +232,12 @@ const taskSchema = new Schema(
     /** When true, only explicit collaborators + assignees + admins see the task in the UI. */
     isPrivate: { type: Boolean, default: false },
     /**
+     * First image attachment uploaded to this task (as a base64 dataUrl).
+     * Rendered as the cover thumbnail on the kanban / list cards. Auto-set
+     * the first time an image is attached via a comment.
+     */
+    coverImageUrl: { type: String, default: null },
+    /**
      * Last time the overdue scheduler sent an "overdue" / "due today" ping
      * for this task. Used to enforce the admin-configured interval between
      * re-notifications so assignees don't get spammed every poll.
@@ -243,6 +249,13 @@ const taskSchema = new Schema(
      * date is pushed out) re-enables the reminder.
      */
     dueSoonNotifiedAt: { type: Date, default: null },
+    /**
+     * Hero thumbnail shown at the top of the task card on the board.
+     * Auto-populated when the user attaches an image to the task (on
+     * creation or via a later comment). Stored as the comment attachment's
+     * data URL so cards stay self-contained — no extra fetch per card.
+     */
+    coverImageUrl: { type: String, default: null },
   },
   { timestamps: true }
 );

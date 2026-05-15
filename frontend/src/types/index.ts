@@ -210,6 +210,8 @@ export interface Task {
   default_permission?: TaskPermission;
   collaborators?: TaskCollaborator[];
   is_private?: boolean;
+  /** First image attachment dataUrl, rendered as the cover on the kanban card. */
+  cover_image_url?: string | null;
 }
 
 /** Per-task access levels exposed in the Share dialog. */

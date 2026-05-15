@@ -10,7 +10,6 @@ import {
   Tag,
 } from 'lucide-react';
 import { useState } from 'react';
-import { formatDistanceToNow } from 'date-fns';
 import type { Task } from '@/types';
 import { PRIORITY_CONFIG, isTaskOverdue } from '@/types';
 import { cn } from '@/lib/utils';
@@ -29,18 +28,48 @@ interface TaskCardProps {
 }
 
 /**
- * Build a short human-friendly label for the due date — e.g. "2 days ago",
- * "in 3 days", "Today". Returns null if no due date is set.
+ * Return "12:34 pm" only if the ISO timestamp has a non-midnight time.
+ * Midnight (00:00 local) is treated as "no time set" — that's how we
+ * stored legacy date-only tasks before the time picker existed.
  */
-function formatRelativeDue(dueDate?: string): string | null {
-  if (!dueDate) return null;
-  const parsed = new Date(dueDate);
-  if (Number.isNaN(parsed.getTime())) return null;
-  const now = Date.now();
-  const diffMs = parsed.getTime() - now;
-  const absDays = Math.abs(diffMs) / (1000 * 60 * 60 * 24);
-  if (absDays < 1) return 'Today';
-  return formatDistanceToNow(parsed, { addSuffix: true });
+function formatLocalTime(iso?: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const h = d.getHours();
+  const m = d.getMinutes();
+  if (h === 0 && m === 0) return null;
+  const period = h >= 12 ? 'pm' : 'am';
+  const display = h % 12 === 0 ? 12 : h % 12;
+  return `${display}:${String(m).padStart(2, '0')} ${period}`;
+}
+
+function formatShortMonthDay(iso?: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+/**
+ * Build the date range label shown on the card. Examples:
+ *   "Apr 23 - Apr 29, 4:30 pm"   (both dates + time on due)
+ *   "Apr 29, 4:30 pm"            (only due + time)
+ *   "Apr 29"                     (only due, no time)
+ *   null                         (no dates at all)
+ */
+function formatDateRangeLabel(startIso?: string | null, dueIso?: string | null): string | null {
+  const startLabel = formatShortMonthDay(startIso);
+  const dueLabel = formatShortMonthDay(dueIso);
+  const dueTime = formatLocalTime(dueIso);
+  if (!startLabel && !dueLabel) return null;
+  let body = '';
+  if (startLabel && dueLabel && startLabel !== dueLabel) {
+    body = `${startLabel} - ${dueLabel}`;
+  } else {
+    body = dueLabel ?? startLabel ?? '';
+  }
+  return dueTime ? `${body}, ${dueTime}` : body;
 }
 
 export function TaskCard({
@@ -59,7 +88,7 @@ export function TaskCard({
   const firstAssigneeId = task.assignee_ids?.[0];
   const firstAssigneeLabel = firstAssigneeId ? assigneeNameById[firstAssigneeId] ?? 'U' : null;
   const extraAssignees = Math.max(0, (task.assignee_ids?.length ?? 0) - 1);
-  const relativeDue = formatRelativeDue(task.due_date);
+  const dateRangeLabel = formatDateRangeLabel(task.start_date, task.due_date);
 
   return (
     <div className="space-y-1.5">
@@ -68,10 +97,23 @@ export function TaskCard({
         onDragStart={(e) => e.dataTransfer.setData('text/task-id', task.id)}
         onClick={onClick}
         className={cn(
-          'bg-card border rounded-lg p-3 cursor-pointer hover:shadow-md transition-shadow group',
+          'bg-card border rounded-lg p-3 cursor-pointer hover:shadow-md transition-shadow group overflow-hidden',
           overdue ? 'border-red-400/70 dark:border-red-500/50' : 'border-border'
         )}
       >
+        {task.cover_image_url && (
+          // Negative margin lets the cover image sit flush against the card
+          // edges while the rest of the content keeps the standard p-3 inset.
+          <div className="-mx-3 -mt-3 mb-3 relative aspect-[16/9] w-[calc(100%+1.5rem)] overflow-hidden border-b border-border bg-muted">
+            <img
+              src={task.cover_image_url}
+              alt=""
+              loading="lazy"
+              draggable={false}
+              className="absolute inset-0 h-full w-full object-cover"
+            />
+          </div>
+        )}
         <div className="relative flex items-start gap-2">
           <h4 className="flex-1 min-w-0 text-sm font-medium text-card-foreground leading-snug break-words">
             {task.title}
@@ -137,7 +179,7 @@ export function TaskCard({
             )}
           </span>
 
-          {relativeDue && (
+          {dateRangeLabel && (
             <span
               className={cn(
                 'inline-flex items-center gap-1 text-xs',
@@ -149,12 +191,14 @@ export function TaskCard({
                       day: '2-digit',
                       month: 'short',
                       year: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
                     })}`
                   : undefined
               }
             >
               <Calendar className="h-3.5 w-3.5" />
-              {relativeDue}
+              {dateRangeLabel}
             </span>
           )}
 
@@ -223,7 +267,7 @@ function SubtaskCard({
   const firstAssigneeId = subtask.assignee_ids?.[0];
   const firstAssigneeLabel = firstAssigneeId ? assigneeNameById[firstAssigneeId] ?? 'U' : null;
   const subOverdue = isTaskOverdue(subtask);
-  const relativeDue = formatRelativeDue(subtask.due_date);
+  const subDateLabel = formatDateRangeLabel(subtask.start_date, subtask.due_date);
   return (
     <div
       draggable
@@ -281,7 +325,7 @@ function SubtaskCard({
           )}
         </span>
 
-        {relativeDue && (
+        {subDateLabel && (
           <span
             className={cn(
               'inline-flex items-center gap-1 text-[11px]',
@@ -289,12 +333,12 @@ function SubtaskCard({
             )}
             title={
               subtask.due_date
-                ? `${subOverdue ? 'Overdue — was due ' : 'Due '}${new Date(subtask.due_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+                ? `${subOverdue ? 'Overdue — was due ' : 'Due '}${new Date(subtask.due_date).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
                 : 'No date'
             }
           >
             <Calendar className="h-3 w-3" />
-            {relativeDue}
+            {subDateLabel}
           </span>
         )}
 

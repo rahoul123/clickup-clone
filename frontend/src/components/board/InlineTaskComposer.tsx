@@ -7,15 +7,14 @@ import {
   Search,
   Check,
   ChevronDown,
-  ChevronRight,
   Ban,
   X,
 } from 'lucide-react';
-import { format, addDays, nextMonday } from 'date-fns';
+import { format } from 'date-fns';
 import type { TaskPriority } from '@/types';
 import { PRIORITY_CONFIG } from '@/types';
 import { cn } from '@/lib/utils';
-import { Calendar } from '@/components/ui/calendar';
+import { DatePickerPanel, parseYmd, ymdToIso } from './DatePickerPanel';
 
 interface InlineTaskComposerProps {
   memberOptions: { id: string; label: string }[];
@@ -28,20 +27,6 @@ interface InlineTaskComposerProps {
     endDate?: string;
   }) => void;
   onCancel: () => void;
-}
-
-function formatYmd(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
-function parseYmd(s: string): Date | undefined {
-  if (!s) return undefined;
-  const [y, m, d] = s.split('-').map(Number);
-  if (!y || !m || !d) return undefined;
-  return new Date(y, m - 1, d);
 }
 
 const PRIORITY_FLAG_CLASS: Record<TaskPriority, string> = {
@@ -59,13 +44,19 @@ export function InlineTaskComposer({ memberOptions, currentUserId, onSave, onCan
   const [assigneeIds, setAssigneeIds] = useState<string[]>([]);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  const [startTime, setStartTime] = useState('');
+  const [endTime, setEndTime] = useState('');
 
   // Only the per-section popovers (assignee / dates / priority) should close on
   // an outside click. The composer itself stays open until the user explicitly
   // hits Save, the × button, or Escape — never lose work on a stray click.
   const [openSection, setOpenSection] = useState<'assignee' | 'dates' | 'priority' | null>(null);
   const [assigneeSearch, setAssigneeSearch] = useState('');
-  const [activeDateField, setActiveDateField] = useState<'start' | 'due'>('due');
+  // Keyboard navigation inside the assignee list — points at the row that
+  // Enter will toggle. Reset whenever the visible filter or open state
+  // changes so the highlight always starts on a real entry.
+  const [assigneeHighlight, setAssigneeHighlight] = useState(0);
+  const assigneeListRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!openSection) return;
@@ -83,8 +74,6 @@ export function InlineTaskComposer({ memberOptions, currentUserId, onSave, onCan
     return () => document.removeEventListener('pointerdown', onPointerDown, true);
   }, [openSection]);
 
-  const today = useMemo(() => startOfDaySafe(new Date()), []);
-
   const filteredMembers = useMemo(() => {
     const q = assigneeSearch.trim().toLowerCase();
     const base = q ? memberOptions.filter((m) => m.label.toLowerCase().includes(q)) : memberOptions;
@@ -97,22 +86,57 @@ export function InlineTaskComposer({ memberOptions, currentUserId, onSave, onCan
 
   const visibleMembers = filteredMembers.length > 0 ? filteredMembers : memberOptions;
 
-  const calendarSelected = useMemo(() => {
-    const raw = activeDateField === 'start' ? startDate : endDate;
-    return parseYmd(raw);
-  }, [activeDateField, startDate, endDate]);
+  // Snap the highlight back to the top whenever the visible set changes or
+  // the picker re-opens, so the keyboard always starts on a real row.
+  useEffect(() => {
+    if (openSection !== 'assignee') return;
+    setAssigneeHighlight(0);
+  }, [openSection, assigneeSearch, visibleMembers.length]);
 
-  const calendarMonth = calendarSelected ?? today;
+  // Keep the highlighted row scrolled into view as the user arrows past the
+  // bottom / top of the visible window.
+  useEffect(() => {
+    if (openSection !== 'assignee') return;
+    const list = assigneeListRef.current;
+    if (!list) return;
+    const node = list.querySelector<HTMLElement>(`[data-assignee-idx="${assigneeHighlight}"]`);
+    if (node) {
+      node.scrollIntoView({ block: 'nearest' });
+    }
+  }, [openSection, assigneeHighlight]);
+
+  const onAssigneeSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (visibleMembers.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setAssigneeHighlight((prev) => (prev + 1) % visibleMembers.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setAssigneeHighlight((prev) => (prev - 1 + visibleMembers.length) % visibleMembers.length);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const target = visibleMembers[assigneeHighlight];
+      if (target) toggleAssignee(target.id);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      setOpenSection(null);
+    }
+  };
 
   const submit = () => {
     const t = title.trim();
     if (!t) return;
+    // Lift YMD + HH:mm into ISO so the time portion survives the trip to the
+    // backend. When no time was picked we keep the bare YMD string so the
+    // server stores midnight-local (preserving the legacy "date only" feel).
+    const startOut = startDate ? (startTime ? ymdToIso(startDate, startTime) : startDate) : undefined;
+    const endOut = endDate ? (endTime ? ymdToIso(endDate, endTime) : endDate) : undefined;
     onSave({
       title: t,
       priority,
       assigneeIds,
-      startDate: startDate || undefined,
-      endDate: endDate || undefined,
+      startDate: startOut ?? undefined,
+      endDate: endOut ?? undefined,
     });
   };
 
@@ -138,31 +162,9 @@ export function InlineTaskComposer({ memberOptions, currentUserId, onSave, onCan
     return colors[idx % colors.length];
   };
 
-  const applyPreset = (due: Date) => {
-    setEndDate(formatYmd(due));
-    setActiveDateField('due');
-  };
-
-  const presets = useMemo(() => {
-    const now = today;
-    const sat = (() => {
-      const d = new Date(now);
-      const day = d.getDay();
-      if (day === 6) return startOfDaySafe(d);
-      const daysUntilSat = (6 - day + 7) % 7;
-      d.setDate(d.getDate() + daysUntilSat);
-      return startOfDaySafe(d);
-    })();
-
-    return [
-      { label: 'Today', sub: format(now, 'EEE'), date: startOfDaySafe(now) },
-      { label: 'Tomorrow', sub: format(addDays(now, 1), 'EEE'), date: startOfDaySafe(addDays(now, 1)) },
-      { label: 'This weekend', sub: format(sat, 'EEE'), date: sat },
-      { label: 'Next week', sub: format(nextMondaySafe(now), 'EEE'), date: nextMondaySafe(now) },
-      { label: '2 weeks', sub: format(addDays(now, 14), 'd MMM'), date: startOfDaySafe(addDays(now, 14)) },
-      { label: '4 weeks', sub: format(addDays(now, 28), 'd MMM'), date: startOfDaySafe(addDays(now, 28)) },
-    ];
-  }, [today]);
+  // Date / time state is fully owned by the shared DatePickerPanel below.
+  // What you see in the dates section's trigger label is derived directly
+  // from the same `startDate` / `endDate` strings.
 
   return (
     <div
@@ -240,23 +242,31 @@ export function InlineTaskComposer({ memberOptions, currentUserId, onSave, onCan
                 <input
                   value={assigneeSearch}
                   onChange={(e) => setAssigneeSearch(e.target.value)}
+                  onKeyDown={onAssigneeSearchKeyDown}
                   placeholder="Search or enter email..."
                   className="w-full bg-transparent text-[13px] outline-none placeholder:text-muted-foreground/70"
                   autoFocus
                 />
               </div>
-              <div className="max-h-[min(280px,45vh)] overflow-y-auto py-1.5">
+              <div ref={assigneeListRef} className="max-h-[min(280px,45vh)] overflow-y-auto py-1.5">
                 {visibleMembers.map((m, idx) => {
                   const selected = assigneeIds.includes(m.id);
                   const isMe = m.id === currentUserId;
+                  const isHighlighted = idx === assigneeHighlight;
                   return (
                     <button
                       key={m.id}
                       type="button"
+                      data-assignee-idx={idx}
                       onClick={() => toggleAssignee(m.id)}
+                      onMouseEnter={() => setAssigneeHighlight(idx)}
                       className={cn(
                         'flex w-full items-center gap-3 px-3 py-2.5 text-left text-[13px] transition',
-                        selected ? 'bg-primary/8' : 'hover:bg-muted/50'
+                        isHighlighted
+                          ? 'bg-muted ring-1 ring-inset ring-primary/40'
+                          : selected
+                            ? 'bg-primary/10'
+                            : 'hover:bg-muted/50',
                       )}
                     >
                       <span className="relative">
@@ -308,105 +318,17 @@ export function InlineTaskComposer({ memberOptions, currentUserId, onSave, onCan
             />
           </button>
           {openSection === 'dates' && (
-            /* Anchor to the right edge of the trigger so the popover expands
-               toward the center/board instead of overflowing the viewport when
-               the composer sits in a narrow left-hand kanban column. */
-            <div className="absolute left-0 top-full z-[80] mt-1.5 w-[min(calc(100vw-2rem),460px)] rounded-xl border border-border/80 bg-popover p-2 shadow-xl">
-              {/* Read-only display chips — clicking them selects which field
-                   the calendar should update. The native <input type="date">
-                   was removed on purpose: it opened a second (browser-native)
-                   picker that duplicated the custom calendar below. */}
-              <div className="mb-2 grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setActiveDateField('start')}
-                  className={cn(
-                    'rounded-lg border px-2.5 py-1.5 text-left transition',
-                    activeDateField === 'start'
-                      ? 'border-primary/60 bg-primary/10'
-                      : 'border-border bg-background hover:bg-muted/40'
-                  )}
-                >
-                  <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    Start date
-                  </span>
-                  <span className="block text-xs font-medium text-foreground">
-                    {startDate ? format(parseYmd(startDate)!, 'MMM d, yyyy') : 'Not set'}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveDateField('due')}
-                  className={cn(
-                    'rounded-lg border px-2.5 py-1.5 text-left transition',
-                    activeDateField === 'due'
-                      ? 'border-primary/60 bg-primary/10'
-                      : 'border-border bg-background hover:bg-muted/40'
-                  )}
-                >
-                  <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    Due date
-                  </span>
-                  <span className="block text-xs font-medium text-foreground">
-                    {endDate ? format(parseYmd(endDate)!, 'MMM d, yyyy') : 'Not set'}
-                  </span>
-                </button>
-              </div>
-
-              <div className="flex flex-col gap-2 rounded-lg border border-border/50 bg-muted/15 p-1 sm:flex-row sm:items-start">
-                <div className="w-full shrink-0 space-y-0 border-border/40 sm:w-[8.5rem] sm:border-r sm:pr-2">
-                  {presets.map((p) => (
-                    <button
-                      key={p.label}
-                      type="button"
-                      onClick={() => applyPreset(p.date)}
-                      className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[12px] transition hover:bg-background"
-                    >
-                      <span className="font-medium text-foreground">{p.label}</span>
-                      <span className="shrink-0 text-[11px] text-muted-foreground">{p.sub}</span>
-                    </button>
-                  ))}
-                  <button
-                    type="button"
-                    className="mt-1 flex w-full items-center justify-between rounded-md px-2 py-1.5 text-[11px] text-muted-foreground hover:bg-background"
-                  >
-                    <span>Set recurring</span>
-                    <ChevronRight className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-                <div className="min-w-0 flex-1 overflow-hidden rounded-lg border border-border/30 bg-background p-1">
-                  <Calendar
-                    mode="single"
-                    defaultMonth={calendarMonth}
-                    selected={calendarSelected}
-                    onSelect={(d) => {
-                      if (!d) return;
-                      const ymd = formatYmd(d);
-                      if (activeDateField === 'start') {
-                        setStartDate(ymd);
-                        // If start > due, or due is empty, reset due so the
-                        // user is nudged to pick one; keep picker open on
-                        // the "due" tab so the next click completes the range.
-                        if (!endDate || ymd > endDate) setEndDate('');
-                        setActiveDateField('due');
-                      } else {
-                        setEndDate(ymd);
-                        // Due-date selection finalises the range → close.
-                        setOpenSection(null);
-                      }
-                    }}
-                    onDayDoubleClick={(d) => {
-                      if (!d) return;
-                      const ymd = formatYmd(d);
-                      setStartDate(ymd);
-                      setEndDate(ymd);
-                      setActiveDateField('due');
-                      setOpenSection(null);
-                    }}
-                    className="w-full p-1"
-                  />
-                </div>
-              </div>
+            <div className="absolute left-0 top-full z-[80] mt-1.5 rounded-xl border border-border/80 bg-popover p-2 shadow-xl">
+              <DatePickerPanel
+                value={{ startDate, endDate, startTime, endTime }}
+                onChange={(next) => {
+                  setStartDate(next.startDate);
+                  setEndDate(next.endDate);
+                  setStartTime(next.startTime);
+                  setEndTime(next.endTime);
+                }}
+                onComplete={() => setOpenSection(null)}
+              />
             </div>
           )}
         </div>
@@ -467,16 +389,3 @@ export function InlineTaskComposer({ memberOptions, currentUserId, onSave, onCan
   );
 }
 
-function startOfDaySafe(d: Date): Date {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
-}
-
-function nextMondaySafe(from: Date): Date {
-  try {
-    return startOfDaySafe(nextMonday(from, { weekStartsOn: 0 }));
-  } catch {
-    return startOfDaySafe(addDays(from, 7));
-  }
-}

@@ -13,6 +13,21 @@ import {
   Bell, ZoomIn,
 } from 'lucide-react';
 import type { Task, TaskPriority, CommentAttachment, ChecklistItem } from '@/types';
+import { DatePickerPanel, ymdToIso } from './DatePickerPanel';
+
+/**
+ * Pull "HH:mm" (local 24h) out of an ISO datetime. Returns '' for midnight
+ * (treated as "no time set" so legacy date-only tasks stay clean).
+ */
+function extractLocalHm(iso?: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const h = d.getHours();
+  const m = d.getMinutes();
+  if (h === 0 && m === 0) return '';
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
 
 /** Strip HTML tags and convert common HTML elements to plain text (for edit textareas). */
 function htmlToText(html: string): string {
@@ -325,6 +340,11 @@ export function TaskDetailDialog({
   const [priority, setPriority] = useState<TaskPriority>(task.priority);
   const [startDate, setStartDate] = useState(task.start_date ? task.start_date.slice(0, 10) : '');
   const [endDate, setEndDate] = useState(task.due_date ? task.due_date.slice(0, 10) : '');
+  // Time fields — empty string means "date only, no time of day". We treat
+  // exact midnight (00:00 local) as no-time so legacy date-only tasks don't
+  // suddenly show "12:00 am" in the picker.
+  const [startTime, setStartTime] = useState(() => extractLocalHm(task.start_date));
+  const [endTime, setEndTime] = useState(() => extractLocalHm(task.due_date));
   const [assigneeIds, setAssigneeIds] = useState<string[]>(task.assignee_ids);
   const [assigneeDropdownOpen, setAssigneeDropdownOpen] = useState(false);
   const [assigneeSearch, setAssigneeSearch] = useState('');
@@ -523,6 +543,8 @@ export function TaskDetailDialog({
     setPriority(task.priority);
     setStartDate(task.start_date ? task.start_date.slice(0, 10) : '');
     setEndDate(task.due_date ? task.due_date.slice(0, 10) : '');
+    setStartTime(extractLocalHm(task.start_date));
+    setEndTime(extractLocalHm(task.due_date));
     setAssigneeIds(task.assignee_ids);
     setAttachments([]);
     setChecklist(task.checklist ?? []);
@@ -633,6 +655,8 @@ export function TaskDetailDialog({
       priority === t.priority &&
       startDate === (t.start_date ? t.start_date.slice(0, 10) : '') &&
       endDate === (t.due_date ? t.due_date.slice(0, 10) : '') &&
+      startTime === extractLocalHm(t.start_date) &&
+      endTime === extractLocalHm(t.due_date) &&
       JSON.stringify(assigneeIds) === JSON.stringify(t.assignee_ids);
 
     if (isSameAsOriginal) return;
@@ -660,8 +684,22 @@ export function TaskDetailDialog({
         if (status !== latest.status) payload.status = status;
         if (priority !== latest.priority) payload.priority = priority;
         if (JSON.stringify(assigneeIds) !== JSON.stringify(latest.assignee_ids)) payload.assigneeIds = assigneeIds;
-        if (startDate !== (latest.start_date ? latest.start_date.slice(0, 10) : '')) payload.startDate = startDate;
-        if (endDate !== (latest.due_date ? latest.due_date.slice(0, 10) : '')) payload.endDate = endDate;
+        // Combine date + time so the backend keeps the time-of-day. Empty
+        // time string still sends YMD (date-only), matching legacy behaviour.
+        const latestStartYmd = latest.start_date ? latest.start_date.slice(0, 10) : '';
+        const latestEndYmd = latest.due_date ? latest.due_date.slice(0, 10) : '';
+        const latestStartTime = extractLocalHm(latest.start_date);
+        const latestEndTime = extractLocalHm(latest.due_date);
+        if (startDate !== latestStartYmd || startTime !== latestStartTime) {
+          payload.startDate = startDate
+            ? (startTime ? ymdToIso(startDate, startTime) ?? startDate : startDate)
+            : '';
+        }
+        if (endDate !== latestEndYmd || endTime !== latestEndTime) {
+          payload.endDate = endDate
+            ? (endTime ? ymdToIso(endDate, endTime) ?? endDate : endDate)
+            : '';
+        }
 
         if (Object.keys(payload).length === 0) return;
         await onUpdateTask(payload);
@@ -680,7 +718,7 @@ export function TaskDetailDialog({
         window.clearTimeout(saveDebounceRef.current);
       }
     };
-  }, [title, description, status, priority, assigneeIds, startDate, endDate, onUpdateTask]);
+  }, [title, description, status, priority, assigneeIds, startDate, endDate, startTime, endTime, onUpdateTask]);
 
   const readFileAsDataUrl = (file: File) =>
     new Promise<string>((resolve, reject) => {
@@ -1104,17 +1142,26 @@ export function TaskDetailDialog({
                 </PropertyItem>
 
                 <PropertyItem icon={<Calendar size={14} />} label="Dates">
-                  {/* Two read-only chips open the same custom DatePopover (with
-                       presets + calendar). Using buttons avoids the duplicate
-                       browser-native date picker that `<input type="date">`
-                       would render alongside the custom popover. */}
+                  {/* Two summary buttons that open the shared rich picker —
+                       presets, calendar, plus per-pill "Add time" popovers. */}
                   <div className="relative flex items-center gap-1">
                     <button
                       type="button"
                       onClick={() => setActivePopup((p) => (p === 'dates' ? null : 'dates'))}
                       className="flex-1 h-8 px-2 py-1 text-xs font-semibold rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-purple-300 dark:hover:border-purple-700 transition-all text-left truncate"
                     >
-                      {startDate || <span className="text-gray-400 dark:text-slate-500">Start date</span>}
+                      {startDate ? (
+                        <span>
+                          {startDate}
+                          {startTime && (
+                            <span className="ml-1 text-purple-600 dark:text-purple-400">
+                              · {startTime}
+                            </span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-gray-400 dark:text-slate-500">Start date</span>
+                      )}
                     </button>
                     <div className="text-gray-300 dark:text-slate-600 text-xs">→</div>
                     <button
@@ -1122,18 +1169,32 @@ export function TaskDetailDialog({
                       onClick={() => setActivePopup((p) => (p === 'dates' ? null : 'dates'))}
                       className="flex-1 h-8 px-2 py-1 text-xs font-semibold rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-purple-300 dark:hover:border-purple-700 transition-all text-left truncate"
                     >
-                      {endDate || <span className="text-gray-400 dark:text-slate-500">Due date</span>}
+                      {endDate ? (
+                        <span>
+                          {endDate}
+                          {endTime && (
+                            <span className="ml-1 text-purple-600 dark:text-purple-400">
+                              · {endTime}
+                            </span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-gray-400 dark:text-slate-500">Due date</span>
+                      )}
                     </button>
                     {activePopup === 'dates' && (
-                      <DatePopover
-                        startDate={startDate}
-                        dueDate={endDate}
-                        onChange={(next) => {
-                          setStartDate(next.startDate);
-                          setEndDate(next.dueDate);
-                        }}
-                        onClose={() => setActivePopup(null)}
-                      />
+                      <div className="absolute left-0 top-10 z-[120]">
+                        <DatePickerPanel
+                          value={{ startDate, endDate, startTime, endTime }}
+                          onChange={(next) => {
+                            setStartDate(next.startDate);
+                            setEndDate(next.endDate);
+                            setStartTime(next.startTime);
+                            setEndTime(next.endTime);
+                          }}
+                          onComplete={() => setActivePopup(null)}
+                        />
+                      </div>
                     )}
                   </div>
                 </PropertyItem>

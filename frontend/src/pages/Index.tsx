@@ -12,6 +12,7 @@ import { TeamMembersPage } from '@/components/team/TeamMembersPage';
 import { DocsPage } from '@/components/docs/DocsPage';
 import { TimesheetsPage } from '@/components/timesheets/TimesheetsPage';
 import { ReminderDetailDialog } from '@/components/reminders/ReminderDetailDialog';
+import { AIChatBot } from '@/components/AIChatBot';
 import { useAuth } from '@/contexts/AuthContext';
 import type {
   AppRole,
@@ -31,6 +32,7 @@ import { filterSpacesForExport } from '@/lib/departmentAccess';
 import { api } from '@/lib/api';
 import { toast } from '@/components/ui/sonner';
 import { useRealtimeEvent } from '@/contexts/RealtimeContext';
+import { triggerTaskCelebration } from '@/components/TaskCelebration';
 
 const Index = () => {
   const { user, signOut } = useAuth();
@@ -52,6 +54,12 @@ const Index = () => {
   const [rolesByWorkspaceId, setRolesByWorkspaceId] = useState<Record<string, AppRole>>({});
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [activeList, setActiveList] = useState<string | null>(null);
+  /** Mirror of activeList in a ref so async fetches can detect a list switch
+   *  that happened mid-flight and skip stale-state overwrites. */
+  const activeListRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeListRef.current = activeList;
+  }, [activeList]);
   const [loading, setLoading] = useState(true);
   const [pageView, setPageView] = useState<
     'home' | 'board' | 'dashboard' | 'notifications' | 'team-members' | 'docs' | 'timesheets' | 'space'
@@ -359,9 +367,20 @@ const Index = () => {
     return status.replace(/^custom_/, '').slice(0, 12) || status;
   };
 
+  /** Per-list snapshot of tasks so list/department switches paint instantly
+   *  with whatever we last saw, while the network fetch refreshes in the
+   *  background. Updated on every successful hydrate. */
+  const tasksCacheRef = useRef<Map<string, Task[]>>(new Map());
+
   const hydrateTasks = async (listId: string) => {
     const result = await api.app.listTasks(listId);
-    setTasks(result.tasks ?? []);
+    const fresh = (result.tasks ?? []) as Task[];
+    tasksCacheRef.current.set(listId, fresh);
+    // Avoid clobbering optimistic local edits made while the fetch was in
+    // flight — only swap state if the user is still on this list.
+    if (activeListRef.current === listId) {
+      setTasks(fresh);
+    }
   };
 
   const fetchHomeTasks = useCallback(async () => {
@@ -376,11 +395,23 @@ const Index = () => {
     }
   }, []);
 
+  /** Per-workspace dashboard cache so opening Dashboards is instant on a
+   *  revisit. We still kick a background refresh so the numbers catch up
+   *  with anything that changed in the meantime. */
+  const dashboardCacheRef = useRef<Map<string, DashboardAnalytics>>(new Map());
   const fetchDashboardAnalytics = useCallback(async () => {
-    setDashboardLoading(true);
+    const cacheKey = activeWorkspaceId ?? '__all__';
+    const cached = dashboardCacheRef.current.get(cacheKey);
+    if (cached) {
+      setDashboardData(cached);
+      setDashboardLoading(false);
+    } else {
+      setDashboardLoading(true);
+    }
     try {
-      const data = await api.app.dashboardAnalytics(activeWorkspaceId);
-      setDashboardData(data as DashboardAnalytics);
+      const data = (await api.app.dashboardAnalytics(activeWorkspaceId)) as DashboardAnalytics;
+      dashboardCacheRef.current.set(cacheKey, data);
+      setDashboardData(data);
     } catch (error) {
       console.error('Failed to load dashboard analytics', error);
     } finally {
@@ -641,7 +672,16 @@ const Index = () => {
     const space = list ? spaces.find((s) => s.id === list.space_id) : null;
     if (space) setActiveWorkspaceId(space.workspace_id);
     setActiveList(listId);
+    activeListRef.current = listId;
     setPageView('board');
+    // Paint cached tasks immediately so switching between departments / lists
+    // feels instant. The background fetch then patches in any new tasks.
+    const cached = tasksCacheRef.current.get(listId);
+    if (cached) {
+      setTasks(cached);
+    } else {
+      setTasks([]);
+    }
     hydrateTasks(listId).catch((error) => console.error('Failed to load tasks', error));
   };
 
@@ -671,11 +711,19 @@ const Index = () => {
 
     if (firstList) {
       setActiveList(firstList.id);
+      activeListRef.current = firstList.id;
       if (pageView === 'board') {
+        const cached = tasksCacheRef.current.get(firstList.id);
+        if (cached) {
+          setTasks(cached);
+        } else {
+          setTasks([]);
+        }
         hydrateTasks(firstList.id).catch((error) => console.error('Failed to load tasks after workspace switch', error));
       }
     } else {
       setActiveList(null);
+      activeListRef.current = null;
       setTasks([]);
     }
     if (pageView === 'docs') {
@@ -778,12 +826,53 @@ const Index = () => {
 
   const createWorkspace = async (name: string) => {
     if (!user) return;
-    const department = window.prompt('Department name for this workspace (e.g. Web Development)')?.trim();
-    if (!department) return;
-    const { workspace: data } = await api.app.createWorkspace(name, department);
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    // The "department" field at workspace level acts as the company tag — for
+    // a sister-company workspace the company name itself is the right value,
+    // so we reuse the workspace name and skip the extra prompt.
+    const { workspace: data } = await api.app.createWorkspace(trimmed, trimmed);
     setWorkspaces((prev) => [...prev, data]);
     setActiveWorkspaceId(data.id);
     setRolesByWorkspaceId((prev) => ({ ...prev, [data.id]: 'admin' }));
+  };
+
+  const updateWorkspaceDetails = async (
+    workspaceId: string,
+    payload: { name?: string; color?: string | null; icon?: string | null }
+  ) => {
+    if (!user) return;
+    const role = rolesByWorkspaceId[workspaceId];
+    if (role !== 'admin' && role !== 'super_admin') {
+      window.alert('Only admins can edit workspace details.');
+      return;
+    }
+    const { workspace: updated } = await api.app.updateWorkspaceDetails(workspaceId, payload);
+    setWorkspaces((prev) => prev.map((w) => (w.id === workspaceId ? (updated as Workspace) : w)));
+  };
+
+  const deleteWorkspace = async (workspaceId: string, workspaceName: string) => {
+    if (!user) return;
+    const role = rolesByWorkspaceId[workspaceId];
+    if (role !== 'admin' && role !== 'super_admin') {
+      window.alert('Only admins can delete a workspace.');
+      return;
+    }
+    const ok = window.confirm(
+      `Delete workspace "${workspaceName}"? Every space, list, task, comment, and member assignment in this workspace will be permanently removed. This cannot be undone.`,
+    );
+    if (!ok) return;
+    await api.app.deleteWorkspace(workspaceId);
+    setWorkspaces((prev) => prev.filter((w) => w.id !== workspaceId));
+    setRolesByWorkspaceId((prev) => {
+      const next = { ...prev };
+      delete next[workspaceId];
+      return next;
+    });
+    setSpaces((prev) => prev.filter((s) => s.workspace_id !== workspaceId));
+    if (activeWorkspaceId === workspaceId) {
+      setActiveWorkspaceId(null);
+    }
   };
 
   const createSpace = async (name: string) => {
@@ -1066,20 +1155,56 @@ const Index = () => {
       window.alert('Guest role cannot create tasks.');
       return;
     }
-    const { task: data } = await api.app.createTask({
-      listId: targetListId,
+
+    // Optimistic insert: the task pops onto the board immediately with a
+    // temp id so the user never waits on the network round-trip. We swap
+    // the placeholder for the real server payload as soon as it lands.
+    const tempId = `temp-${crypto.randomUUID()}`;
+    const nowIso = new Date().toISOString();
+    const optimisticTask: Task = {
+      id: tempId,
+      list_id: targetListId,
       title: payload.title,
+      description: payload.description ?? undefined,
       status: payload.status,
       priority: payload.priority,
-      assigneeIds: payload.assigneeIds,
-      notifyOnlyUserIds: payload.notifyOnlyUserIds,
-      startDate: payload.startDate,
-      endDate: payload.endDate,
-      description: payload.description,
-    });
+      start_date: payload.startDate,
+      due_date: payload.endDate,
+      assignee_ids: payload.assigneeIds ?? [],
+      created_by: user.id,
+      created_at: nowIso,
+      updated_at: nowIso,
+      parent_task_id: null,
+      checklist: [],
+      related_task_ids: [],
+    };
+    setTasks((prev) => [optimisticTask, ...prev]);
+
+    let data;
+    try {
+      ({ task: data } = await api.app.createTask({
+        listId: targetListId,
+        title: payload.title,
+        status: payload.status,
+        priority: payload.priority,
+        assigneeIds: payload.assigneeIds,
+        notifyOnlyUserIds: payload.notifyOnlyUserIds,
+        startDate: payload.startDate,
+        endDate: payload.endDate,
+        description: payload.description,
+      }));
+    } catch (createError) {
+      // Roll back the placeholder so the board doesn't show a ghost task.
+      setTasks((prev) => prev.filter((t) => t.id !== tempId));
+      toast.error('Could not create task.');
+      throw createError;
+    }
+
     setTasks((prev) => {
-      // Realtime `task:created` may have already added this task (socket race).
-      if (prev.some((t) => t.id === data.id)) return prev;
+      const withoutTemp = prev.filter((t) => t.id !== tempId);
+      // Realtime `task:created` may have already added the real task while
+      // the await was in flight — dedupe by id.
+      if (withoutTemp.some((t) => t.id === data.id)) return withoutTemp;
       return [
         {
           id: data.id,
@@ -1090,7 +1215,7 @@ const Index = () => {
           priority: data.priority,
           start_date: data.start_date ?? undefined,
           due_date: data.due_date ?? undefined,
-          assignee_ids: [],
+          assignee_ids: data.assignee_ids ?? optimisticTask.assignee_ids,
           created_by: data.created_by,
           created_at: data.created_at,
           updated_at: data.updated_at,
@@ -1098,7 +1223,7 @@ const Index = () => {
           checklist: data.checklist ?? [],
           related_task_ids: data.related_task_ids ?? [],
         },
-        ...prev,
+        ...withoutTemp,
       ];
     });
     showDedupedToast(`Task "${data.title}" created successfully`, 'success');
@@ -1133,8 +1258,6 @@ const Index = () => {
         toast.error('Task created, but some files could not be attached.');
       }
     }
-
-    hydrateTasks(targetListId).catch((refreshError) => console.error('Task refresh failed after create', refreshError));
   };
 
   const createReminder = async (payload: {
@@ -1237,6 +1360,12 @@ const Index = () => {
 
     const previousTasks = tasks;
     setTasks((prev) => prev.map((task) => (task.id === taskId ? { ...task, status: nextStatus } : task)));
+    // Fire celebration on the optimistic transition so it feels instant.
+    // If the API later rejects, we revert state but the brief flourish is
+    // harmless — far better than waiting on a network round-trip first.
+    if (nextStatus === 'complete' && currentTask.status !== 'complete') {
+      triggerTaskCelebration('complete');
+    }
     try {
       await api.app.moveTask(taskId, nextStatus);
       toast.success(`"${currentTask.title}" moved to ${formatStatusLabel(nextStatus)}.`);
@@ -1266,7 +1395,64 @@ const Index = () => {
   ) => {
     const currentTask = tasks.find((item) => item.id === taskId);
     const previousStatus = currentTask?.status;
-    const { task } = await api.app.updateTask(taskId, payload);
+    const previousTasks = tasks;
+
+    // Apply edits optimistically so the dialog reflects the change instantly.
+    // Anything the server normalises (e.g. extra assignee names, denied
+    // fields) gets reconciled below once the response lands.
+    if (currentTask) {
+      const optimistic: Task = {
+        ...currentTask,
+        ...(payload.title !== undefined ? { title: payload.title } : {}),
+        ...(payload.description !== undefined ? { description: payload.description } : {}),
+        ...(payload.status !== undefined ? { status: payload.status } : {}),
+        ...(payload.priority !== undefined ? { priority: payload.priority } : {}),
+        ...(payload.assigneeIds !== undefined ? { assignee_ids: payload.assigneeIds } : {}),
+        ...(payload.startDate !== undefined ? { start_date: payload.startDate || undefined } : {}),
+        ...(payload.endDate !== undefined ? { due_date: payload.endDate || undefined } : {}),
+        ...(payload.checklist !== undefined
+          ? {
+              checklist: payload.checklist.map((c) => ({
+                id: c.id ?? `temp-${crypto.randomUUID()}`,
+                text: c.text,
+                done: c.done,
+                assignee_ids: c.assigneeIds ?? [],
+              })),
+            }
+          : {}),
+        ...(payload.relatedTaskIds !== undefined
+          ? { related_task_ids: payload.relatedTaskIds }
+          : {}),
+        ...(payload.defaultPermission !== undefined
+          ? { default_permission: payload.defaultPermission }
+          : {}),
+        ...(payload.collaborators !== undefined
+          ? {
+              collaborators: payload.collaborators.map((c) => ({
+                user_id: c.userId,
+                role: c.role,
+              })),
+            }
+          : {}),
+        ...(payload.isPrivate !== undefined ? { is_private: payload.isPrivate } : {}),
+        updated_at: new Date().toISOString(),
+      };
+      setTasks((prev) => prev.map((item) => (item.id === taskId ? optimistic : item)));
+      // Celebrate immediately on status transition to complete.
+      if (payload.status === 'complete' && previousStatus !== 'complete') {
+        triggerTaskCelebration('complete');
+      }
+    }
+
+    let task;
+    try {
+      ({ task } = await api.app.updateTask(taskId, payload));
+    } catch (err) {
+      // Roll back to whatever we had before the optimistic patch.
+      setTasks(previousTasks);
+      toast.error('Update failed.');
+      throw err;
+    }
     const normalized: Task = {
       id: task.id,
       list_id: task.list_id,
@@ -1493,6 +1679,21 @@ const Index = () => {
         }
         onNavigate={handleNavigate}
         onCreateWorkspace={(name) => createWorkspace(name).catch((error) => console.error('Failed to create workspace', error))}
+        onDeleteWorkspace={(workspaceId, workspaceName) =>
+          deleteWorkspace(workspaceId, workspaceName).catch((error) => {
+            console.error('Failed to delete workspace', error);
+            toast.error((error as Error)?.message || 'Could not delete workspace.');
+          })
+        }
+        onSwitchWorkspace={handleSwitchWorkspace}
+        activeWorkspaceColor={activeWorkspace?.color ?? null}
+        activeWorkspaceIcon={activeWorkspace?.icon ?? null}
+        onUpdateWorkspaceDetails={(workspaceId, payload) =>
+          updateWorkspaceDetails(workspaceId, payload).catch((error) => {
+            console.error('Failed to update workspace', error);
+            toast.error((error as Error)?.message || 'Update failed.');
+          })
+        }
         onCreateSpace={(name) => createSpace(name).catch((error) => console.error('Failed to create space', error))}
         onCreateList={(spaceId, name, access) =>
           createList(spaceId, name, access).catch((error) => console.error('Failed to create list', error))
@@ -1858,6 +2059,9 @@ const Index = () => {
           )}
         </div>
       </div>
+
+      {/* Floating AI assistant — auth-gated by the component itself */}
+      <AIChatBot activeListId={activeList} activeWorkspaceId={activeWorkspaceId} />
     </div>
   );
 };

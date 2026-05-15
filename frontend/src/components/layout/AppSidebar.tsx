@@ -30,6 +30,7 @@ import {
   Archive,
   ArchiveRestore,
   Share2,
+  FileDown,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -151,6 +152,19 @@ interface AppSidebarProps {
   activeNav?: 'home' | 'board' | 'dashboard' | 'notifications' | 'team-members' | 'docs' | 'timesheets' | 'discussion';
   onNavigate?: (view: 'home' | 'board' | 'dashboard' | 'notifications' | 'team-members' | 'docs' | 'timesheets') => void;
   onCreateWorkspace: (name: string) => Promise<void> | void;
+  /** Delete an entire workspace (cascades through every space/list/task in it). */
+  onDeleteWorkspace?: (workspaceId: string, workspaceName: string) => Promise<void> | void;
+  /** Switch the active workspace (e.g. when a user clicks a master Team Space row in the sidebar). */
+  onSwitchWorkspace?: (workspaceId: string) => void;
+  /** Hex color used to tint the workspace header avatar. */
+  activeWorkspaceColor?: string | null;
+  /** Short icon label rendered inside the workspace header avatar (1-4 chars). */
+  activeWorkspaceIcon?: string | null;
+  /** Rename / recolor / re-icon the active workspace. Admin-gated by `canManageWorkspace`. */
+  onUpdateWorkspaceDetails?: (
+    workspaceId: string,
+    payload: { name?: string; color?: string | null; icon?: string | null }
+  ) => Promise<void> | void;
   onCreateSpace: (name: string) => Promise<void> | void;
   onCreateList: (
     spaceId: string,
@@ -239,6 +253,11 @@ export function AppSidebar({
   activeNav = 'board',
   onNavigate,
   onCreateWorkspace,
+  onDeleteWorkspace,
+  onSwitchWorkspace,
+  activeWorkspaceColor = null,
+  activeWorkspaceIcon = null,
+  onUpdateWorkspaceDetails,
   onCreateSpace,
   onCreateList,
   onUpdateListAccess,
@@ -536,6 +555,55 @@ export function AppSidebar({
       icon: spaceAppearanceState.icon,
     });
     setSpaceAppearanceState(null);
+  };
+
+  // ---------- Workspace rename / appearance (top header dropdown) ----------
+  const [workspaceRenameState, setWorkspaceRenameState] = useState<{
+    workspaceId: string;
+    name: string;
+  } | null>(null);
+  const [workspaceRenameValue, setWorkspaceRenameValue] = useState('');
+  const openWorkspaceRenameModal = (workspaceId: string, name: string) => {
+    setWorkspaceRenameState({ workspaceId, name });
+    setWorkspaceRenameValue(name);
+  };
+  const submitWorkspaceRename = async () => {
+    if (!workspaceRenameState || !onUpdateWorkspaceDetails) return;
+    const trimmed = workspaceRenameValue.trim();
+    if (!trimmed || trimmed === workspaceRenameState.name) {
+      setWorkspaceRenameState(null);
+      return;
+    }
+    await onUpdateWorkspaceDetails(workspaceRenameState.workspaceId, { name: trimmed });
+    setWorkspaceRenameState(null);
+  };
+
+  const [workspaceAppearanceState, setWorkspaceAppearanceState] = useState<{
+    workspaceId: string;
+    name: string;
+    color: string | null;
+    icon: string | null;
+  } | null>(null);
+  const openWorkspaceAppearanceModal = (workspace: {
+    id: string;
+    name: string;
+    color?: string | null;
+    icon?: string | null;
+  }) => {
+    setWorkspaceAppearanceState({
+      workspaceId: workspace.id,
+      name: workspace.name,
+      color: workspace.color ?? null,
+      icon: workspace.icon ?? null,
+    });
+  };
+  const submitWorkspaceAppearance = async () => {
+    if (!workspaceAppearanceState || !onUpdateWorkspaceDetails) return;
+    await onUpdateWorkspaceDetails(workspaceAppearanceState.workspaceId, {
+      color: workspaceAppearanceState.color,
+      icon: workspaceAppearanceState.icon,
+    });
+    setWorkspaceAppearanceState(null);
   };
 
   const [infoState, setInfoState] = useState<{
@@ -861,6 +929,11 @@ export function AppSidebar({
               );
               return;
             }
+            // Clicking a master "Team Space" row switches the active workspace
+            // so the top-left header reflects whichever company you're in.
+            if (item.type === 'space' && item.isMasterFolder && item.workspaceId) {
+              onSwitchWorkspace?.(item.workspaceId);
+            }
             if (hasChildren) toggleExpand(item.id);
             if (item.type === 'list') {
               onNavigate?.('board');
@@ -894,7 +967,16 @@ export function AppSidebar({
           {!hasChildren && <span className="w-4" />}
 
           {item.type === 'space' && item.isMasterFolder && (
-            <Folder className="h-4 w-4 flex-shrink-0 text-emerald-600" aria-hidden />
+            item.color || (item.spaceIcon && item.spaceIcon.trim()) ? (
+              <span
+                className="w-5 h-5 rounded flex items-center justify-center text-xs font-bold text-sidebar-primary-foreground flex-shrink-0"
+                style={{ backgroundColor: item.color || 'hsl(var(--sidebar-primary))' }}
+              >
+                {(item.spaceIcon && item.spaceIcon.trim()) || item.name[0]}
+              </span>
+            ) : (
+              <Folder className="h-4 w-4 flex-shrink-0 text-emerald-600" aria-hidden />
+            )
           )}
           {item.type === 'space' && !item.isMasterFolder && (
             <span
@@ -929,19 +1011,41 @@ export function AppSidebar({
           <span className="min-w-0 flex-1 truncate text-left">{item.name}</span>
 
           {item.type === 'space' && item.isMasterFolder && (
-            <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+            <div className="flex items-center gap-1 opacity-60 transition-opacity group-hover:opacity-100">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button
                     type="button"
                     onClick={(e) => e.stopPropagation()}
                     className="rounded-md p-1 text-sidebar-muted transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
-                    aria-label="Team space options"
+                    aria-label="Team space options (rename, color, delete, export)"
+                    title="Rename / Color / Delete / Export"
                   >
                     <MoreHorizontal className="h-3.5 w-3.5" />
                   </button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuContent align="end" className="w-52">
+                  {onUpdateSpaceDetails && canManageLists && (
+                    <DropdownMenuItem
+                      onSelect={() => openSpaceRenameModal({ id: item.id, name: item.name })}
+                    >
+                      <Pencil className="h-3.5 w-3.5 mr-2" /> Rename
+                    </DropdownMenuItem>
+                  )}
+                  {onUpdateSpaceDetails && canManageLists && (
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        openSpaceAppearanceModal({
+                          id: item.id,
+                          name: item.name,
+                          color: item.color ?? null,
+                          icon: item.spaceIcon ?? null,
+                        })
+                      }
+                    >
+                      <Palette className="h-3.5 w-3.5 mr-2" /> Color &amp; icon
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuItem
                     disabled={!item.workspaceId || !canExportReport?.(item.workspaceId)}
                     onSelect={() => {
@@ -949,8 +1053,19 @@ export function AppSidebar({
                       onExportReport?.(item.workspaceId);
                     }}
                   >
-                    Export report
+                    <FileDown className="h-3.5 w-3.5 mr-2" /> Export report
                   </DropdownMenuItem>
+                  {onDeleteWorkspace && canManageWorkspace && item.workspaceId && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        className="text-destructive focus:text-destructive"
+                        onSelect={() => onDeleteWorkspace(item.workspaceId!, item.name)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete workspace
+                      </DropdownMenuItem>
+                    </>
+                  )}
                 </DropdownMenuContent>
               </DropdownMenu>
               <button
@@ -975,7 +1090,7 @@ export function AppSidebar({
             </div>
           )}
           {item.type === 'space' && !item.isMasterFolder && !item.noExpand && (
-            <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+            <div className="flex items-center gap-1 opacity-60 transition-opacity group-hover:opacity-100">
               <button
                 type="button"
                 disabled={!canManageLists}
@@ -996,8 +1111,8 @@ export function AppSidebar({
                       type="button"
                       onClick={(e) => e.stopPropagation()}
                       className="rounded p-1 text-sidebar-muted transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
-                      aria-label="Space options"
-                      title="Space options"
+                      aria-label="Space options (rename, color, delete)"
+                      title="Rename / Color / Delete"
                     >
                       <MoreHorizontal className="w-3.5 h-3.5" />
                     </button>
@@ -1077,30 +1192,82 @@ export function AppSidebar({
       {/* Workspace header */}
       <div className="relative border-b border-sidebar-border/70 px-3 py-3">
         <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sidebar-primary text-sm font-bold text-sidebar-primary-foreground">
-            {workspaceName[0]}
+          <div
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-sm font-bold text-sidebar-primary-foreground flex-shrink-0"
+            style={{ backgroundColor: activeWorkspaceColor || 'hsl(var(--sidebar-primary))' }}
+          >
+            {(activeWorkspaceIcon && activeWorkspaceIcon.trim()) || workspaceName[0]}
           </div>
           <div className="flex-1 min-w-0">
             <p className="truncate text-[13px] font-semibold text-sidebar-accent-foreground">{workspaceName}</p>
             <p className="text-[11px] text-sidebar-muted">Team Workspace</p>
           </div>
+          {canManageWorkspace && activeWorkspaceId && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="rounded-md p-1 text-sidebar-muted opacity-70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground hover:opacity-100"
+                  aria-label="Workspace options (rename, color, delete)"
+                  title="Rename / Color / Delete workspace"
+                >
+                  <MoreHorizontal className="h-4 w-4" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-52">
+                {onUpdateWorkspaceDetails && (
+                  <DropdownMenuItem
+                    onSelect={() => openWorkspaceRenameModal(activeWorkspaceId, workspaceName)}
+                  >
+                    <Pencil className="h-3.5 w-3.5 mr-2" /> Rename workspace
+                  </DropdownMenuItem>
+                )}
+                {onUpdateWorkspaceDetails && (
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      openWorkspaceAppearanceModal({
+                        id: activeWorkspaceId,
+                        name: workspaceName,
+                        color: activeWorkspaceColor,
+                        icon: activeWorkspaceIcon,
+                      })
+                    }
+                  >
+                    <Palette className="h-3.5 w-3.5 mr-2" /> Color &amp; icon
+                  </DropdownMenuItem>
+                )}
+                {onDeleteWorkspace && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      className="text-destructive focus:text-destructive"
+                      onSelect={() => onDeleteWorkspace(activeWorkspaceId, workspaceName)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete workspace
+                    </DropdownMenuItem>
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
         <div className="mt-3 flex gap-2">
           <button
             disabled={!canManageWorkspace}
+            title={canManageWorkspace ? 'Create a new workspace (e.g. for a sister company)' : 'Only admins can create workspaces'}
             onClick={() => {
               if (!canManageWorkspace) return;
               openPrompt({
                 title: 'New Workspace',
                 label: 'Workspace name',
-                placeholder: 'e.g. Team Workspace',
+                placeholder: 'e.g. Sister Company',
                 submitText: 'Create',
                 onSubmit: (value) => onCreateWorkspace(value),
               });
             }}
             className="flex flex-1 items-center justify-center gap-1 rounded-md border border-sidebar-border bg-sidebar-accent/40 px-2 py-1 text-[11px] text-sidebar-foreground transition-colors hover:bg-sidebar-accent disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <Settings className="w-3 h-3" /> Settings
+            <Plus className="w-3 h-3" /> Workspace
           </button>
           <button
             disabled={!canInviteMembers}
@@ -1186,6 +1353,7 @@ export function AppSidebar({
                   name: space.name,
                   workspaceId: section.id,
                   color: space.color,
+                  spaceIcon: space.spaceIcon ?? null,
                   type: 'space',
                   isMasterFolder: true,
                   children: (space.children ?? []).map((child) => {
@@ -1258,7 +1426,7 @@ export function AppSidebar({
           <span>Logout</span>
         </button>
         <ThemeToggle
-          variant="menu"
+          variant="button"
           className="flex-shrink-0 text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
         />
       </div>
@@ -1920,6 +2088,167 @@ export function AppSidebar({
             <button
               type="button"
               onClick={submitSpaceAppearance}
+              className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+            >
+              Save
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* Rename workspace modal ------------------------------------------ */}
+    {workspaceRenameState && (
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+        <div className="w-full max-w-sm rounded-xl border border-border bg-background shadow-2xl">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h3 className="text-sm font-semibold">Rename workspace</h3>
+            <button
+              type="button"
+              onClick={() => setWorkspaceRenameState(null)}
+              className="text-muted-foreground hover:text-foreground"
+              aria-label="Close rename"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              submitWorkspaceRename();
+            }}
+            className="p-4 space-y-3"
+          >
+            <label className="text-xs text-muted-foreground">Workspace name</label>
+            <input
+              autoFocus
+              value={workspaceRenameValue}
+              onChange={(e) => setWorkspaceRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setWorkspaceRenameState(null);
+              }}
+              className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+              maxLength={120}
+            />
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setWorkspaceRenameState(null)}
+                className="h-9 rounded-md border border-input px-3 text-sm transition-colors hover:bg-accent"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={
+                  !workspaceRenameValue.trim() ||
+                  workspaceRenameValue.trim() === workspaceRenameState.name
+                }
+                className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Save
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    )}
+
+    {/* Workspace appearance modal — color + short icon label ----------- */}
+    {workspaceAppearanceState && (
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+        <div className="w-full max-w-sm rounded-xl border border-border bg-background shadow-2xl">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h3 className="text-sm font-semibold">
+              Appearance — {workspaceAppearanceState.name}
+            </h3>
+            <button
+              type="button"
+              onClick={() => setWorkspaceAppearanceState(null)}
+              className="text-muted-foreground hover:text-foreground"
+              aria-label="Close appearance"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="p-4 space-y-5">
+            <div className="flex items-center gap-3">
+              <span
+                className="flex h-10 w-10 items-center justify-center rounded-md text-sm font-bold text-white"
+                style={{ backgroundColor: workspaceAppearanceState.color || '#7C3AED' }}
+              >
+                {(workspaceAppearanceState.icon && workspaceAppearanceState.icon.trim()) ||
+                  workspaceAppearanceState.name[0] ||
+                  '?'}
+              </span>
+              <div className="text-xs text-muted-foreground">
+                Preview — how this workspace will appear in the top-left header.
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs text-muted-foreground">Color</label>
+              <div className="mt-2 grid grid-cols-5 gap-2">
+                {LIST_COLOR_SWATCHES.filter((s) => s.value !== null).map((swatch) => {
+                  const selected = workspaceAppearanceState.color === swatch.sample;
+                  return (
+                    <button
+                      key={swatch.label}
+                      type="button"
+                      onClick={() =>
+                        setWorkspaceAppearanceState((prev) =>
+                          prev ? { ...prev, color: swatch.sample } : prev
+                        )
+                      }
+                      className={cn(
+                        'flex h-10 items-center justify-center rounded-md border text-[11px] font-medium transition-all',
+                        selected
+                          ? 'border-primary ring-2 ring-primary/40'
+                          : 'border-input hover:border-foreground/30'
+                      )}
+                      title={swatch.label}
+                    >
+                      <span
+                        className="h-5 w-5 rounded"
+                        style={{ backgroundColor: swatch.sample }}
+                      />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs text-muted-foreground">
+                Icon label (optional, 1-4 characters)
+              </label>
+              <input
+                value={workspaceAppearanceState.icon ?? ''}
+                maxLength={4}
+                placeholder="e.g. SC"
+                onChange={(e) =>
+                  setWorkspaceAppearanceState((prev) =>
+                    prev ? { ...prev, icon: e.target.value } : prev
+                  )
+                }
+                className="mt-2 h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+              />
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Leave empty to default to the first letter of the workspace name.
+              </p>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+            <button
+              type="button"
+              onClick={() => setWorkspaceAppearanceState(null)}
+              className="h-9 rounded-md border border-input px-3 text-sm transition-colors hover:bg-accent"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={submitWorkspaceAppearance}
               className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
             >
               Save

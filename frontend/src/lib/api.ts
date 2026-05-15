@@ -53,11 +53,46 @@ export const api = {
   app: {
     bootstrap: () => request('/app/bootstrap'),
     homeTasks: () => request('/app/home-tasks'),
+    /**
+     * Send the chat history to the in-app AI assistant. Optional context
+     * (active list / workspace) lets the bot create tasks in the right place.
+     */
+    chat: (payload: {
+      messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+      activeListId?: string | null;
+      activeWorkspaceId?: string | null;
+    }) =>
+      request('/chat', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }) as Promise<{
+        reply: string;
+        action: null | {
+          ok: boolean;
+          type: 'CREATE_TASK';
+          reason?: string;
+          task?: {
+            id: string;
+            title: string;
+            list_id: string;
+            list_name: string;
+            priority: string;
+            due_date: string | null;
+          };
+        };
+      }>,
     dashboardAnalytics: (workspaceId?: string | null) =>
       request(`/app/dashboard-analytics${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ''}`),
     listTasks: (listId: string) => request(`/lists/${listId}/tasks`),
     createWorkspace: (name: string, department: string) =>
       request('/workspaces', { method: 'POST', body: JSON.stringify({ name, department }) }),
+    deleteWorkspace: (workspaceId: string) =>
+      request(`/workspaces/${workspaceId}`, { method: 'DELETE' }),
+    updateWorkspaceDetails: (
+      workspaceId: string,
+      payload: { name?: string; color?: string | null; icon?: string | null }
+    ) =>
+      request(`/workspaces/${workspaceId}`, { method: 'PATCH', body: JSON.stringify(payload) }),
     createSpace: (workspaceId: string, name: string, department?: string) =>
       request('/spaces', { method: 'POST', body: JSON.stringify({ workspaceId, name, department }) }),
     deleteSpace: (spaceId: string) => request(`/spaces/${spaceId}`, { method: 'DELETE' }),

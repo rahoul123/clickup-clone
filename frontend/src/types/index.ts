@@ -8,6 +8,10 @@ export interface Workspace {
   slug: string;
   department?: string;
   logo_url?: string;
+  /** Hex color used as the avatar tint in the sidebar header. */
+  color?: string | null;
+  /** Optional 1-4 character icon label rendered inside the avatar. */
+  icon?: string | null;
   created_by: string;
   created_at: string;
 }

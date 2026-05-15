@@ -23,6 +23,10 @@ const workspaceSchema = new Schema(
     name: { type: String, required: true },
     slug: { type: String, required: true, unique: true },
     logoUrl: { type: String, default: null },
+    /** Optional avatar tint for the workspace header (hex string). */
+    color: { type: String, default: null },
+    /** Optional 1-4 char icon label shown inside the workspace avatar. */
+    icon: { type: String, default: null },
     createdBy: { type: String, required: true, index: true },
     department: { type: String, required: true, index: true },
     /**

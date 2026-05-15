@@ -224,6 +224,9 @@ export function KanbanBoard({
     }>
   >([]);
   const [loadingComments, setLoadingComments] = useState(false);
+  /** Per-task comment cache so reopening a task shows its thread instantly
+   *  while a fresh fetch runs in the background. Cleared on full refresh. */
+  const commentsCacheRef = useRef<Map<string, typeof taskComments>>(new Map());
   const [renameStatus, setRenameStatus] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState('');
   const [reorderOpen, setReorderOpen] = useState(false);
@@ -317,7 +320,14 @@ export function KanbanBoard({
   useRealtimeEvent<{ task_id: string; comment: CommentDTO }>(
     'comment:created',
     ({ task_id, comment }) => {
-      if (!selectedTask || selectedTask.id !== task_id || !comment?.id) return;
+      if (!comment?.id) return;
+      // Keep the cache fresh for every task we've ever opened so reopening it
+      // skips the network round-trip.
+      const existing = commentsCacheRef.current.get(task_id);
+      if (existing && !existing.some((c) => c.id === comment.id)) {
+        commentsCacheRef.current.set(task_id, [...existing, comment]);
+      }
+      if (!selectedTask || selectedTask.id !== task_id) return;
       setTaskComments((prev) => (prev.some((c) => c.id === comment.id) ? prev : [...prev, comment]));
     },
   );
@@ -325,7 +335,15 @@ export function KanbanBoard({
   useRealtimeEvent<{ task_id: string; comment: CommentDTO }>(
     'comment:updated',
     ({ task_id, comment }) => {
-      if (!selectedTask || selectedTask.id !== task_id || !comment?.id) return;
+      if (!comment?.id) return;
+      const existing = commentsCacheRef.current.get(task_id);
+      if (existing) {
+        commentsCacheRef.current.set(
+          task_id,
+          existing.map((c) => (c.id === comment.id ? { ...c, ...comment } : c)),
+        );
+      }
+      if (!selectedTask || selectedTask.id !== task_id) return;
       setTaskComments((prev) => prev.map((c) => (c.id === comment.id ? { ...c, ...comment } : c)));
     },
   );
@@ -404,18 +422,35 @@ export function KanbanBoard({
   const openTaskDetails = async (task: Task) => {
     taskDetailCommentsForIdRef.current = task.id;
     setSelectedTask(task);
-    setLoadingComments(true);
-    let loaded: typeof taskComments = [];
+
+    // Show whatever we last saw for this task immediately so the panel never
+    // looks empty while the fresh fetch is in-flight. First-time opens still
+    // show the loader.
+    const cached = commentsCacheRef.current.get(task.id);
+    if (cached && cached.length > 0) {
+      setTaskComments(cached);
+      setLoadingComments(false);
+    } else {
+      setTaskComments([]);
+      setLoadingComments(true);
+    }
+
+    let loaded: typeof taskComments = cached ?? [];
     try {
       const result = await api.app.taskComments(task.id);
+      // Bail if the user switched to a different task while we were fetching.
+      if (taskDetailCommentsForIdRef.current !== task.id) return;
       loaded = result.comments ?? [];
+      commentsCacheRef.current.set(task.id, loaded);
       setTaskComments(loaded);
     } catch (error) {
       console.error('Failed to fetch task comments', error);
-      setTaskComments([]);
-      loaded = [];
+      if (!cached) setTaskComments([]);
+      loaded = cached ?? [];
     } finally {
-      setLoadingComments(false);
+      if (taskDetailCommentsForIdRef.current === task.id) {
+        setLoadingComments(false);
+      }
     }
 
     if (user?.id && loaded.length > 0) {
@@ -477,7 +512,9 @@ export function KanbanBoard({
     await api.app.addTaskComment(selectedTask.id, { content, attachments, parentCommentId });
     try {
       const refreshed = await api.app.taskComments(selectedTask.id);
-      setTaskComments(refreshed.comments ?? []);
+      const next = refreshed.comments ?? [];
+      commentsCacheRef.current.set(selectedTask.id, next);
+      setTaskComments(next);
     } catch (e) {
       console.error('Failed to refresh comments', e);
     }

@@ -14,6 +14,7 @@ import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import NotFound from "./pages/NotFound";
 import { UpdateDialog } from "@/components/UpdateDialog";
+import { TaskCelebration } from "@/components/TaskCelebration";
 
 const queryClient = new QueryClient();
 
@@ -92,6 +93,7 @@ const App = () => (
       <TooltipProvider>
         <div className="h-full min-h-0 w-full overflow-hidden bg-background text-foreground">
           <UpdateDialog />
+        <TaskCelebration />
         <Toaster />
         <Sonner position="bottom-right" closeButton offset={24} />
         <BrowserRouter>

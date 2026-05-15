@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { attachUser, loginUser, registerUser, requireAuth, toSafeUser } from './auth.js';
+import { handleChat } from './chat.js';
 import { sendInviteEmail, sendPasswordResetEmail, sendTaskAssignedEmail, sendTaskCompletedEmail } from './mailer.js';
 import {
   List,
@@ -361,10 +362,18 @@ async function loadTaskAccessContext(taskId, userId) {
   if (!list) return { error: { status: 404, message: 'List not found' } };
   const space = await Space.findById(list.spaceId).lean();
   if (!space) return { error: { status: 404, message: 'Space not found' } };
-  const role = await getRole(space.workspaceId, userId);
+
+  // After we have the space, the role / workspace / current user / department-
+  // main lookup are all independent — fan them out in parallel to cut the
+  // task-detail panel's perceived load time on slow connections.
+  const [role, workspace, currentUser, isDepartmentMain] = await Promise.all([
+    getRole(space.workspaceId, userId),
+    Workspace.findById(space.workspaceId).lean(),
+    User.findById(userId).lean(),
+    isDepartmentMainSpace(space),
+  ]);
+
   if (!role) return { error: { status: 403, message: 'No permission' } };
-  const workspace = await Workspace.findById(space.workspaceId).lean();
-  const currentUser = await User.findById(userId).lean();
   if (
     !canViewWorkspaceByDepartment(
       currentUser?.department ?? null,
@@ -374,7 +383,6 @@ async function loadTaskAccessContext(taskId, userId) {
   ) {
     return { error: { status: 403, message: 'Department access blocked' } };
   }
-  const isDepartmentMain = await isDepartmentMainSpace(space);
   if (
     !canAccessListForTasks({
       list,
@@ -390,6 +398,65 @@ async function loadTaskAccessContext(taskId, userId) {
     return { error: { status: 403, message: 'List access blocked' } };
   }
   return { task, list, space, workspace, role, currentUser };
+}
+
+/**
+ * Make every existing admin / super_admin / owner user a member of the
+ * given workspace with admin role. Used whenever a new workspace is created
+ * so that admin-tier accounts always have org-wide visibility into newly
+ * spun-up sister-company workspaces. Non-admin roles stay invitation-only.
+ *
+ * `excludeUserId` is the workspace creator — they're already added before
+ * this runs, so we skip them to avoid an unnecessary upsert.
+ */
+async function ensureAdminsInWorkspace(workspaceId, excludeUserId = null) {
+  const adminRoleRows = await UserRole.find({
+    role: { $in: ['admin', 'super_admin', 'owner'] },
+    isDeleted: { $ne: true },
+  })
+    .select({ userId: 1 })
+    .lean();
+
+  const seen = new Set();
+  for (const row of adminRoleRows) {
+    if (!row.userId) continue;
+    if (excludeUserId && row.userId === excludeUserId) continue;
+    if (seen.has(row.userId)) continue;
+    seen.add(row.userId);
+    await WorkspaceMember.updateOne(
+      { workspaceId, userId: row.userId },
+      { $setOnInsert: { workspaceId, userId: row.userId } },
+      { upsert: true },
+    );
+    await UserRole.updateOne(
+      { workspaceId, userId: row.userId },
+      // $setOnInsert only: keep any pre-existing per-workspace role intact.
+      { $setOnInsert: { workspaceId, userId: row.userId, role: 'admin' } },
+      { upsert: true },
+    );
+  }
+}
+
+/**
+ * Inverse of `ensureAdminsInWorkspace`: when a brand-new admin / super_admin
+ * is created, they should already be a member of every existing workspace
+ * so they can see all sister companies from day one.
+ */
+async function ensureAdminInAllWorkspaces(userId, excludeWorkspaceId = null) {
+  const workspaces = await Workspace.find({}).select({ _id: 1 }).lean();
+  for (const w of workspaces) {
+    if (excludeWorkspaceId && w._id === excludeWorkspaceId) continue;
+    await WorkspaceMember.updateOne(
+      { workspaceId: w._id, userId },
+      { $setOnInsert: { workspaceId: w._id, userId } },
+      { upsert: true },
+    );
+    await UserRole.updateOne(
+      { workspaceId: w._id, userId },
+      { $setOnInsert: { workspaceId: w._id, userId, role: 'admin' } },
+      { upsert: true },
+    );
+  }
 }
 
 async function applyPendingInvitesForUser(user) {
@@ -581,14 +648,15 @@ async function hydrateTasksForListIds(listIds) {
  * but across every visible workspace (department + space rules per workspace role).
  */
 async function loadAggregatedNavigation(userId) {
-  const currentUser = await User.findById(userId).lean();
-  const memberRows = await WorkspaceMember.find({ userId }).lean();
+  const [currentUser, memberRows] = await Promise.all([
+    User.findById(userId).lean(),
+    WorkspaceMember.find({ userId }).lean(),
+  ]);
   let workspaceIds = memberRows.map((m) => m.workspaceId);
 
   if (workspaceIds.length === 0) {
     const id = randomUUID();
-    const owner = await User.findById(userId).lean();
-    const department = owner?.department || 'general';
+    const department = currentUser?.department || 'general';
     await Workspace.create({
       _id: id,
       name: 'Team Workspace',
@@ -602,120 +670,128 @@ async function loadAggregatedNavigation(userId) {
   }
 
   const allWorkspaces = await Workspace.find({ _id: { $in: workspaceIds } }).sort({ createdAt: 1 }).lean();
-  const visibleWorkspaces = [];
-  for (const workspace of allWorkspaces) {
-    const roleForWorkspace = await getRole(workspace._id, userId);
-    if (canViewWorkspaceByDepartment(currentUser?.department ?? null, workspace.department, roleForWorkspace)) {
-      visibleWorkspaces.push(workspace);
-    }
-  }
+  // Visibility filter: N parallel role lookups instead of N sequential ones.
+  const rolesByWsId = Object.fromEntries(
+    await Promise.all(
+      allWorkspaces.map(async (w) => [w._id, await getRole(w._id, userId)]),
+    ),
+  );
+  const visibleWorkspaces = allWorkspaces.filter((workspace) =>
+    canViewWorkspaceByDepartment(currentUser?.department ?? null, workspace.department, rolesByWsId[workspace._id]),
+  );
   if (!visibleWorkspaces.length) {
     return { error: { status: 403, message: 'No department workspace access available.' } };
   }
 
   const activeWorkspace = visibleWorkspaces[0];
-  const aggregatedSpaces = [];
-  const aggregatedLists = [];
   /** @type {Record<string, { workspace_id: string; workspace_name: string; space_id: string; space_name: string; list_name: string }>} */
   const listContextById = {};
 
-  for (const workspace of visibleWorkspaces) {
-    const roleForWs = (await getRole(workspace._id, userId)) ?? 'employee';
-    await ensureMasterTeamSpace(workspace._id, userId);
-    let spaceRows = await Space.find({ workspaceId: workspace._id }).sort({ createdAt: 1 }).lean();
-    const masterSpace = spaceRows.find((s) => s.isMasterTeamSpace);
-    if (workspace._id === activeWorkspace._id) {
-      const master = masterSpace;
-      if (master) {
-        await ensureDefaultDepartmentUnderMaster(workspace, master, userId);
+  // Process each visible workspace in parallel — every iteration is logically
+  // independent (own role / spaces / lists). Sequential awaits here are the
+  // single biggest source of dashboard / sidebar load latency.
+  const workspaceResults = await Promise.all(
+    visibleWorkspaces.map(async (workspace) => {
+      const roleForWs = rolesByWsId[workspace._id] ?? 'employee';
+      await ensureMasterTeamSpace(workspace._id, userId);
+      let spaceRows = await Space.find({ workspaceId: workspace._id }).sort({ createdAt: 1 }).lean();
+      const masterSpace = spaceRows.find((s) => s.isMasterTeamSpace);
+      if (workspace._id === activeWorkspace._id && masterSpace) {
+        await ensureDefaultDepartmentUnderMaster(workspace, masterSpace, userId);
         spaceRows = await Space.find({ workspaceId: workspace._id }).sort({ createdAt: 1 }).lean();
       }
-    }
 
-    const isDepartmentMainFor = (space) =>
-      Boolean(masterSpace && space.parentSpaceId === masterSpace._id);
-    const hasFullSpaceAccess = (space) =>
-      space.isMasterTeamSpace ||
-      canAccessSpaceByDepartment({
-        role: roleForWs,
-        userDepartment: currentUser?.department ?? null,
-        workspaceDepartment: workspace.department,
-        spaceDepartment: space.department,
-        spaceName: space.name,
-        isDepartmentMain: isDepartmentMainFor(space),
-      });
-    // Sidebar visibility: master + all department-main folders + own-dept sub-spaces.
-    const visibleSpaceRows = spaceRows.filter(
-      (space) => space.isMasterTeamSpace || isDepartmentMainFor(space) || hasFullSpaceAccess(space)
-    );
-    if (!visibleSpaceRows.length) continue;
-
-    const ownAccessSpaces = visibleSpaceRows.filter((s) => hasFullSpaceAccess(s));
-    const ownAccessSpaceIds = new Set(ownAccessSpaces.map((s) => s._id));
-    const crossDeptMainSpaces = visibleSpaceRows.filter(
-      (s) => isDepartmentMainFor(s) && !ownAccessSpaceIds.has(s._id)
-    );
-
-    // Ensure every cross-dept main space has exactly one shared list so
-    // the clicker always has a board to land on.
-    for (const space of crossDeptMainSpaces) {
-      await ensureSharedMainList(space, userId);
-    }
-
-    // Restricted lists remain visible in the sidebar (name + lock icon) so the
-    // viewer knows they exist and can request access. Actual task read/write
-    // is still blocked via `canAccessListForTasks`. Archived lists are filtered
-    // out — they can still be restored from the "Archived lists" panel.
-    const activeListFilter = { archivedAt: null };
-    let ownLists = await List.find({
-      spaceId: { $in: [...ownAccessSpaceIds] },
-      ...activeListFilter,
-    })
-      .sort({ position: 1, createdAt: 1 })
-      .lean();
-    const crossLists = crossDeptMainSpaces.length
-      ? await List.find({
-          spaceId: { $in: crossDeptMainSpaces.map((s) => s._id) },
-          isSharedMainList: true,
-          ...activeListFilter,
-        })
-          .sort({ position: 1, createdAt: 1 })
-          .lean()
-      : [];
-
-    // Auto-create a default list if user's own department has no lists at all.
-    if (!ownLists.length && ownAccessSpaces.length) {
-      const preferred =
-        ownAccessSpaces.find((s) => !s.isMasterTeamSpace && isDepartmentMainFor(s)) ||
-        ownAccessSpaces.find((s) => !s.isMasterTeamSpace) ||
-        ownAccessSpaces[0];
-      if (preferred) {
-        const defaultList = await List.create({
-          _id: randomUUID(),
-          spaceId: preferred._id,
-          name: 'Main Tasks',
-          createdBy: userId,
+      const isDepartmentMainFor = (space) =>
+        Boolean(masterSpace && space.parentSpaceId === masterSpace._id);
+      const hasFullSpaceAccess = (space) =>
+        space.isMasterTeamSpace ||
+        canAccessSpaceByDepartment({
+          role: roleForWs,
+          userDepartment: currentUser?.department ?? null,
+          workspaceDepartment: workspace.department,
+          spaceDepartment: space.department,
+          spaceName: space.name,
+          isDepartmentMain: isDepartmentMainFor(space),
         });
-        ownLists = [defaultList.toObject ? defaultList.toObject() : defaultList];
+      const visibleSpaceRows = spaceRows.filter(
+        (space) => space.isMasterTeamSpace || isDepartmentMainFor(space) || hasFullSpaceAccess(space)
+      );
+      if (!visibleSpaceRows.length) return null;
+
+      const ownAccessSpaces = visibleSpaceRows.filter((s) => hasFullSpaceAccess(s));
+      const ownAccessSpaceIds = new Set(ownAccessSpaces.map((s) => s._id));
+      const crossDeptMainSpaces = visibleSpaceRows.filter(
+        (s) => isDepartmentMainFor(s) && !ownAccessSpaceIds.has(s._id)
+      );
+
+      // Ensure each cross-dept main space has its shared list — parallel since
+      // each upsert is independent of the others.
+      await Promise.all(crossDeptMainSpaces.map((space) => ensureSharedMainList(space, userId)));
+
+      const activeListFilter = { archivedAt: null };
+      const [ownListsInitial, crossLists] = await Promise.all([
+        List.find({ spaceId: { $in: [...ownAccessSpaceIds] }, ...activeListFilter })
+          .sort({ position: 1, createdAt: 1 })
+          .lean(),
+        crossDeptMainSpaces.length
+          ? List.find({
+              spaceId: { $in: crossDeptMainSpaces.map((s) => s._id) },
+              isSharedMainList: true,
+              ...activeListFilter,
+            })
+              .sort({ position: 1, createdAt: 1 })
+              .lean()
+          : Promise.resolve([]),
+      ]);
+
+      let ownLists = ownListsInitial;
+      if (!ownLists.length && ownAccessSpaces.length) {
+        const preferred =
+          ownAccessSpaces.find((s) => !s.isMasterTeamSpace && isDepartmentMainFor(s)) ||
+          ownAccessSpaces.find((s) => !s.isMasterTeamSpace) ||
+          ownAccessSpaces[0];
+        if (preferred) {
+          const defaultList = await List.create({
+            _id: randomUUID(),
+            spaceId: preferred._id,
+            name: 'Main Tasks',
+            createdBy: userId,
+          });
+          ownLists = [defaultList.toObject ? defaultList.toObject() : defaultList];
+        }
       }
-    }
 
-    const listRows = [...ownLists, ...crossLists];
+      const listRows = [...ownLists, ...crossLists];
+      const spaceById = Object.fromEntries(visibleSpaceRows.map((s) => [s._id, s]));
+      const contextEntries = listRows
+        .map((list) => {
+          const sp = spaceById[list.spaceId];
+          if (!sp) return null;
+          return [
+            list._id,
+            {
+              workspace_id: workspace._id,
+              workspace_name: workspace.name,
+              space_id: sp._id,
+              space_name: sp.name,
+              list_name: list.name,
+            },
+          ];
+        })
+        .filter(Boolean);
 
-    aggregatedSpaces.push(...visibleSpaceRows);
-    aggregatedLists.push(...listRows);
+      return { visibleSpaceRows, listRows, contextEntries };
+    }),
+  );
 
-    const spaceById = Object.fromEntries(visibleSpaceRows.map((s) => [s._id, s]));
-    for (const list of listRows) {
-      const sp = spaceById[list.spaceId];
-      if (!sp) continue;
-      listContextById[list._id] = {
-        workspace_id: workspace._id,
-        workspace_name: workspace.name,
-        space_id: sp._id,
-        space_name: sp.name,
-        list_name: list.name,
-      };
+  const aggregatedSpaces = [];
+  const aggregatedLists = [];
+  for (const result of workspaceResults) {
+    if (!result) continue;
+    aggregatedSpaces.push(...result.visibleSpaceRows);
+    aggregatedLists.push(...result.listRows);
+    for (const [id, ctx] of result.contextEntries) {
+      listContextById[id] = ctx;
     }
   }
 
@@ -729,7 +805,25 @@ async function loadAggregatedNavigation(userId) {
       return sp && sp.workspaceId === activeWorkspace._id;
     })
     .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-  const activeListId = listsInActiveWs[0]?._id ?? aggregatedLists[0]?._id ?? null;
+
+  // Land each user on a list from their OWN department first, so a Marketing
+  // user doesn't open straight into Web Development just because that space
+  // was created earlier. Admins/super_admins (often without a department) and
+  // anyone whose department doesn't match any space fall back to the
+  // workspace's first list as before.
+  const userDept = currentUser?.department ?? null;
+  const departmentListMatch = userDept
+    ? listsInActiveWs.find((l) => {
+        const sp = aggregatedSpaces.find((s) => s._id === l.spaceId);
+        if (!sp) return false;
+        if (sp.isMasterTeamSpace) return false;
+        if (isDepartmentMatch(userDept, sp.department)) return true;
+        if (isDepartmentMatch(userDept, sp.name)) return true;
+        return false;
+      })
+    : null;
+  const activeListId =
+    departmentListMatch?._id ?? listsInActiveWs[0]?._id ?? aggregatedLists[0]?._id ?? null;
 
   return {
     currentUser,
@@ -799,6 +893,159 @@ export function buildRoutes({ realtime } = {}) {
   };
 
   router.get('/health', (_req, res) => res.json({ ok: true }));
+
+  /**
+   * AI chat endpoint — drives the floating in-app assistant.
+   * Body: { messages: [{role, content}], activeListId?: string, activeWorkspaceId?: string }
+   *
+   * The LLM only returns a reply + a parsed `action` (no DB writes). The route
+   * here is responsible for actually applying any CREATE_TASK action against
+   * the user's own active list, using the same access checks as the manual
+   * POST /tasks endpoint so the assistant can never bypass authorization.
+   */
+  router.post('/chat', requireAuth, async (req, res) => {
+    const userId = req.session.userId;
+    const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    const activeListId = typeof req.body?.activeListId === 'string' ? req.body.activeListId : null;
+
+    // Pull active list context so the assistant can reference it by name.
+    let activeListName = null;
+    let resolvedList = null;
+    let resolvedSpace = null;
+    let resolvedWorkspace = null;
+    if (activeListId) {
+      resolvedList = await List.findById(activeListId).lean();
+      if (resolvedList) {
+        activeListName = resolvedList.name;
+        resolvedSpace = await Space.findById(resolvedList.spaceId).lean();
+        if (resolvedSpace) {
+          resolvedWorkspace = await Workspace.findById(resolvedSpace.workspaceId).lean();
+        }
+      }
+    }
+
+    const currentUser = await User.findById(userId).lean();
+    const userRole = resolvedSpace
+      ? (await getRole(resolvedSpace.workspaceId, userId)) ?? 'employee'
+      : 'employee';
+
+    let llm;
+    try {
+      llm = await handleChat({
+        messages,
+        userName: currentUser?.displayName || currentUser?.email || 'Bhai',
+        userRole,
+        activeListName,
+        activeListId,
+      });
+    } catch (err) {
+      const status = err?.status || 500;
+      return res
+        .status(status)
+        .json({ message: err?.message || 'AI service abhi available nahi hai.' });
+    }
+
+    let { reply, action } = llm;
+    let actionResult = null;
+
+    if (action && action.type === 'CREATE_TASK') {
+      const data = action.data && typeof action.data === 'object' ? action.data : {};
+      const title = String(data.title || '').trim().slice(0, 200);
+      const priority = ['urgent', 'high', 'normal', 'low'].includes(String(data.priority))
+        ? String(data.priority)
+        : 'normal';
+      const description =
+        typeof data.description === 'string' && data.description.trim()
+          ? data.description.trim()
+          : null;
+      let dueDate = null;
+      if (typeof data.dueDate === 'string' && data.dueDate.trim()) {
+        const parsed = new Date(data.dueDate.trim());
+        if (!Number.isNaN(parsed.getTime())) dueDate = parsed;
+      }
+
+      if (!title) {
+        actionResult = { ok: false, type: 'CREATE_TASK', reason: 'Task ka title chahiye.' };
+      } else if (!resolvedList || !resolvedSpace || !resolvedWorkspace) {
+        actionResult = {
+          ok: false,
+          type: 'CREATE_TASK',
+          reason: 'Pehle koi list khol lo, phir bot ko task banane bolo.',
+        };
+      } else if (!canCreateTasks(userRole)) {
+        actionResult = {
+          ok: false,
+          type: 'CREATE_TASK',
+          reason: 'Aapke role ke paas task create karne ki permission nahi hai.',
+        };
+      } else {
+        const isDepartmentMain = await isDepartmentMainSpace(resolvedSpace);
+        const canAccess = canAccessListForTasks({
+          list: resolvedList,
+          role: userRole,
+          userId,
+          userDepartment: currentUser?.department ?? null,
+          workspaceDepartment: resolvedWorkspace?.department ?? null,
+          spaceDepartment: resolvedSpace.department,
+          spaceName: resolvedSpace.name,
+          isDepartmentMain,
+        });
+        if (!canAccess) {
+          actionResult = {
+            ok: false,
+            type: 'CREATE_TASK',
+            reason: 'Is list pe aapka access nahi hai.',
+          };
+        } else {
+          try {
+            const created = await Task.create({
+              _id: randomUUID(),
+              listId: resolvedList._id,
+              title,
+              description,
+              status: 'todo',
+              priority,
+              dueDate,
+              createdBy: userId,
+            });
+            // Mirror the manual create flow: broadcast so open boards / dashboards
+            // patch the new task in via the existing `task:created` listener.
+            const dto = taskToDTO(created.toObject(), []);
+            rt.broadcast('task:created', { task: dto, list_id: resolvedList._id });
+            actionResult = {
+              ok: true,
+              type: 'CREATE_TASK',
+              task: {
+                id: created._id,
+                title: created.title,
+                list_id: resolvedList._id,
+                list_name: resolvedList.name,
+                priority: created.priority,
+                due_date: dueDate ? dueDate.toISOString() : null,
+              },
+            };
+            const dueLabel = dueDate ? ` (due ${dueDate.toISOString().slice(0, 10)})` : '';
+            reply = `${reply}\n\n✅ Task **"${title}"** ban gaya hai "${resolvedList.name}" list me${dueLabel}.`.trim();
+          } catch (createError) {
+            console.error('Chat CREATE_TASK failed', createError);
+            actionResult = {
+              ok: false,
+              type: 'CREATE_TASK',
+              reason: 'Task create karne me masla aa gaya. Manually try karo.',
+            };
+          }
+        }
+      }
+
+      if (actionResult && !actionResult.ok) {
+        reply = `${reply}\n\n⚠️ ${actionResult.reason}`.trim();
+      }
+    } else if (action?.__parseError) {
+      console.warn('Chat action parse error:', action.__parseError);
+    }
+
+    res.json({ reply, action: actionResult });
+  });
 
   router.get('/public/departments', async (_req, res) => {
     // Source of truth: department-main folders that appear under a master
@@ -1178,6 +1425,8 @@ export function buildRoutes({ realtime } = {}) {
         name: w.name,
         slug: w.slug,
         logo_url: w.logoUrl,
+        color: w.color ?? null,
+        icon: w.icon ?? null,
         department: w.department,
         created_by: w.createdBy,
         created_at: w.createdAt.toISOString(),
@@ -1248,19 +1497,29 @@ export function buildRoutes({ realtime } = {}) {
       return res.status(nav.error.status).json({ message: nav.error.message });
     }
 
-    const { aggregatedLists, listContextById, visibleWorkspaces } = nav;
+    const { aggregatedLists, aggregatedSpaces, listContextById, visibleWorkspaces } = nav;
     const listIds = aggregatedLists.map((l) => l._id);
-    const rawTasks = await hydrateTasksForListIds(listIds);
     const requestedWorkspaceId = String(req.query?.workspaceId || '').trim();
-
     const roleRank = { guest: 0, employee: 1, team_lead: 2, manager: 3, admin: 4, super_admin: 5 };
+
+    // Fetch tasks + every per-workspace role in parallel — these are
+    // independent and used to be the slowest part of the endpoint.
+    const [rawTasks, allRoles] = await Promise.all([
+      hydrateTasksForListIds(listIds),
+      Promise.all(
+        visibleWorkspaces.map(async (w) => ({
+          workspaceId: w._id,
+          role: (await getRole(w._id, userId)) ?? 'employee',
+        })),
+      ),
+    ]);
+
     let viewerRole = null;
     if (requestedWorkspaceId && visibleWorkspaces.some((w) => w._id === requestedWorkspaceId)) {
-      viewerRole = await getRole(requestedWorkspaceId, userId);
+      viewerRole = allRoles.find((r) => r.workspaceId === requestedWorkspaceId)?.role ?? null;
     }
     if (!viewerRole) {
-      for (const workspace of visibleWorkspaces) {
-        const role = (await getRole(workspace._id, userId)) ?? 'employee';
+      for (const { role } of allRoles) {
         if (!viewerRole || roleRank[role] > roleRank[viewerRole]) viewerRole = role;
       }
     }
@@ -1298,6 +1557,37 @@ export function buildRoutes({ realtime } = {}) {
     let dueSoon = 0;
 
     const spaceMonthlyMap = {};
+
+    // Pre-seed the space-wise chart with every department-main space the
+    // admin can see, so empty departments (no tasks yet, or no tasks this
+    // year) still appear with zeroed bars instead of being dropped.
+    if (isAdminRole(viewerRole)) {
+      const masterSpaceIds = new Set(
+        (aggregatedSpaces || []).filter((s) => s.isMasterTeamSpace).map((s) => s._id),
+      );
+      const workspaceById = Object.fromEntries(visibleWorkspaces.map((w) => [w._id, w]));
+      const departmentSpaces = (aggregatedSpaces || []).filter(
+        (s) =>
+          !s.isMasterTeamSpace &&
+          s.parentSpaceId &&
+          masterSpaceIds.has(s.parentSpaceId),
+      );
+      for (const space of departmentSpaces) {
+        const spaceKey = `${space.workspaceId}:${space._id}`;
+        if (spaceMonthlyMap[spaceKey]) continue;
+        const months = [];
+        for (let i = 0; i < 12; i += 1) {
+          months.push({ monthIndex: i, month: monthNames[i], total: 0, completed: 0 });
+        }
+        spaceMonthlyMap[spaceKey] = {
+          workspace_id: space.workspaceId,
+          workspace_name: workspaceById[space.workspaceId]?.name ?? 'Unknown Workspace',
+          space_id: space._id,
+          space_name: space.name,
+          monthly: months,
+        };
+      }
+    }
 
     for (const task of scopedTasks) {
       const status = task.status || 'todo';
@@ -1573,6 +1863,30 @@ export function buildRoutes({ realtime } = {}) {
     const department = String(req.body?.department || '').trim();
     if (!name) return res.status(400).json({ message: 'Name required' });
     if (!department) return res.status(400).json({ message: 'Department required' });
+
+    // Workspaces are department-isolated by default — only admins/super_admins
+    // of an existing workspace may spin up a new one (e.g. a sister company).
+    // First-time users with zero memberships are auto-provisioned a workspace
+    // by the bootstrap flow, so they should never hit this endpoint as a
+    // non-admin. Skipping the check when there are no memberships keeps the
+    // signup → first-workspace path working.
+    const existingMemberships = await WorkspaceMember.find({ userId: req.session.userId })
+      .select({ workspaceId: 1 })
+      .lean();
+    if (existingMemberships.length > 0) {
+      const existingRoles = await UserRole.find({
+        userId: req.session.userId,
+        workspaceId: { $in: existingMemberships.map((m) => m.workspaceId) },
+        isDeleted: { $ne: true },
+      })
+        .select({ role: 1 })
+        .lean();
+      const isAdminSomewhere = existingRoles.some((r) => canManageWorkspace(r.role));
+      if (!isAdminSomewhere) {
+        return res.status(403).json({ message: 'Only admins can create new workspaces.' });
+      }
+    }
+
     const workspace = await Workspace.create({
       _id: randomUUID(),
       name,
@@ -1580,9 +1894,18 @@ export function buildRoutes({ realtime } = {}) {
       createdBy: req.session.userId,
       department,
     });
-    await User.updateOne({ _id: req.session.userId }, { $set: { department } });
+    // Only set the creator's department if they don't have one yet —
+    // overwriting would change their department-based access in workspaces
+    // they're already in (e.g. they'd lose visibility on their original team).
+    const existingUser = await User.findById(req.session.userId).select({ department: 1 }).lean();
+    if (!existingUser?.department) {
+      await User.updateOne({ _id: req.session.userId }, { $set: { department } });
+    }
     await WorkspaceMember.create({ workspaceId: workspace._id, userId: req.session.userId });
     await UserRole.create({ workspaceId: workspace._id, userId: req.session.userId, role: 'admin' });
+    // Sister-company visibility: bring every existing admin / super_admin into
+    // the new workspace as admin. TLs / managers / employees stay invite-only.
+    await ensureAdminsInWorkspace(workspace._id, req.session.userId);
     broadcastNavigationChange({ type: 'workspace:created', workspace_id: workspace._id });
     res.json({
       workspace: {
@@ -1590,11 +1913,122 @@ export function buildRoutes({ realtime } = {}) {
         name: workspace.name,
         slug: workspace.slug,
         logo_url: workspace.logoUrl,
+        color: workspace.color ?? null,
+        icon: workspace.icon ?? null,
         department: workspace.department,
         created_by: workspace.createdBy,
         created_at: workspace.createdAt.toISOString(),
       },
     });
+  });
+
+  /**
+   * Update lightweight workspace fields — name (header label), color (avatar
+   * tint), and icon (short letter shown inside the avatar). Admin-only.
+   */
+  router.patch('/workspaces/:workspaceId', requireAuth, async (req, res) => {
+    const { workspaceId } = req.params;
+    const workspace = await Workspace.findById(workspaceId).lean();
+    if (!workspace) return res.status(404).json({ message: 'Workspace not found' });
+    const role = await getRole(workspaceId, req.session.userId);
+    if (!canManageWorkspace(role)) {
+      return res.status(403).json({ message: 'Only admin can edit a workspace' });
+    }
+
+    const updates = {};
+    if (typeof req.body?.name === 'string') {
+      const trimmed = req.body.name.trim();
+      if (!trimmed) return res.status(400).json({ message: 'Name cannot be empty' });
+      updates.name = trimmed;
+    }
+    if (req.body?.color !== undefined) {
+      const c = req.body.color;
+      updates.color = typeof c === 'string' && c.trim() ? c.trim() : null;
+    }
+    if (req.body?.icon !== undefined) {
+      const ic = req.body.icon;
+      updates.icon = typeof ic === 'string' && ic.trim() ? ic.trim().slice(0, 4) : null;
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: 'Nothing to update' });
+    }
+
+    await Workspace.updateOne({ _id: workspaceId }, { $set: updates });
+    const fresh = await Workspace.findById(workspaceId).lean();
+    broadcastNavigationChange({ type: 'workspace:updated', workspace_id: workspaceId });
+    res.json({
+      workspace: {
+        id: fresh._id,
+        name: fresh.name,
+        slug: fresh.slug,
+        logo_url: fresh.logoUrl,
+        color: fresh.color ?? null,
+        icon: fresh.icon ?? null,
+        department: fresh.department,
+        created_by: fresh.createdBy,
+        created_at: fresh.createdAt.toISOString(),
+      },
+    });
+  });
+
+  /**
+   * Delete a workspace and every piece of content scoped to it. Reserved for
+   * admin/super_admin (typically used when removing a sister-company workspace
+   * from the sidebar). The cascade covers spaces, lists, tasks, comments,
+   * notifications, invites, docs, reminders, discussion messages, favorites,
+   * memberships, and role assignments for that workspace.
+   */
+  router.delete('/workspaces/:workspaceId', requireAuth, async (req, res) => {
+    const { workspaceId } = req.params;
+    const workspace = await Workspace.findById(workspaceId).lean();
+    if (!workspace) return res.status(404).json({ message: 'Workspace not found' });
+    const role = await getRole(workspaceId, req.session.userId);
+    if (!canManageWorkspace(role)) {
+      return res.status(403).json({ message: 'Only admin can delete a workspace' });
+    }
+
+    const spaces = await Space.find({ workspaceId }).select({ _id: 1 }).lean();
+    const spaceIds = spaces.map((s) => s._id);
+    const lists = spaceIds.length
+      ? await List.find({ spaceId: { $in: spaceIds } }).select({ _id: 1 }).lean()
+      : [];
+    const listIds = lists.map((l) => l._id);
+    const tasks = listIds.length
+      ? await Task.find({ listId: { $in: listIds } }).select({ _id: 1 }).lean()
+      : [];
+    const taskIds = tasks.map((t) => t._id);
+
+    if (taskIds.length) {
+      await Promise.all([
+        TaskAssignee.deleteMany({ taskId: { $in: taskIds } }),
+        TaskComment.deleteMany({ taskId: { $in: taskIds } }),
+      ]);
+    }
+    if (listIds.length) {
+      await Promise.all([
+        UserListFavorite.deleteMany({ listId: { $in: listIds } }),
+        Task.deleteMany({ listId: { $in: listIds } }),
+        List.deleteMany({ _id: { $in: listIds } }),
+      ]);
+    }
+    if (spaceIds.length) {
+      await Promise.all([
+        SpaceDiscussionMessage.deleteMany({ spaceId: { $in: spaceIds } }),
+        Space.deleteMany({ _id: { $in: spaceIds } }),
+      ]);
+    }
+    await Promise.all([
+      Notification.deleteMany({ workspaceId }),
+      Reminder.deleteMany({ workspaceId }),
+      WorkspaceInvite.deleteMany({ workspaceId }),
+      WorkspaceDoc.deleteMany({ workspaceId }),
+      WorkspaceMember.deleteMany({ workspaceId }),
+      UserRole.deleteMany({ workspaceId }),
+    ]);
+    await Workspace.deleteOne({ _id: workspaceId });
+
+    broadcastNavigationChange({ type: 'workspace:deleted', workspace_id: workspaceId });
+    res.json({ ok: true });
   });
 
   router.post('/spaces', requireAuth, async (req, res) => {
@@ -1958,9 +2392,6 @@ export function buildRoutes({ realtime } = {}) {
     const { spaceId } = req.params;
     const space = await Space.findById(spaceId).lean();
     if (!space) return res.status(404).json({ message: 'Space not found' });
-    if (space.isMasterTeamSpace) {
-      return res.status(400).json({ message: 'Master Team Space folder cannot be edited.' });
-    }
     const role = await getRole(space.workspaceId, req.session.userId);
     if (!canManageStructure(role)) {
       return res.status(403).json({ message: 'Only admin/manager/team-lead can edit spaces' });
@@ -2462,6 +2893,11 @@ export function buildRoutes({ realtime } = {}) {
       { upsert: true }
     );
 
+    // New admin / super_admin → grant org-wide visibility by adding them to
+    // every other existing workspace as admin. This mirrors what existing
+    // admins get when a new workspace is created.
+    await ensureAdminInAllWorkspaces(user._id, workspaceId);
+
     const created = await User.findById(user._id).lean();
     broadcastNavigationChange({ type: 'workspace:members:updated', workspace_id: workspaceId });
     return res.json({ ok: true, user: toSafeUser(created), role: targetRole });
@@ -2942,7 +3378,42 @@ export function buildRoutes({ realtime } = {}) {
       }
     }
 
-    // notifyOnly users are ignored for creation bell notifications by design.
+    // Bell-only recipients: people the creator picked through the notify icon
+    // but did NOT assign as task owners. They get a bell notification + email
+    // so they're aware of the task without being on the assignee list.
+    const notifyOnlyToSend = notifyOnlyFiltered.filter((id) => id !== req.session.userId);
+    if (notifyOnlyToSend.length > 0) {
+      await createNotifications({
+        userIds: notifyOnlyToSend,
+        workspaceId: space.workspaceId,
+        taskId: task._id,
+        type: 'task_created',
+        message: `${actorName} notified you about task ${task.title}`,
+        realtime: rt,
+      });
+      try {
+        const recipients = await User.find({ _id: { $in: notifyOnlyToSend } }).lean();
+        const assignedByName = currentUser?.displayName || currentUser?.email || 'A teammate';
+        const dueDateStr = task.dueDate ? task.dueDate.toLocaleDateString('en-GB') : null;
+        await Promise.allSettled(
+          recipients
+            .filter((u) => u.email)
+            .map((u) =>
+              sendTaskAssignedEmail({
+                to: u.email,
+                taskTitle: task.title,
+                taskId: task._id,
+                priority: task.priority,
+                dueDate: dueDateStr,
+                assignedByName,
+                workspaceName: workspace?.name,
+              })
+            )
+        );
+      } catch (err) {
+        console.error('Failed to send notify-only emails', err);
+      }
+    }
 
     const dto = taskToDTO(task.toObject(), assignedUserIds);
     rt.broadcast('task:created', { task: dto, list_id: listId });
@@ -3416,15 +3887,23 @@ export function buildRoutes({ realtime } = {}) {
 
   router.get('/tasks/:taskId/comments', requireAuth, async (req, res) => {
     const { taskId } = req.params;
-    const ctx = await loadTaskAccessContext(taskId, req.session.userId);
+
+    // The comments query and the access-context check are independent — fire
+    // them in parallel so the comment thread surfaces as soon as access is
+    // confirmed instead of waiting on a sequential chain of DB hits.
+    const [ctx, comments] = await Promise.all([
+      loadTaskAccessContext(taskId, req.session.userId),
+      TaskComment.find({ taskId }).sort({ createdAt: 1 }).lean(),
+    ]);
     if (ctx.error) return res.status(ctx.error.status).json({ message: ctx.error.message });
 
-    const comments = await TaskComment.find({ taskId }).sort({ createdAt: 1 }).lean();
     const authorIds = comments.map((c) => c.userId);
     const readerIds = comments.flatMap((c) => (c.readBy || []).map((r) => r.userId));
     const reactorIds = comments.flatMap((c) => (c.reactions || []).map((r) => r.userId));
     const userIds = [...new Set([...authorIds, ...readerIds, ...reactorIds])];
-    const users = await User.find({ _id: { $in: userIds } }).lean();
+    const users = userIds.length
+      ? await User.find({ _id: { $in: userIds } }).lean()
+      : [];
     const userMap = Object.fromEntries(
       users.map((u) => [u._id, u.displayName || u.email || 'Unknown user'])
     );

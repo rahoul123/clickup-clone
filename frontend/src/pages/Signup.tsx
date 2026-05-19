@@ -17,6 +17,13 @@ const Signup = () => {
   const [searchParams] = useSearchParams();
   const invitedEmail = useMemo(() => searchParams.get('email')?.trim() || '', [searchParams]);
 
+  // ✅ FIX 1: invitedEmail ko state mein set karo
+  useEffect(() => {
+    if (invitedEmail) {
+      setEmail(invitedEmail);
+    }
+  }, [invitedEmail]);
+
   useEffect(() => {
     api.public
       .departments()
@@ -92,12 +99,16 @@ const Signup = () => {
           </div>
           <div>
             <label className="block text-sm font-medium text-foreground mb-1">Email</label>
+            {/* ✅ FIX 2: value sirf email state, aur readOnly agar invited */}
             <input
               type="email"
-              value={email || invitedEmail}
+              value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
-              className="w-full px-3 py-2 text-sm border border-input rounded-lg bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              readOnly={!!invitedEmail}
+              className={`w-full px-3 py-2 text-sm border border-input rounded-lg bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring ${
+                invitedEmail ? 'opacity-70 cursor-not-allowed' : ''
+              }`}
               placeholder="you@example.com"
             />
           </div>

@@ -349,6 +349,55 @@ async function isDepartmentMainSpace(space) {
 }
 
 /**
+ * Compute the set of user IDs allowed to see tasks in a given list — same
+ * gating used by the REST GET endpoints. Used to scope realtime task events
+ * so users without access don't see ghost tasks appear (which then vanish on
+ * reload because the REST API filters them out).
+ */
+async function getListTaskAudience(list, space, workspace) {
+  if (!list || !space) return [];
+  const workspaceId = space.workspaceId;
+  const [roleRows, isDepartmentMain] = await Promise.all([
+    UserRole.find({ workspaceId, isDeleted: { $ne: true } })
+      .select({ userId: 1, role: 1 })
+      .lean(),
+    isDepartmentMainSpace(space),
+  ]);
+  if (roleRows.length === 0) return [];
+  const userIds = [...new Set(roleRows.map((r) => r.userId).filter(Boolean))];
+  if (userIds.length === 0) return [];
+  const users = await User.find({ _id: { $in: userIds } })
+    .select({ _id: 1, department: 1 })
+    .lean();
+  const userById = new Map(users.map((u) => [String(u._id), u]));
+  const workspaceDepartment = workspace?.department ?? null;
+  const allowed = [];
+  for (const row of roleRows) {
+    const user = userById.get(String(row.userId));
+    if (!user) continue;
+    if (!canViewWorkspaceByDepartment(user.department ?? null, workspaceDepartment, row.role)) {
+      continue;
+    }
+    if (
+      !canAccessListForTasks({
+        list,
+        role: row.role,
+        userId: row.userId,
+        userDepartment: user.department ?? null,
+        workspaceDepartment,
+        spaceDepartment: space.department,
+        spaceName: space.name,
+        isDepartmentMain,
+      })
+    ) {
+      continue;
+    }
+    allowed.push(String(row.userId));
+  }
+  return allowed;
+}
+
+/**
  * Shared prelude for task-comment endpoints. Loads the task → list → space
  * → workspace chain and verifies that the caller has both department-level
  * workspace access and per-list access (restricted lists / shared-main /
@@ -1009,10 +1058,10 @@ export function buildRoutes({ realtime } = {}) {
               dueDate,
               createdBy: userId,
             });
-            // Mirror the manual create flow: broadcast so open boards / dashboards
-            // patch the new task in via the existing `task:created` listener.
+            // Mirror the manual create flow: emit to users with access only.
             const dto = taskToDTO(created.toObject(), []);
-            rt.broadcast('task:created', { task: dto, list_id: resolvedList._id });
+            const audience = await getListTaskAudience(resolvedList, resolvedSpace, resolvedWorkspace);
+            rt.toUsers(audience, 'task:created', { task: dto, list_id: resolvedList._id });
             actionResult = {
               ok: true,
               type: 'CREATE_TASK',
@@ -3417,7 +3466,8 @@ export function buildRoutes({ realtime } = {}) {
     }
 
     const dto = taskToDTO(task.toObject(), assignedUserIds);
-    rt.broadcast('task:created', { task: dto, list_id: listId });
+    const audience = await getListTaskAudience(list, space, workspace);
+    rt.toUsers(audience, 'task:created', { task: dto, list_id: listId });
     res.json({ task: dto });
   });
 
@@ -3516,7 +3566,8 @@ export function buildRoutes({ realtime } = {}) {
       }
     }
 
-    rt.broadcast('task:updated', {
+    const statusAudience = await getListTaskAudience(list, space, workspace);
+    rt.toUsers(statusAudience, 'task:updated', {
       task_id: taskId,
       list_id: task.listId,
       patch: { status },
@@ -3780,7 +3831,8 @@ export function buildRoutes({ realtime } = {}) {
       }
     }
     const patchDto = taskToDTO(refreshed, assignees.map((a) => a.userId));
-    rt.broadcast('task:updated', {
+    const patchAudience = await getListTaskAudience(list, space, workspace);
+    rt.toUsers(patchAudience, 'task:updated', {
       task_id: taskId,
       list_id: refreshed.listId,
       task: patchDto,
@@ -3834,9 +3886,10 @@ export function buildRoutes({ realtime } = {}) {
     await Notification.deleteMany({ taskId: { $in: allIds } });
     await Task.deleteMany({ _id: { $in: allIds } });
 
-    rt.broadcast('task:deleted', { task_id: taskId, list_id: task.listId });
+    const deleteAudience = await getListTaskAudience(list, space, workspace);
+    rt.toUsers(deleteAudience, 'task:deleted', { task_id: taskId, list_id: task.listId });
     for (const childId of subtaskIds) {
-      rt.broadcast('task:deleted', { task_id: childId, list_id: task.listId });
+      rt.toUsers(deleteAudience, 'task:deleted', { task_id: childId, list_id: task.listId });
     }
     res.json({ ok: true, deleted_subtask_ids: subtaskIds });
   });
@@ -3936,7 +3989,7 @@ export function buildRoutes({ realtime } = {}) {
 
     const ctx = await loadTaskAccessContext(taskId, req.session.userId);
     if (ctx.error) return res.status(ctx.error.status).json({ message: ctx.error.message });
-    const { task, space, role } = ctx;
+    const { task, list, space, workspace, role } = ctx;
     if (!canUpdateTask(role)) return res.status(403).json({ message: 'No permission' });
 
     // Validate the parent reference — it must be an existing comment on the SAME task,
@@ -3968,7 +4021,8 @@ export function buildRoutes({ realtime } = {}) {
       );
       if (firstImage) {
         await Task.updateOne({ _id: taskId }, { $set: { coverImageUrl: firstImage.dataUrl } });
-        rt.broadcast('task:updated', {
+        const coverAudience = await getListTaskAudience(list, space, workspace);
+        rt.toUsers(coverAudience, 'task:updated', {
           task_id: taskId,
           list_id: task.listId,
           patch: { cover_image_url: firstImage.dataUrl },

@@ -17,7 +17,6 @@ const Signup = () => {
   const [searchParams] = useSearchParams();
   const invitedEmail = useMemo(() => searchParams.get('email')?.trim() || '', [searchParams]);
 
-  // ✅ FIX 1: invitedEmail ko state mein set karo
   useEffect(() => {
     if (invitedEmail) {
       setEmail(invitedEmail);

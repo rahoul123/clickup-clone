@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Building2, UserCircle2, ChevronDown, AlarmClock } from 'lucide-react';
+
+// TODO: replace this placeholder with the actual GitHub release / cloud download URL
+// when the new desktop installer is published.
+const DESKTOP_UPDATE_URL = 'https://github.com/rahoul123/clickup-clone/releases/latest/download/DigitechIO-Setup.exe';
 import { AppSidebar } from '@/components/layout/AppSidebar';
 import { GlobalSearch } from '@/components/layout/GlobalSearch';
 import { ExportReportDialog } from '@/components/layout/ExportReportDialog';
@@ -1848,6 +1852,14 @@ const Index = () => {
             />
           </div>
           <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-background px-2 py-1 shadow-sm">
+            <a
+              href={DESKTOP_UPDATE_URL}
+              download
+              title="Download the latest desktop app installer"
+              className="inline-flex items-center justify-center rounded-full bg-[#ece4ff] px-4 py-1.5 text-[12px] font-semibold text-[#7c4dff] hover:bg-[#ddd0ff] transition-colors"
+            >
+              Download EXE
+            </a>
             {(activeRole === 'admin' || activeRole === 'super_admin') && activeWorkspaceId && (
               <button
                 type="button"

@@ -2,7 +2,7 @@
   "name": "digitechio-desktop",
   "productName": "DigitechIO",
   "private": true,
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "DigitechIO collaboration workspace desktop app",
   "author": {
     "name": "DigitechIO"
@@ -126,7 +126,7 @@
     "appId": "com.digitechio.desktop",
     "productName": "DigitechIO",
     "directories": {
-      "output": "release",
+      "output": "frontend/release",
       "buildResources": "frontend/public"
     },
     "publish": [
@@ -197,7 +197,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "DigitechIO",
-      "artifactName": "DigitechIO-Setup-${version}.${ext}",
+      "artifactName": "DigitechIO-Setup.exe",
       "differentialPackage": true,
       "installerIcon": "frontend/public/favicon.ico",
       "uninstallerIcon": "frontend/public/favicon.ico",

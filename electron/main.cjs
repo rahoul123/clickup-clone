@@ -31,7 +31,7 @@ const { autoUpdater } = require('electron-updater');
 
 // ─── VPS Configuration ──────────────────────────────────────────────────────
 // Update this URL if your VPS IP or Coolify domain changes
-const VPS_FRONTEND_URL = 'http://omvf508mjkfa4kmnz8ukublz.187.127.116.26.sslip.io';
+const VPS_FRONTEND_URL = 'https://pms.worksuites.online';
 // ────────────────────────────────────────────────────────────────────────────
 
 let logStream = null;

@@ -614,15 +614,23 @@ function serializeComment(comment, userMap = {}) {
 
 async function createTaskActivityEntry({ taskId, userId, content }) {
   if (!taskId || !userId || !content) return;
-  const since = new Date(Date.now() - 2000);
-  const existing = await TaskComment.findOne({
+  // Skip when the most recent activity entry by this user on this task
+  // already carries the same message. Autosave can fire many PATCH /tasks
+  // calls while a user is editing a description (600ms debounce) — without
+  // this guard the activity feed gets spammed with dozens of identical
+  // "X updated description in task Y" rows. A latest-entry comparison
+  // collapses the entire edit session into a single record while still
+  // capturing distinct events (a different status change between two
+  // description edits, for instance, breaks the chain and the next
+  // description edit creates a fresh activity row).
+  const latest = await TaskComment.findOne({
     taskId,
     userId,
-    content,
     isActivity: true,
-    createdAt: { $gte: since },
-  }).lean();
-  if (existing) return;
+  })
+    .sort({ createdAt: -1 })
+    .lean();
+  if (latest?.content === content) return;
   await TaskComment.create({
     _id: randomUUID(),
     taskId,

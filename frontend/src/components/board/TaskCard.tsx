@@ -36,6 +36,17 @@ function formatLocalTime(iso?: string | null): string | null {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
+  // Backend stores date-only values as UTC midnight, which a non-UTC viewer
+  // would otherwise see as a phantom time-of-day (5 am in PKT etc.). Strip
+  // UTC midnight first so date-only cards don't sprout a fake time.
+  if (
+    d.getUTCHours() === 0 &&
+    d.getUTCMinutes() === 0 &&
+    d.getUTCSeconds() === 0 &&
+    d.getUTCMilliseconds() === 0
+  ) {
+    return null;
+  }
   const h = d.getHours();
   const m = d.getMinutes();
   if (h === 0 && m === 0) return null;

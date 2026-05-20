@@ -151,6 +151,10 @@ export function DiscussionPanel({ spaceId, spaceName, memberOptions = [] }: Disc
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const emojiRef = useRef<HTMLDivElement | null>(null);
+  /** Synchronous in-flight lock — `sending` state updates async, so a fast
+   *  double Enter (key repeat or rapid double-press) saw `sending=false`
+   *  twice in the same render and posted the message twice. */
+  const sendingRef = useRef(false);
 
   /* ----------------------------- data loading ---------------------------- */
 
@@ -354,10 +358,11 @@ export function DiscussionPanel({ spaceId, spaceName, memberOptions = [] }: Disc
 
   const handleSend = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    if (sendingRef.current) return;
     const text = draft.trim();
     if (!text && pendingAttachments.length === 0) return;
-    if (sending) return;
 
+    sendingRef.current = true;
     setSending(true);
     try {
       const attachmentPayloads = await Promise.all(
@@ -371,7 +376,7 @@ export function DiscussionPanel({ spaceId, spaceName, memberOptions = [] }: Disc
         content: text,
         attachments: attachmentPayloads.length > 0 ? attachmentPayloads : undefined,
       });
-      setMessages((prev) => [...prev, data.message]);
+      setMessages((prev) => (prev.some((m) => m.id === data.message.id) ? prev : [...prev, data.message]));
       setDraft('');
       setPendingAttachments([]);
       setMentionQuery(null);
@@ -381,6 +386,7 @@ export function DiscussionPanel({ spaceId, spaceName, memberOptions = [] }: Disc
         description: err instanceof Error ? err.message : 'Could not send message',
       });
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   };

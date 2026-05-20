@@ -23,6 +23,19 @@ function extractLocalHm(iso?: string | null): string {
   if (!iso) return '';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
+  // Date-only values from the backend are stored as UTC midnight (because
+  // `new Date("YYYY-MM-DD")` is parsed as UTC). In non-UTC timezones reading
+  // `.getHours()` then returns a phantom time (e.g. 5 in PKT, -8 in PST).
+  // Strip both UTC and local midnight so a date-only task stays time-less
+  // regardless of where the viewer sits.
+  if (
+    d.getUTCHours() === 0 &&
+    d.getUTCMinutes() === 0 &&
+    d.getUTCSeconds() === 0 &&
+    d.getUTCMilliseconds() === 0
+  ) {
+    return '';
+  }
   const h = d.getHours();
   const m = d.getMinutes();
   if (h === 0 && m === 0) return '';
@@ -509,6 +522,11 @@ export function TaskDetailDialog({
 
   const saveDebounceRef = useRef<number | null>(null);
   const skipAutoSaveRef = useRef(false);
+  /** Synchronous in-flight lock for comment posting. `sending` state is async
+   *  (a queued setState) so a fast double-Enter / key-repeat sees `!sending`
+   *  twice in the same render and posts the comment twice. A ref flips
+   *  immediately and blocks the second call before it can fire. */
+  const sendingCommentRef = useRef(false);
   /**
    * Holds the latest `task` prop so the autosave comparison always sees the
    * freshest server values, without putting `task` itself into the effect
@@ -730,10 +748,12 @@ export function TaskDetailDialog({
 
   const handleSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    if (sendingCommentRef.current) return;
     const html = commentHtml.trim();
     const hasAttachments = attachments.length > 0;
     if (isEmptyRichComment(html) && !hasAttachments) return;
 
+    sendingCommentRef.current = true;
     setSending(true);
     try {
       const payloadAttachments = await Promise.all(
@@ -756,6 +776,7 @@ export function TaskDetailDialog({
         description: message,
       });
     } finally {
+      sendingCommentRef.current = false;
       setSending(false);
     }
   };
@@ -2144,7 +2165,7 @@ export function TaskDetailDialog({
                   <CommentEditor
                     ref={commentEditorRef}
                     onChange={setCommentHtml}
-                    onSubmit={() => { if (!sending) void handleSubmit(); }}
+                    onSubmit={() => { if (!sendingCommentRef.current) void handleSubmit(); }}
                     onImagePaste={handleImagePaste}
                     onMentionTrigger={() => { mentionFromTypingRef.current = true; setShowMentionPicker(true); setMentionSearch(''); }}
                   />

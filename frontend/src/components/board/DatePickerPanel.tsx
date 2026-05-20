@@ -140,10 +140,13 @@ export function DatePickerPanel({
   const { startDate, endDate, endTime } = value;
 
   // Time only applies to the due date — start date is intentionally date-only.
-  // Calendar focus defaults to 'due' so a single click sets the due date.
-  // Clicking the start pill switches focus so the next calendar click sets
-  // start instead. After start lands, focus auto-returns to due.
-  const [activeField, setActiveField] = useState<'start' | 'due'>('due');
+  // Default focus: 'start' when the due is already set but start isn't (the
+  // user almost certainly came back to add the start), otherwise 'due' so the
+  // first calendar click on a fresh picker lands on the due date.
+  const [activeField, setActiveField] = useState<'start' | 'due'>(() => {
+    if (!hideStartDate && endDate && !startDate) return 'start';
+    return 'due';
+  });
   const [timeOpen, setTimeOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -193,8 +196,18 @@ export function DatePickerPanel({
     onChange({ ...value, ...patch });
   };
 
-  /** Apply a preset to the due date (and optional time). */
+  /** Apply a preset. Routes the date into whichever pill is currently focused
+   *  so a user who clicked "Start date" can pick "Today" / "Tomorrow" and have
+   *  it land on the start field. Default focus is 'due', so the legacy
+   *  "click a preset for due" flow is unchanged. */
   const applyPreset = (preset: { date: Date; time?: string }) => {
+    if (effectiveField === 'start') {
+      // Start dates are intentionally date-only — drop any preset time.
+      const ymd = formatYmd(preset.date);
+      update({ startDate: ymd, endDate: ymd > endDate ? '' : endDate });
+      setActiveField('due');
+      return;
+    }
     update({ endDate: formatYmd(preset.date), endTime: preset.time ?? endTime });
     onComplete?.();
   };

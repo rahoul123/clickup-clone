@@ -1458,6 +1458,7 @@ export function buildRoutes({ realtime } = {}) {
       id: u._id,
       label: formatMemberLabel(u),
       role: roleByUserId[u._id] ?? 'employee',
+      department: u.department ?? null,
       is_deleted: Boolean(roleMetaByUserId[u._id]?.isDeleted),
       deleted_at: roleMetaByUserId[u._id]?.deletedAt
         ? new Date(roleMetaByUserId[u._id].deletedAt).toISOString()
@@ -3155,6 +3156,61 @@ export function buildRoutes({ realtime } = {}) {
     await UserRole.updateOne({ workspaceId, userId: memberId }, { $set: { role: nextRole } }, { upsert: true });
     broadcastNavigationChange({ type: 'workspace:members:updated', workspace_id: workspaceId });
     res.json({ ok: true });
+  });
+
+  /**
+   * Update the department a member belongs to. Department drives space-level
+   * access (see `isSameDepartment` / `canAccessListForTasks`), so changing it
+   * here grants access to the new department's spaces and removes access to
+   * the old one — no extra membership cleanup needed because access is
+   * computed live from `User.department`.
+   *
+   * Admin / super_admin only. Super-admin targets are locked.
+   */
+  router.patch('/workspaces/:workspaceId/members/:memberId/department', requireAuth, async (req, res) => {
+    const { workspaceId, memberId } = req.params;
+    const requestedDepartment = String(req.body?.department || '').trim();
+    if (!requestedDepartment) return res.status(400).json({ message: 'Department required' });
+
+    const currentRole = await getRole(workspaceId, req.session.userId);
+    if (!canManageWorkspace(currentRole)) {
+      return res.status(403).json({ message: 'Only admin can change department' });
+    }
+
+    const memberExists = await WorkspaceMember.findOne({ workspaceId, userId: memberId }).lean();
+    if (!memberExists) return res.status(404).json({ message: 'Member not found in workspace' });
+
+    const targetRoleRow = await UserRole.findOne({ workspaceId, userId: memberId }).lean();
+    if (targetRoleRow?.role === 'super_admin') {
+      return res.status(403).json({ message: "Super admin's department cannot be changed here." });
+    }
+
+    // Validate against the same department list `/public/departments` returns,
+    // so the picker and the validator can never drift apart.
+    const masters = await Space.find({ isMasterTeamSpace: true }).lean();
+    const masterIds = masters.map((m) => m._id);
+    const deptSpaces = masterIds.length
+      ? await Space.find({
+          parentSpaceId: { $in: masterIds },
+          isMasterTeamSpace: { $ne: true },
+        }).lean()
+      : [];
+    const validByKey = new Map();
+    for (const space of deptSpaces) {
+      const label = String(space.name || space.department || '').trim();
+      if (!label) continue;
+      if (label.toLowerCase() === 'general') continue;
+      const key = label.toLowerCase().replace(/\s+/g, '');
+      if (!validByKey.has(key)) validByKey.set(key, label);
+    }
+    const normalized = validByKey.get(
+      requestedDepartment.toLowerCase().replace(/\s+/g, '')
+    );
+    if (!normalized) return res.status(400).json({ message: 'Invalid department' });
+
+    await User.updateOne({ _id: memberId }, { $set: { department: normalized } });
+    broadcastNavigationChange({ type: 'workspace:members:updated', workspace_id: workspaceId });
+    res.json({ ok: true, department: normalized });
   });
 
   /**

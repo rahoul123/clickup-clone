@@ -5,13 +5,16 @@ interface TeamMember {
   id: string;
   label: string;
   role: 'super_admin' | 'admin' | 'manager' | 'team_lead' | 'employee' | 'guest';
+  department?: string | null;
   is_deleted?: boolean;
 }
 
 interface TeamMembersPageProps {
   members: TeamMember[];
   canManageWorkspace: boolean;
+  departments: string[];
   onUpdateMemberRole: (memberId: string, role: 'employee' | 'team_lead' | 'manager' | 'admin' | 'super_admin') => void;
+  onUpdateMemberDepartment: (memberId: string, department: string) => void;
   onRemoveMember: (memberId: string) => void;
   onDeleteSuperAdmin: (memberId: string) => void;
   onRecoverSuperAdmin: (memberId: string) => void;
@@ -20,7 +23,9 @@ interface TeamMembersPageProps {
 export function TeamMembersPage({
   members,
   canManageWorkspace,
+  departments,
   onUpdateMemberRole,
+  onUpdateMemberDepartment,
   onRemoveMember,
   onDeleteSuperAdmin,
   onRecoverSuperAdmin,
@@ -52,6 +57,20 @@ export function TeamMembersPage({
                     </div>
                     {canManageWorkspace && member.role !== 'super_admin' ? (
                       <div className="flex items-center gap-2">
+                        <select
+                          value={member.department ?? ''}
+                          onChange={(e) => onUpdateMemberDepartment(member.id, e.target.value)}
+                          className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground"
+                        >
+                          <option value="" disabled>
+                            {member.department ? member.department : 'Set department'}
+                          </option>
+                          {departments.map((dep) => (
+                            <option key={dep} value={dep}>
+                              {dep}
+                            </option>
+                          ))}
+                        </select>
                         <select
                           value={member.role}
                           onChange={(e) =>

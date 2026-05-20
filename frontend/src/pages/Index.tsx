@@ -50,10 +50,12 @@ const Index = () => {
       id: string;
       label: string;
       role: 'super_admin' | 'admin' | 'manager' | 'team_lead' | 'employee' | 'guest';
+      department?: string | null;
       is_deleted?: boolean;
       deleted_at?: string | null;
     }>
   >([]);
+  const [departmentOptions, setDepartmentOptions] = useState<string[]>([]);
   const [notificationUnreadCount, setNotificationUnreadCount] = useState(0);
   const [rolesByWorkspaceId, setRolesByWorkspaceId] = useState<Record<string, AppRole>>({});
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
@@ -64,6 +66,18 @@ const Index = () => {
   useEffect(() => {
     activeListRef.current = activeList;
   }, [activeList]);
+
+  useEffect(() => {
+    api.public
+      .departments()
+      .then((result) => {
+        const list = Array.isArray((result as { departments?: string[] })?.departments)
+          ? ((result as { departments: string[] }).departments)
+          : [];
+        setDepartmentOptions(list);
+      })
+      .catch(() => setDepartmentOptions([]));
+  }, []);
   const [loading, setLoading] = useState(true);
   const [pageView, setPageView] = useState<
     'home' | 'board' | 'dashboard' | 'notifications' | 'team-members' | 'docs' | 'timesheets' | 'space'
@@ -542,8 +556,10 @@ const Index = () => {
   // handler only touches the piece of state it owns so there's no stampede
   // of re-fetches on every broadcast.
   // ────────────────────────────────────────────────────────────────────
-  useRealtimeEvent<{ task: Task; list_id: string }>('task:created', ({ task }) => {
+  useRealtimeEvent<{ task: Task; list_id: string }>('task:created', ({ task, list_id }) => {
     if (!task?.id) return;
+    const incomingListId = list_id ?? task.list_id;
+    if (!lists.some((l) => l.id === incomingListId)) return;
     setTasks((prev) => (prev.some((t) => t.id === task.id) ? prev : [...prev, task]));
   });
 
@@ -1097,6 +1113,21 @@ const Index = () => {
     }
     await api.app.updateMemberRole(activeWorkspaceId, memberId, role);
     setTeamMembers((prev) => prev.map((member) => (member.id === memberId ? { ...member, role } : member)));
+  };
+
+  const updateMemberDepartment = async (memberId: string, department: string) => {
+    if (!activeWorkspaceId || !department) return;
+    if (!canManageWorkspace) {
+      window.alert('Only admin can change department.');
+      return;
+    }
+    const result = await api.app.updateMemberDepartment(activeWorkspaceId, memberId, department) as
+      | { department?: string }
+      | undefined;
+    const normalized = result?.department ?? department;
+    setTeamMembers((prev) =>
+      prev.map((member) => (member.id === memberId ? { ...member, department: normalized } : member)),
+    );
   };
 
   const deleteSuperAdmin = async (memberId: string) => {
@@ -1923,8 +1954,15 @@ const Index = () => {
             <TeamMembersPage
               members={teamMembers}
               canManageWorkspace={canManageWorkspace}
+              departments={departmentOptions}
               onUpdateMemberRole={(memberId, role) =>
                 updateMemberRole(memberId, role).catch((error) => console.error('Failed to update member role', error))
+              }
+              onUpdateMemberDepartment={(memberId, department) =>
+                updateMemberDepartment(memberId, department).catch((error) => {
+                  console.error('Failed to update member department', error);
+                  toast.error((error as Error)?.message || 'Could not change department.');
+                })
               }
               onRemoveMember={(memberId) =>
                 removeMember(memberId).catch((error) => {

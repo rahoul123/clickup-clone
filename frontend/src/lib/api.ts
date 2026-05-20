@@ -184,6 +184,8 @@ export const api = {
     ) => request(`/workspaces/${workspaceId}/members/create-privileged`, { method: 'POST', body: JSON.stringify(payload) }),
     updateMemberRole: (workspaceId: string, memberId: string, role: 'employee' | 'team_lead' | 'manager' | 'admin' | 'super_admin') =>
       request(`/workspaces/${workspaceId}/members/${memberId}/role`, { method: 'PATCH', body: JSON.stringify({ role }) }),
+    updateMemberDepartment: (workspaceId: string, memberId: string, department: string) =>
+      request(`/workspaces/${workspaceId}/members/${memberId}/department`, { method: 'PATCH', body: JSON.stringify({ department }) }),
     removeMember: (workspaceId: string, memberId: string) =>
       request(`/workspaces/${workspaceId}/members/${memberId}`, { method: 'DELETE' }),
     deleteSuperAdmin: (workspaceId: string, memberId: string) =>

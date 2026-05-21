@@ -561,6 +561,14 @@ export function KanbanBoard({
   };
 
   // Apply active search + filter chips before grouping into columns.
+  // Hard scope: a task only renders on this board if its list is one of the
+  // currently-visible list tabs. Without this guard, anything that ends up in
+  // the parent `tasks` state — stale state from a previous board, a realtime
+  // broadcast that slipped through, a cross-department leak — would show up
+  // here as a phantom card. This is the last line of defense so a user can
+  // never see a task that belongs to a list they aren't currently viewing.
+  const visibleListIdSet = useMemo(() => new Set(listTabs.map((t) => t.id)), [listTabs]);
+
   const filteredTasks = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const prioritySet = new Set(filterPriorities);
@@ -573,6 +581,8 @@ export function KanbanBoard({
     const endOfWeek = new Date(startOfToday.getTime() + 7 * 24 * 60 * 60 * 1000);
 
     return tasks.filter((t) => {
+      if (!visibleListIdSet.has(t.list_id)) return false;
+
       // Text query: match against title + description + assignee display names.
       if (q) {
         const hay = [

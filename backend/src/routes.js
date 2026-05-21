@@ -820,6 +820,7 @@ async function loadAggregatedNavigation(userId) {
       }
 
       const listRows = [...ownLists, ...crossLists];
+      const ownListIdsSet = new Set(ownLists.map((l) => l._id));
       const spaceById = Object.fromEntries(visibleSpaceRows.map((s) => [s._id, s]));
       const contextEntries = listRows
         .map((list) => {
@@ -838,16 +839,23 @@ async function loadAggregatedNavigation(userId) {
         })
         .filter(Boolean);
 
-      return { visibleSpaceRows, listRows, contextEntries };
+      return { visibleSpaceRows, listRows, contextEntries, ownListIdsSet };
     }),
   );
 
   const aggregatedSpaces = [];
   const aggregatedLists = [];
+  // Subset of aggregatedLists that lives in the user's own-access spaces (i.e.
+  // dept-scoped spaces they fully belong to). Excludes cross-department shared
+  // main lists. Home / dashboard use this for strict department isolation so a
+  // marketing user doesn't see web-dev tasks just because the shared list
+  // mechanic crossed the dept boundary.
+  const ownAccessListIds = new Set();
   for (const result of workspaceResults) {
     if (!result) continue;
     aggregatedSpaces.push(...result.visibleSpaceRows);
     aggregatedLists.push(...result.listRows);
+    for (const id of result.ownListIdsSet) ownAccessListIds.add(id);
     for (const [id, ctx] of result.contextEntries) {
       listContextById[id] = ctx;
     }
@@ -889,6 +897,7 @@ async function loadAggregatedNavigation(userId) {
     visibleWorkspaces,
     aggregatedSpaces,
     aggregatedLists,
+    ownAccessListIds,
     listContextById,
     activeListId,
   };
@@ -1508,9 +1517,23 @@ export function buildRoutes({ realtime } = {}) {
     if (nav.error) {
       return res.status(nav.error.status).json({ message: nav.error.message });
     }
-    const { aggregatedLists, listContextById } = nav;
-    const listIds = aggregatedLists.map((l) => l._id);
-    const rawTasks = await hydrateTasksForListIds(listIds);
+    const { aggregatedLists, ownAccessListIds, listContextById, visibleWorkspaces } = nav;
+    // Home strictly shows tasks from the user's own-access (department-scoped)
+    // lists only. Cross-department shared lists AND restricted lists the user
+    // isn't on the allow-list of are excluded so a Marketing user never sees
+    // a Web Dev task — or a private list's task — on their default screen.
+    const rolesByWsId = Object.fromEntries(
+      await Promise.all(
+        visibleWorkspaces.map(async (w) => [w._id, (await getRole(w._id, userId)) ?? 'employee']),
+      ),
+    );
+    const accessibleLists = aggregatedLists.filter((l) => {
+      if (!ownAccessListIds.has(l._id)) return false;
+      const ctx = listContextById[l._id];
+      const wsRole = ctx?.workspace_id ? rolesByWsId[ctx.workspace_id] : 'employee';
+      return canAccessRestrictedList(l, userId, wsRole);
+    });
+    const rawTasks = await hydrateTasksForListIds(accessibleLists.map((l) => l._id));
     const taskIds = rawTasks.map((t) => t.id);
 
     const commentGroups =
